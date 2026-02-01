@@ -1,0 +1,24 @@
+# Core dependencies
+torch>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# LiRPA certification
+auto-LiRPA>=0.4.0
+
+# Geometry operations
+shapely>=2.0.0
+
+# Counterfactual sampling (convex optimization)
+cvxpy>=1.4.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Utilities
+tqdm>=4.65.0
+scikit-learn>=1.3.0
+
+# Development dependencies (optional)
+jupyter>=1.0.0
+notebook>=7.0.0
