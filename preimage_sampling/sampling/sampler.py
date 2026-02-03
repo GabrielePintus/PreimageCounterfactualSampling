@@ -87,7 +87,8 @@ class CounterfactualSampler:
     def __init__(
         self,
         solver: str = 'ECOS',
-        verbose: bool = False
+        verbose: bool = False,
+        distance_norm: int | float = 2
     ):
         """
         Initialize the counterfactual sampler.
@@ -98,6 +99,11 @@ class CounterfactualSampler:
             CVXPY solver name (default: 'ECOS'). Options: 'ECOS', 'OSQP', 'SCS', 'CLARABEL'.
         verbose : bool, optional
             Whether to print verbose output (default: False).
+        distance_norm : int or float, optional
+            Norm to use for the distance objective (default: 2).
+            - 1: L1 norm (Manhattan distance, sparse changes, good for images)
+            - 2: L2 norm (Euclidean distance, smooth changes)
+            - np.inf: L∞ norm (Chebyshev distance, minimize max change)
 
         Raises
         ------
@@ -113,6 +119,7 @@ class CounterfactualSampler:
         self.atlases = {}
         self.solver = solver
         self.verbose = verbose
+        self.distance_norm = distance_norm
 
     def build_atlas(
         self,
@@ -189,10 +196,12 @@ class CounterfactualSampler:
         """
         Project a query point onto a single certified polytope.
 
-        Solves the convex quadratic program:
-            minimize    (1/2) ||z - x_query||²
+        Solves the convex optimization program:
+            minimize    ||z - x_query||_p
             subject to  A z + b >= 0            (LiRPA certification constraints)
                         center - eps <= z <= center + eps  (validity box)
+
+        where p is determined by self.distance_norm.
 
         Parameters
         ----------
@@ -212,13 +221,26 @@ class CounterfactualSampler:
         z_star : np.ndarray or None
             The projected point if successful, None if infeasible.
         distance : float
-            Distance from x_query to z_star (inf if infeasible).
+            Distance from x_query to z_star using the specified norm (inf if infeasible).
         """
         d = len(x_query)
         z = cp.Variable(d)
 
-        # Objective: minimize L2 distance to query
-        objective = cp.Minimize(cp.sum_squares(z - x_query))
+        # Objective: minimize distance in specified norm
+        diff = z - x_query
+        if self.distance_norm == 1:
+            # L1 norm: sum of absolute values (encourages sparsity)
+            objective = cp.Minimize(cp.sum(cp.abs(diff)))
+        elif self.distance_norm == 2:
+            # L2 norm: Euclidean distance (smooth changes)
+            objective = cp.Minimize(cp.sum_squares(diff))
+        elif self.distance_norm == np.inf:
+            # L∞ norm: minimize maximum change
+            objective = cp.Minimize(cp.norm(diff, np.inf))
+        else:
+            # General Lp norm
+            objective = cp.Minimize(cp.norm(diff, self.distance_norm))
+
 
         # Constraints
         constraints = [
@@ -245,7 +267,15 @@ class CounterfactualSampler:
         if z_star is None:
             return None, np.inf
 
-        distance = np.linalg.norm(z_star - x_query)
+        # Compute distance using the same norm
+        if self.distance_norm == 1:
+            distance = np.linalg.norm(z_star - x_query, ord=1)
+        elif self.distance_norm == 2:
+            distance = np.linalg.norm(z_star - x_query, ord=2)
+        elif self.distance_norm == np.inf:
+            distance = np.linalg.norm(z_star - x_query, ord=np.inf)
+        else:
+            distance = np.linalg.norm(z_star - x_query, ord=self.distance_norm)
 
         return z_star, distance
 
