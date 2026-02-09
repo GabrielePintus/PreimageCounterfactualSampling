@@ -322,15 +322,16 @@ class PreimageApproximation:
                         X_batch = X_batch.view(-1, 1, 28, 28)
 
                     # Run LiRPA on batch
-                    lA, lbias, uA, ubias = run_lirpa(
-                        self.model,
-                        label,
-                        X_batch,
-                        self.n_classes,
-                        self.device,
-                        eps=eps,
-                        norm=norm
-                    )
+                    with torch.no_grad():
+                        lA, lbias, uA, ubias = run_lirpa(
+                            self.model,
+                            label,
+                            X_batch,
+                            self.n_classes,
+                            self.device,
+                            eps=eps,
+                            norm=norm
+                        )
 
                     # Store batch results
                     lA_list.append(lA)
