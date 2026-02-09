@@ -21,6 +21,12 @@ from scipy.optimize import minimize
 from typing import Optional, Dict, List, Tuple, Union
 from dataclasses import dataclass
 
+try:
+    import cvxpy as cp
+    CVXPY_AVAILABLE = True
+except ImportError:
+    CVXPY_AVAILABLE = False
+
 from .certification.lirpa import PreimageApproximation
 from .geometry.polytopes import ball_box_constraints, make_polygon
 from .geometry.operations import build_class_union, refine_unions_by_priority
@@ -224,19 +230,191 @@ class CertifiedAtlas:
 
         return self
 
+    @staticmethod
+    def _dual_norm(q) -> float:
+        """Return the dual exponent of Lq: 1/q + 1/q* = 1."""
+        if q == 1:
+            return np.inf
+        elif q == np.inf:
+            return 1
+        else:
+            return q / (q - 1)
+
+    @staticmethod
+    def _norm_conversion_factor(d: int, from_norm, to_norm) -> float:
+        """
+        Return C such that ||x||_{to} <= C * ||x||_{from} for all x in R^d.
+
+        Used to bound how much an Lq-ball of radius delta can extend in the
+        Lp norm of the certified region.
+        """
+        inv_to = 0.0 if to_norm == np.inf else 1.0 / to_norm
+        inv_from = 0.0 if from_norm == np.inf else 1.0 / from_norm
+        exponent = max(0.0, inv_to - inv_from)
+        return d ** exponent
+
+    def _erode_constraints(
+        self,
+        A: np.ndarray,
+        b: np.ndarray,
+        center: np.ndarray,
+        d: int,
+        delta: float,
+        robust_norm
+    ) -> Tuple[np.ndarray, np.ndarray, float, float]:
+        """
+        Compute eroded constraints for delta-robust projection.
+
+        Returns (A_full, b_full, box_eps, ball_eps) or raises if infeasible.
+        """
+        box_eps = self.eps - delta
+        ball_factor = self._norm_conversion_factor(d, robust_norm, self.norm)
+        ball_eps = self.eps - delta * ball_factor
+
+        if box_eps <= 0 or ball_eps <= 0:
+            return None, None, 0.0, 0.0
+
+        # Erode LiRPA constraints: A @ x + b >= delta * ||a_i||_{q*}
+        if delta > 0:
+            q_dual = self._dual_norm(robust_norm)
+            if q_dual == np.inf:
+                row_dual_norms = np.max(np.abs(A), axis=1)
+            elif q_dual == 1:
+                row_dual_norms = np.sum(np.abs(A), axis=1)
+            else:
+                row_dual_norms = np.linalg.norm(A, axis=1, ord=q_dual)
+            b_eroded = b - delta * row_dual_norms
+        else:
+            b_eroded = b
+
+        A_box, b_box = ball_box_constraints(center, box_eps)
+        A_full = np.vstack([A, A_box])
+        b_full = np.concatenate([b_eroded, b_box])
+
+        return A_full, b_full, box_eps, ball_eps
+
+    def _project_cvxpy(
+        self,
+        x0: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        ball_eps: float
+    ) -> Tuple[Optional[np.ndarray], float]:
+        """
+        Project using CVXPY — handles L2 (SOCP) and L1 ball constraints natively.
+        """
+        d = len(x0)
+        z = cp.Variable(d)
+
+        objective = cp.Minimize(cp.sum_squares(z - x0))
+
+        constraints = [
+            A_full @ z + b_full >= 0,
+            z >= center - box_eps,
+            z <= center + box_eps,
+        ]
+
+        # Add the Lp ball constraint (handled natively by CVXPY)
+        if self.norm == 2:
+            constraints.append(cp.norm(z - center, 2) <= ball_eps)
+        elif self.norm == 1:
+            constraints.append(cp.norm(z - center, 1) <= ball_eps)
+        # For L∞, box constraint already covers it
+
+        problem = cp.Problem(objective, constraints)
+        try:
+            problem.solve(solver='CLARABEL', verbose=False)
+        except Exception:
+            return None, np.inf
+
+        if problem.status not in ('optimal', 'optimal_inaccurate') or z.value is None:
+            return None, np.inf
+
+        x_proj = z.value
+        dist = np.linalg.norm(x_proj - x0)
+        return x_proj, dist
+
+    def _project_slsqp(
+        self,
+        x0: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        maxiter: int,
+        tol: float
+    ) -> Tuple[Optional[np.ndarray], float]:
+        """
+        Project using SLSQP — fast for L∞ (all-linear constraints).
+        """
+        d = len(x0)
+
+        def objective(x):
+            return np.sum((x - x0) ** 2)
+
+        def gradient(x):
+            return 2 * (x - x0)
+
+        constraints = [{
+            'type': 'ineq',
+            'fun': lambda x: A_full @ x + b_full,
+            'jac': lambda x: A_full
+        }]
+
+        bounds = [(center[i] - box_eps, center[i] + box_eps) for i in range(d)]
+
+        result = minimize(
+            objective,
+            center,
+            method='SLSQP',
+            jac=gradient,
+            bounds=bounds,
+            constraints=constraints,
+            options={'ftol': tol, 'maxiter': maxiter}
+        )
+
+        if not result.success:
+            return None, np.inf
+
+        x_proj = result.x
+
+        # Verify constraints are satisfied
+        margins = A_full @ x_proj + b_full
+        if np.min(margins) < -1e-7:
+            return None, np.inf
+
+        if np.any(x_proj < center - box_eps - 1e-7) or \
+           np.any(x_proj > center + box_eps + 1e-7):
+            return None, np.inf
+
+        dist = np.linalg.norm(x_proj - x0)
+        return x_proj, dist
+
     def _project_onto_polytope(
         self,
         x0: np.ndarray,
         A: np.ndarray,
         b: np.ndarray,
         center: np.ndarray,
+        delta: float = 0.0,
+        robust_norm: Optional[int] = None,
         maxiter: Optional[int] = None,
         tol: Optional[float] = None
     ) -> Tuple[Optional[np.ndarray], float]:
         """
-        Project point x0 onto the polytope {x : A @ x + b >= 0} ∩ B(center, eps).
+        Project point x0 onto the (optionally eroded) polytope.
 
-        Solves: min ||x - x0||^2  s.t.  A @ x + b >= 0, ||x - center||_p <= eps
+        Solves: min ||x - x0||^2  s.t.  eroded constraints hold
+
+        When delta > 0, the polytope is eroded inward so that the entire
+        B_q(x_cf, delta) ball (in the robustness norm q) lies within the
+        original certified polytope. This guarantees the counterfactual is
+        robust to adversarial perturbations of radius delta in the Lq norm.
+
+        For L∞ norm, uses SLSQP (all constraints are linear).
+        For L2/L1 norms, uses CVXPY which handles SOCP / L1 constraints natively.
 
         Parameters
         ----------
@@ -248,99 +426,33 @@ class CertifiedAtlas:
             LiRPA constraint bias.
         center : np.ndarray
             Center of the polytope (anchor point).
+        delta : float, optional
+            Robustness radius for polytope erosion. Default: 0.0 (no erosion).
+        robust_norm : int or float, optional
+            Lp norm for the robustness ball. Can differ from self.norm (the
+            LiRPA certification norm). Default: None (uses self.norm).
         maxiter : int, optional
             Maximum solver iterations. If None, uses self.solver_maxiter.
         tol : float, optional
             Solver tolerance. If None, uses self.solver_tol.
         """
-        # Use provided params or fall back to instance defaults
         maxiter = maxiter if maxiter is not None else self.solver_maxiter
         tol = tol if tol is not None else self.solver_tol
+        if robust_norm is None:
+            robust_norm = self.norm
 
         d = len(x0)
-
-        # Combine LiRPA constraints with box constraints (box is always valid)
-        A_box, b_box = ball_box_constraints(center, self.eps)
-        A_full = np.vstack([A, A_box])
-        b_full = np.concatenate([b, b_box])
-
-        # Objective: minimize ||x - x0||^2
-        def objective(x):
-            return np.sum((x - x0) ** 2)
-
-        def gradient(x):
-            return 2 * (x - x0)
-
-        # Linear constraints: A_full @ x + b_full >= 0
-        constraints = [{
-            'type': 'ineq',
-            'fun': lambda x: A_full @ x + b_full,
-            'jac': lambda x: A_full
-        }]
-
-        # Add norm-specific ball constraint
-        # LiRPA bounds are only valid within the Lp ball used during computation
-        if self.norm == 2:
-            # L2 ball: ||x - center||_2 <= eps  →  eps^2 - ||x - center||_2^2 >= 0
-            constraints.append({
-                'type': 'ineq',
-                'fun': lambda x: self.eps**2 - np.sum((x - center)**2),
-                'jac': lambda x: -2 * (x - center)
-            })
-        elif self.norm == 1:
-            # L1 ball: ||x - center||_1 <= eps  →  eps - sum(|x - center|) >= 0
-            # This is non-smooth, so we use the box as approximation and verify later
-            pass
-        # For L∞, the box constraint already handles it
-
-        # Bounds for the box (always apply as outer bound)
-        bounds = [(center[i] - self.eps, center[i] + self.eps) for i in range(d)]
-
-        # Start from center (guaranteed feasible if polytope is non-empty)
-        result = minimize(
-            objective,
-            center,
-            method='SLSQP',
-            jac=gradient,
-            bounds=bounds,
-            constraints=constraints,
-            options={'ftol': tol, 'maxiter': maxiter}
+        A_full, b_full, box_eps, ball_eps = self._erode_constraints(
+            A, b, center, d, delta, robust_norm
         )
-
-        if result.success:
-            x_proj = result.x
-
-            # CRITICAL: Verify constraints are actually satisfied
-            # The solver may return points that slightly violate constraints
-            margins = A_full @ x_proj + b_full
-            min_margin = np.min(margins)
-
-            # Reject if any constraint is violated (with small tolerance)
-            if min_margin < -1e-7:
-                return None, np.inf
-
-            # Also verify box constraints explicitly
-            if np.any(x_proj < center - self.eps - 1e-7) or \
-               np.any(x_proj > center + self.eps + 1e-7):
-                return None, np.inf
-
-            # CRITICAL: If using L2 norm, verify point is within L2 ball
-            # The QP uses L∞ box which is LARGER than L2 ball
-            # LiRPA bounds are only valid within the Lp ball used during computation
-            if self.norm == 2:
-                l2_dist = np.linalg.norm(x_proj - center)
-                if l2_dist > self.eps + 1e-7:
-                    return None, np.inf
-            elif self.norm == 1:
-                l1_dist = np.sum(np.abs(x_proj - center))
-                if l1_dist > self.eps + 1e-7:
-                    return None, np.inf
-            # For L∞ norm, box constraint already covers it
-
-            dist = np.linalg.norm(x_proj - x0)
-            return x_proj, dist
-        else:
+        if A_full is None:
             return None, np.inf
+
+        # Dispatch: CVXPY for L2/L1 (handles SOCP / L1 natively), SLSQP for L∞
+        if self.norm in (1, 2) and CVXPY_AVAILABLE:
+            return self._project_cvxpy(x0, A_full, b_full, center, box_eps, ball_eps)
+        else:
+            return self._project_slsqp(x0, A_full, b_full, center, box_eps, maxiter, tol)
 
     def find_counterfactual(
         self,
@@ -348,6 +460,8 @@ class CertifiedAtlas:
         target_class: int,
         method: str = 'bvh',
         k: int = 10,
+        delta: float = 0.0,
+        robust_norm: Optional[int] = None,
         solver_maxiter: Optional[int] = None,
         solver_tol: Optional[float] = None
     ) -> CounterfactualResult:
@@ -366,6 +480,13 @@ class CertifiedAtlas:
         k : int, optional
             For 'knn' method: number of nearest neighbors to try.
             Default: 10.
+        delta : float, optional
+            Robustness radius. When delta > 0, the certified polytopes are eroded
+            inward so that the returned counterfactual is guaranteed robust to
+            perturbations of radius delta. Default: 0.0 (no robustness margin).
+        robust_norm : int or float, optional
+            Lp norm for the robustness ball (e.g. 1, 2, np.inf). Can differ from
+            the LiRPA certification norm (self.norm). Default: None (uses self.norm).
         solver_maxiter : int, optional
             Maximum iterations for QP solver. If None, uses instance default.
         solver_tol : float, optional
@@ -395,6 +516,8 @@ class CertifiedAtlas:
                     bd['lA'][idx],
                     bd['lbias'][idx],
                     bd['X'][idx],
+                    delta=delta,
+                    robust_norm=robust_norm,
                     maxiter=solver_maxiter,
                     tol=solver_tol
                 )
@@ -419,6 +542,8 @@ class CertifiedAtlas:
                     bd['lA'][idx],
                     bd['lbias'][idx],
                     bd['X'][idx],
+                    delta=delta,
+                    robust_norm=robust_norm,
                     maxiter=solver_maxiter,
                     tol=solver_tol
                 )
@@ -447,6 +572,8 @@ class CertifiedAtlas:
         target_class: int,
         method: str = 'bvh',
         k: int = 10,
+        delta: float = 0.0,
+        robust_norm: Optional[int] = None,
         solver_maxiter: Optional[int] = None,
         solver_tol: Optional[float] = None
     ) -> List[CounterfactualResult]:
@@ -463,6 +590,10 @@ class CertifiedAtlas:
             Search method: 'bvh' or 'knn'. Default: 'bvh'.
         k : int, optional
             For 'knn' method: number of nearest neighbors. Default: 10.
+        delta : float, optional
+            Robustness radius for polytope erosion. Default: 0.0.
+        robust_norm : int or float, optional
+            Lp norm for the robustness ball. Default: None (uses self.norm).
         solver_maxiter : int, optional
             Maximum iterations for QP solver. If None, uses instance default.
         solver_tol : float, optional
@@ -477,6 +608,8 @@ class CertifiedAtlas:
         for x in X_query:
             results.append(self.find_counterfactual(
                 x, target_class, method, k,
+                delta=delta,
+                robust_norm=robust_norm,
                 solver_maxiter=solver_maxiter,
                 solver_tol=solver_tol
             ))
