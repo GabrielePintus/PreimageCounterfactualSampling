@@ -60,6 +60,7 @@ def run_lirpa(
     """
     # Wrap model with one-vs-all constraint layer and move to device
     wrapped = WrappedModel(model, label, device, n_labels=n_classes).to(device)
+    wrapped.eval()
 
     # Create perturbation specification
     ptb = PerturbationLpNorm(norm=norm, eps=eps)
