@@ -56,43 +56,41 @@ class ConvEncoder(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2), # Output: (batch_size, 64, 3, 3)
 
             nn.Conv2d(64, latent_dim, kernel_size=3, stride=1, padding=0), # Output: (batch_size, 64, 1, 1)
-            nn.Flatten()
         )
 
-    def forward(self, x): return self.net(x)
+    def forward(self, x): return self.net(x).view(x.size(0), -1) # Flatten to (batch_size, latent_dim)
 
 
 
 class ConvDecoder(nn.Module):
     def __init__(self, latent_dim=32):
         super(ConvDecoder, self).__init__()
+        self.latent_dim = latent_dim
 
+        # Note: no nn.Unflatten — we reshape manually in forward() to avoid
+        # onnx::Mod operation that auto_LiRPA doesn't support
         self.net = nn.Sequential(
-            # 1. Start from the latent vector (latent_dim, 1, 1)
-            nn.Unflatten(1, (latent_dim, 1, 1)),
-
-            # 2. (latent_dim, 1, 1) -> (32, 3, 3)
+            # 1. (latent_dim, 1, 1) -> (32, 3, 3)
             nn.ConvTranspose2d(latent_dim, 32, kernel_size=3, stride=1, padding=0),
             nn.BatchNorm2d(32),
             nn.LeakyReLU(0.1),
 
-            # 3. (32, 3, 3) -> (16, 7, 7)
+            # 2. (32, 3, 3) -> (16, 7, 7)
             nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=0),
             nn.BatchNorm2d(16),
             nn.LeakyReLU(0.1),
 
-            # 4. (16, 7, 7) -> (8, 14, 14)
+            # 3. (16, 7, 7) -> (8, 14, 14)
             nn.ConvTranspose2d(16, 8, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(8),
             nn.LeakyReLU(0.1),
 
-            # 5. (8, 14, 14) -> (1, 28, 28)
+            # 4. (8, 14, 14) -> (1, 28, 28)
             nn.ConvTranspose2d(8, 1, kernel_size=4, stride=2, padding=1),
             nn.Sigmoid()
         )
 
-    def forward(self, x): 
-        return self.net(x)
+    def forward(self, x): return self.net(x.view(-1, self.latent_dim, 1, 1))
 
 
 
