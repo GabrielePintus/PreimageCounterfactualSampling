@@ -149,7 +149,8 @@ class CertifiedAtlas:
         max_samples_per_class: Optional[int] = None,
         batch_size: Optional[int] = None,
         build_unions: bool = False,
-        verbose: bool = True
+        verbose: bool = True,
+        dtype=None
     ) -> 'CertifiedAtlas':
         """
         Build the certified atlas by computing LiRPA bounds and spatial indices.
@@ -192,7 +193,8 @@ class CertifiedAtlas:
             eps=eps,
             norm=norm,
             max_samples_per_class=max_samples_per_class,
-            batch_size=batch_size
+            batch_size=batch_size,
+            dtype=dtype if dtype is not None else torch.float32
         )
 
         # Step 2: Build BVH spatial index for each class

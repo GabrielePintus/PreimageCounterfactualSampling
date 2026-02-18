@@ -213,6 +213,7 @@ class PreimageApproximation:
             x=(self.X_selected_bounded, ), 
             # method="crown-optimized", 
             method='backward',
+            # method="ibp",
             return_A=True,
             needed_A_dict=A
         )

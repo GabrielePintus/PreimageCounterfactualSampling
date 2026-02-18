@@ -18,7 +18,8 @@ def run_lirpa(
     n_classes: int,
     device: torch.device,
     eps: float = 0.1,
-    norm: int = 2
+    norm: int = 2,
+    dtype: torch.dtype = torch.float32
 ) -> tuple:
     """
     Run LiRPA backward-mode bound propagation for a single class.
@@ -59,8 +60,11 @@ def run_lirpa(
         Upper bound biases, shape (N, n_classes-1).
     """
     # Wrap model with one-vs-all constraint layer and move to device
-    wrapped = WrappedModel(model, label, device, n_labels=n_classes).to(device)
+    wrapped = WrappedModel(model, label, device, n_labels=n_classes).to(device).to(dtype)
     wrapped.eval()
+
+    # Cast input to match model dtype
+    X = X.to(dtype)
 
     # Create perturbation specification
     ptb = PerturbationLpNorm(norm=norm, eps=eps)
@@ -80,6 +84,8 @@ def run_lirpa(
     _, _, A_dict = bounded_model.compute_bounds(
         x=(X_bounded,),
         method='backward',
+        # method = 'crown-optimized',
+        # method='alpha-crown',
         return_A=True,
         needed_A_dict=needed_A,
     )
@@ -87,11 +93,11 @@ def run_lirpa(
     # Extract A matrices for the input
     A = A_dict[bounded_model.output_name[0]][bounded_model.input_name[0]]
 
-    # Get lower and upper bounds
-    lA = A['lA'].detach().cpu().numpy()
-    lbias = A['lbias'].detach().cpu().numpy()
-    uA = A['uA'].detach().cpu().numpy()
-    ubias = A['ubias'].detach().cpu().numpy()
+    # Get lower and upper bounds (always convert to float32 for downstream numpy)
+    lA = A['lA'].detach().cpu().float().numpy()
+    lbias = A['lbias'].detach().cpu().float().numpy()
+    uA = A['uA'].detach().cpu().float().numpy()
+    ubias = A['ubias'].detach().cpu().float().numpy()
 
     # Handle both 2D (N, d) and 4D (N, C, H, W) input shapes
     N = X.shape[0]
@@ -266,7 +272,8 @@ class PreimageApproximation:
         eps: float = 0.1,
         norm: int = 2,
         max_samples_per_class: int = None,
-        batch_size: int = None
+        batch_size: int = None,
+        dtype: torch.dtype = torch.float32
     ) -> dict:
         """
         Compute LiRPA bounds for all classes.
@@ -316,7 +323,7 @@ class PreimageApproximation:
                 for i in range(n_batches):
                     start_idx = i * batch_size
                     end_idx = min((i + 1) * batch_size, len(X))
-                    X_batch = X[start_idx:end_idx].float().to(self.device)
+                    X_batch = X[start_idx:end_idx].to(dtype).to(self.device)
 
                     # Reshape for CNN if needed
                     if self.cnn:
@@ -331,7 +338,8 @@ class PreimageApproximation:
                             self.n_classes,
                             self.device,
                             eps=eps,
-                            norm=norm
+                            norm=norm,
+                            dtype=dtype
                         )
 
                     # Store batch results
@@ -360,7 +368,7 @@ class PreimageApproximation:
 
             else:
                 # Process all at once (original behavior)
-                X = X.float().to(self.device)
+                X = X.to(dtype).to(self.device)
 
                 # Reshape for CNN if needed
                 if self.cnn:
@@ -374,7 +382,8 @@ class PreimageApproximation:
                     self.n_classes,
                     self.device,
                     eps=eps,
-                    norm=norm
+                    norm=norm,
+                    dtype=dtype
                 )
 
                 # Store bounds - flatten X for CNN to make it compatible with sampler
