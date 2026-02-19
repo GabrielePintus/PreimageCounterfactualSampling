@@ -1,0 +1,50 @@
+trainer:
+  max_epochs: 50
+  accelerator: gpu
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: preimage-sampling
+      save_dir: logs/
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: checkpoints/classifier/
+      filename: "MNIST-Classifier-{epoch:03d}-{val/loss:.4f}"
+      monitor: val/loss
+      mode: min
+      save_top_k: 1                          # best checkpoint
+      save_last: true                      # plus a copy of the final epoch
+      auto_insert_metric_name: false       # keep filename clean
+      every_n_epochs: 1
+      save_on_train_epoch_end: true
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: epoch
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: "CertifiedCounterfactuals"
+      name: "MNIST-Classifier"
+      log_model: true
+
+model:
+  class_path: training.lit_classifier.LitClassifier
+  init_args:
+    model:
+      class_path: models.classifiers.MNISTClassifier
+    
+    initial_lr: 1e-2
+    final_lr: 1e-6
+    weight_decay: 1e-4
+    warmup_steps: 500
+    
+
+data:
+  class_path: training.datamodules.mnist.MNISTDataModule
+  init_args:
+    data_dir: data/
+    batch_size: 64
+    val_size: 5000
+    num_workers: 4
+    augment: true

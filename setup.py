@@ -1,4 +1,4 @@
-"""Setup script for preimage_sampling package."""
+"""Setup script for preimage_sampling, models, and training packages."""
 
 from setuptools import setup, find_packages
 from pathlib import Path
@@ -9,13 +9,14 @@ long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists
 
 setup(
     name="preimage_sampling",
-    version="0.1.0",
+    version="0.2.0",
     author="Gabriele Pintus",
     description="Certified Polyhedral Projection for Robust Counterfactual Explanations",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/gabrielepintus/PreimageCounterfactualSampling",
-    packages=find_packages(exclude=["tests", "notebooks", "data"]),
+    package_dir={"": "src"},
+    packages=find_packages(where="src"),
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Science/Research",
@@ -30,6 +31,7 @@ setup(
     python_requires=">=3.9",
     install_requires=[
         "torch>=2.0.0",
+        "torchvision>=0.15.0",
         "numpy>=1.24.0",
         "scipy>=1.10.0",
         "auto-LiRPA>=0.4.0",
@@ -38,6 +40,7 @@ setup(
         "matplotlib>=3.7.0",
         "tqdm>=4.65.0",
         "scikit-learn>=1.3.0",
+        "lightning>=2.0.0",
     ],
     extras_require={
         "dev": [

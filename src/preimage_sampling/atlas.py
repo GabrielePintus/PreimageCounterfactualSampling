@@ -302,7 +302,8 @@ class CertifiedAtlas:
         b_full: np.ndarray,
         center: np.ndarray,
         box_eps: float,
-        ball_eps: float
+        ball_eps: float,
+        fixed_dims: Optional[np.ndarray] = None
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Project using CVXPY — handles L2 (SOCP) and L1 ball constraints natively.
@@ -325,6 +326,10 @@ class CertifiedAtlas:
             constraints.append(cp.norm(z - center, 1) <= ball_eps)
         # For L∞, box constraint already covers it
 
+        # Fix specified dimensions to their query values
+        if fixed_dims is not None and len(fixed_dims) > 0:
+            constraints.append(z[fixed_dims] == x0[fixed_dims])
+
         problem = cp.Problem(objective, constraints)
         try:
             problem.solve(solver='CLARABEL', verbose=False)
@@ -346,7 +351,8 @@ class CertifiedAtlas:
         center: np.ndarray,
         box_eps: float,
         maxiter: int,
-        tol: float
+        tol: float,
+        fixed_dims: Optional[np.ndarray] = None
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Project using SLSQP — fast for L∞ (all-linear constraints).
@@ -367,9 +373,20 @@ class CertifiedAtlas:
 
         bounds = [(center[i] - box_eps, center[i] + box_eps) for i in range(d)]
 
+        # Fix specified dimensions: tighten bounds to a single value
+        if fixed_dims is not None:
+            for i in fixed_dims:
+                bounds[i] = (x0[i], x0[i])
+
+        # Start from center, but snap fixed dims to their required values so the
+        # initial point already satisfies the box bounds.
+        x_init = center.copy()
+        if fixed_dims is not None:
+            x_init[fixed_dims] = x0[fixed_dims]
+
         result = minimize(
             objective,
-            center,
+            x_init,
             method='SLSQP',
             jac=gradient,
             bounds=bounds,
@@ -377,12 +394,11 @@ class CertifiedAtlas:
             options={'ftol': tol, 'maxiter': maxiter}
         )
 
-        if not result.success:
-            return None, np.inf
-
         x_proj = result.x
 
-        # Verify constraints are satisfied
+        # Do NOT trust result.success: SLSQP reports failure whenever the gradient
+        # tolerance isn't met (common when the optimum lies on the box boundary).
+        # Instead, verify feasibility directly.
         margins = A_full @ x_proj + b_full
         if np.min(margins) < -1e-7:
             return None, np.inf
@@ -403,7 +419,8 @@ class CertifiedAtlas:
         delta: float = 0.0,
         robust_norm: Optional[int] = None,
         maxiter: Optional[int] = None,
-        tol: Optional[float] = None
+        tol: Optional[float] = None,
+        fixed_dims: Optional[np.ndarray] = None
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Project point x0 onto the (optionally eroded) polytope.
@@ -452,9 +469,11 @@ class CertifiedAtlas:
 
         # Dispatch: CVXPY for L2/L1 (handles SOCP / L1 natively), SLSQP for L∞
         if self.norm in (1, 2) and CVXPY_AVAILABLE:
-            return self._project_cvxpy(x0, A_full, b_full, center, box_eps, ball_eps)
+            return self._project_cvxpy(x0, A_full, b_full, center, box_eps, ball_eps,
+                                       fixed_dims=fixed_dims)
         else:
-            return self._project_slsqp(x0, A_full, b_full, center, box_eps, maxiter, tol)
+            return self._project_slsqp(x0, A_full, b_full, center, box_eps, maxiter, tol,
+                                       fixed_dims=fixed_dims)
 
     def find_counterfactual(
         self,
@@ -465,7 +484,8 @@ class CertifiedAtlas:
         delta: float = 0.0,
         robust_norm: Optional[int] = None,
         solver_maxiter: Optional[int] = None,
-        solver_tol: Optional[float] = None
+        solver_tol: Optional[float] = None,
+        fixed_dims: Optional[np.ndarray] = None
     ) -> CounterfactualResult:
         """
         Find the closest counterfactual for a query point.
@@ -493,6 +513,9 @@ class CertifiedAtlas:
             Maximum iterations for QP solver. If None, uses instance default.
         solver_tol : float, optional
             Tolerance for QP solver. If None, uses instance default.
+        fixed_dims : np.ndarray of int, optional
+            Indices of embedding dimensions that must remain equal to the query
+            value. Use ``get_fixed_dims()`` to convert feature names to indices.
 
         Returns
         -------
@@ -521,7 +544,8 @@ class CertifiedAtlas:
                     delta=delta,
                     robust_norm=robust_norm,
                     maxiter=solver_maxiter,
-                    tol=solver_tol
+                    tol=solver_tol,
+                    fixed_dims=fixed_dims
                 )
 
             bvh = self.bvh_indices[target_class]
@@ -547,7 +571,8 @@ class CertifiedAtlas:
                     delta=delta,
                     robust_norm=robust_norm,
                     maxiter=solver_maxiter,
-                    tol=solver_tol
+                    tol=solver_tol,
+                    fixed_dims=fixed_dims
                 )
                 n_qp += 1
 
@@ -577,7 +602,8 @@ class CertifiedAtlas:
         delta: float = 0.0,
         robust_norm: Optional[int] = None,
         solver_maxiter: Optional[int] = None,
-        solver_tol: Optional[float] = None
+        solver_tol: Optional[float] = None,
+        fixed_dims: Optional[np.ndarray] = None
     ) -> List[CounterfactualResult]:
         """
         Find counterfactuals for a batch of query points.
@@ -613,7 +639,8 @@ class CertifiedAtlas:
                 delta=delta,
                 robust_norm=robust_norm,
                 solver_maxiter=solver_maxiter,
-                solver_tol=solver_tol
+                solver_tol=solver_tol,
+                fixed_dims=fixed_dims
             ))
         return results
 

@@ -25,9 +25,6 @@ __version__ = "0.2.0"
 # High-level API (recommended)
 from .atlas import CertifiedAtlas, CounterfactualResult
 
-# Models
-from .models import SimpleClassifier, MNISTClassifier
-
 # Lower-level components (for advanced users)
 from .certification import WrappedModel, PreimageApproximation
 from .sampling import CounterfactualSampler
@@ -37,9 +34,6 @@ __all__ = [
     # High-level API
     "CertifiedAtlas",
     "CounterfactualResult",
-    # Models
-    "SimpleClassifier",
-    "MNISTClassifier",
     # Lower-level components
     "WrappedModel",
     "PreimageApproximation",
