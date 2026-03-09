@@ -37,8 +37,19 @@ class NearestNeighborMethod(ProbabilisticMethod):
         if not np.any(target_mask):
             raise ValueError(f"No training samples available for target_class={target_class}")
 
-        x_target = self._x_train[target_mask]
+        # NICE requires the nearest unlike neighbour to be correctly classified by
+        # the model (i.e. f(xn) == yn), as stated in Algorithm 1 line 8 of the paper:
+        # "FIND-NEAREST-UNLIKE-NEIGHBOUR(x0)" with yn == ŷn.
+        x_candidate = self._x_train[target_mask]
         candidate_indices = np.flatnonzero(target_mask)
+        predicted = model.predict(x_candidate)
+        correct_mask = predicted == target_class
+        if np.any(correct_mask):
+            x_target = x_candidate[correct_mask]
+            candidate_indices = candidate_indices[correct_mask]
+        else:
+            # Fall back to all target-label instances if none are correctly classified.
+            x_target = x_candidate
 
         distances = np.linalg.norm(x_target - x0[None, :], ord=2, axis=1)
         best_local_idx = int(np.argmin(distances))

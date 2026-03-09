@@ -159,12 +159,12 @@ class FACEMethod(BaseCounterfactualMethod):
                 graph.remove_edge(i, j)
                 continue
 
-            # Fast midpoint density proxy: geometric mean of endpoint densities.
-            # This keeps density-weighted shortest paths practical on larger graphs.
-            p_i = float(self._density[i]) if self._density is not None else 1.0
-            p_j = float(self._density[j]) if self._density is not None else 1.0
-            p_mid = float(np.sqrt(max(p_i, 1e-12) * max(p_j, 1e-12)))
-            edge_cost = float(dist / max(p_mid, 1e-12))
+            # Evaluate KDE at the true midpoint (zi+zj)/2, as in Algorithm 1 of the paper.
+            # Edge weight: w(p̂(mid)) · d(xi, xj) with w(z) = -log(z), the weight function
+            # used in the FACE experiments (Section 4).
+            mid = ((zi + zj) / 2.0).reshape(1, -1)
+            p_mid = float(np.exp(self._kde.score_samples(mid)[0]))
+            edge_cost = float(-np.log(max(p_mid, 1e-300)) * dist)
             if self.cost_fn is not None:
                 edge_cost = float(self.cost_fn(xi, xj))
 

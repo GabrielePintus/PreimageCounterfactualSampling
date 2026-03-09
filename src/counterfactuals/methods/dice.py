@@ -73,9 +73,11 @@ class DiceMethod(ProbabilisticMethod):
     def fit(self, x_train: np.ndarray, y_train: np.ndarray, model: ModelInterface) -> None:
         del y_train, model
         x_train = np.asarray(x_train, dtype=np.float32)
-        std = np.std(x_train, axis=0)
-        std[std == 0.0] = 1.0
-        self._feature_scale = std
+        # Feature scale = MAD (Median Absolute Deviation), matching DiCE's inverse-MAD weights.
+        # Dividing by MAD is equivalent to multiplying by 1/MAD, i.e. w_j = 1/MAD_j.
+        mad = np.median(np.abs(x_train - np.median(x_train, axis=0)), axis=0)
+        mad[mad == 0.0] = 1.0
+        self._feature_scale = mad
         self._x_min = np.min(x_train, axis=0)
         self._x_max = np.max(x_train, axis=0)
         self._is_fitted = True
@@ -212,11 +214,13 @@ class DiceMethod(ProbabilisticMethod):
         probs = model.predict_proba(candidates)
         target_prob = np.clip(probs[:, target_class], 1e-7, 1.0 - 1e-7)
 
-        threshold = self._effective_stopping_threshold(target_class)
         if self.yloss_type == "hinge_loss":
-            if target_class == 1:
-                return float(np.mean(np.maximum(0.0, threshold - target_prob)))
-            return float(np.mean(np.maximum(0.0, target_prob - threshold)))
+            # Convert probability to logit, then apply standard SVM-style hinge in logit space.
+            # Signed label: +1 for target class 1, -1 for target class 0.
+            # Loss = mean(ReLU(1 - y_signed * logit)), matching DiCE's exact hinge formula.
+            logits = np.log(target_prob / (1.0 - target_prob))
+            y_signed = 2.0 * float(target_class) - 1.0
+            return float(np.mean(np.maximum(0.0, 1.0 - y_signed * logits)))
         if self.yloss_type == "log_loss":
             return float(np.mean(-np.log(target_prob)))
         # l2_loss
@@ -224,17 +228,25 @@ class DiceMethod(ProbabilisticMethod):
         return float(np.mean((target_prob - target_val) ** 2))
 
     def _proximity_loss(self, candidates: np.ndarray, x0: np.ndarray) -> np.ndarray:
-        return np.linalg.norm((candidates - x0[None, :]) / self._feature_scale[None, :], ord=1, axis=1)
+        # Normalized by d (number of features) to match DiCE's 1/(d*K) normalization.
+        d = x0.shape[0]
+        return np.linalg.norm((candidates - x0[None, :]) / self._feature_scale[None, :], ord=1, axis=1) / d
 
     def _diversity(self, candidates: np.ndarray) -> float:
+        # DPP (Determinantal Point Process) diversity: det(K) where
+        # K[i,j] = 1 / (1 + weighted_L1(ci, cj)), weight = 1/MAD per feature.
+        # Diagonal gets +0.0001 for numerical stability (as in the official repo).
         if candidates.shape[0] <= 1:
             return 0.0
-        scaled = candidates / self._feature_scale[None, :]
-        diffs = scaled[:, None, :] - scaled[None, :, :]
-        dists = np.linalg.norm(diffs, ord=2, axis=2)
-        tri = np.triu_indices(candidates.shape[0], k=1)
-        pairwise = dists[tri]
-        return float(np.mean(pairwise)) if pairwise.size > 0 else 0.0
+        n = candidates.shape[0]
+        K = np.zeros((n, n), dtype=np.float64)
+        for i in range(n):
+            for j in range(n):
+                dist = float(np.sum(np.abs(candidates[i] - candidates[j]) / self._feature_scale))
+                K[i, j] = 1.0 / (1.0 + dist)
+                if i == j:
+                    K[i, j] += 0.0001
+        return float(np.linalg.det(K))
 
     def _validity_mask(
         self,
