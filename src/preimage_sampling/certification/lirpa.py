@@ -83,9 +83,9 @@ def run_lirpa(
     # Compute bounds using backward mode
     _, _, A_dict = bounded_model.compute_bounds(
         x=(X_bounded,),
-        method='backward',
-        # method = 'crown-optimized',
-        # method='alpha-crown',
+        method='backward',       # CROWN: fast but loose for deep models
+        # method='alpha-crown',      # alpha-CROWN: slower but much tighter
+        # method='crown-optimized',
         return_A=True,
         needed_A_dict=needed_A,
     )
@@ -273,7 +273,8 @@ class PreimageApproximation:
         norm: int = 2,
         max_samples_per_class: int = None,
         batch_size: int = None,
-        dtype: torch.dtype = torch.float32
+        dtype: torch.dtype = torch.float32,
+        eps_array: np.ndarray = None,
     ) -> dict:
         """
         Compute LiRPA bounds for all classes.
@@ -284,7 +285,8 @@ class PreimageApproximation:
         Parameters
         ----------
         eps : float, optional
-            Perturbation radius (default: 0.1).
+            Perturbation radius used for all samples when ``eps_array`` is not
+            provided (default: 0.1).
         norm : int, optional
             Lp norm for perturbation (default: 2).
         max_samples_per_class : int, optional
@@ -292,6 +294,14 @@ class PreimageApproximation:
         batch_size : int, optional
             Process samples in batches to save GPU memory. If None, process all at once.
             Recommended: 10-20 for MNIST on limited GPU memory.
+            Ignored when ``eps_array`` contains varying values (samples are
+            processed one at a time in that case).
+        eps_array : np.ndarray, optional
+            Per-sample epsilon values aligned with the full dataset, shape
+            ``(N_total,)``.  When provided, each sample is certified with its
+            own epsilon.  If all values in a class are equal the existing batch
+            path is used (no performance regression).  Otherwise samples are
+            processed individually.
 
         Returns
         -------
@@ -302,102 +312,146 @@ class PreimageApproximation:
             - 'uA': upper bound A matrices (N, k-1, d)
             - 'ubias': upper bound biases (N, k-1)
             - 'X': original samples (N, d)
+            - 'eps': per-sample epsilon values (N,)
         """
         all_bounds = {}
+        labels_tensor = self.dataset.tensors[1]
 
         for label in tqdm(range(self.n_classes), desc="Computing bounds"):
+            label_mask = labels_tensor == label
+
             # Extract samples for this class
-            X = self.dataset.tensors[0][self.dataset.tensors[1] == label]
+            X = self.dataset.tensors[0][label_mask]
 
             if max_samples_per_class is not None:
                 X = X[:max_samples_per_class]
+                label_mask_np = label_mask.numpy()
+                # Rebuild a trimmed mask so eps_label aligns with the trimmed X
+                indices = np.where(label_mask_np)[0][:max_samples_per_class]
+            else:
+                indices = None  # use label_mask directly
 
-            # Process in batches if batch_size is specified
-            if batch_size is not None and len(X) > batch_size:
+            # Determine per-sample eps for this class
+            if eps_array is not None:
+                if indices is not None:
+                    eps_label = eps_array[indices]
+                else:
+                    eps_label = eps_array[label_mask.numpy()]
+            else:
+                eps_label = np.full(len(X), eps)
+
+            # Decide processing mode
+            eps_is_constant = np.all(eps_label == eps_label[0])
+
+            if eps_is_constant:
+                # ----------------------------------------------------------------
+                # Batch path (original behaviour, or constant-eps shortcut)
+                # ----------------------------------------------------------------
+                eps_scalar = float(eps_label[0])
+
+                if batch_size is not None and len(X) > batch_size:
+                    lA_list, lbias_list = [], []
+                    uA_list, ubias_list = [], []
+                    X_stored_list = []
+
+                    n_batches = (len(X) + batch_size - 1) // batch_size
+
+                    for i in range(n_batches):
+                        start_idx = i * batch_size
+                        end_idx = min((i + 1) * batch_size, len(X))
+                        X_batch = X[start_idx:end_idx].to(dtype).to(self.device)
+
+                        if self.cnn:
+                            X_batch = X_batch.view(-1, 1, 28, 28)
+
+                        with torch.no_grad():
+                            lA, lbias, uA, ubias = run_lirpa(
+                                self.model, label, X_batch, self.n_classes,
+                                self.device, eps=eps_scalar, norm=norm, dtype=dtype
+                            )
+
+                        lA_list.append(lA)
+                        lbias_list.append(lbias)
+                        uA_list.append(uA)
+                        ubias_list.append(ubias)
+
+                        X_batch_stored = X_batch.cpu().numpy()
+                        if self.cnn:
+                            X_batch_stored = X_batch_stored.reshape(X_batch_stored.shape[0], -1)
+                        X_stored_list.append(X_batch_stored)
+
+                        del X_batch
+                        if self.device.type == 'cuda':
+                            torch.cuda.empty_cache()
+
+                    lA = np.concatenate(lA_list, axis=0)
+                    lbias = np.concatenate(lbias_list, axis=0)
+                    uA = np.concatenate(uA_list, axis=0)
+                    ubias = np.concatenate(ubias_list, axis=0)
+                    X_stored = np.concatenate(X_stored_list, axis=0)
+
+                else:
+                    X_dev = X.to(dtype).to(self.device)
+                    if self.cnn:
+                        X_dev = X_dev.view(-1, 1, 28, 28)
+
+                    with torch.no_grad():
+                        lA, lbias, uA, ubias = run_lirpa(
+                            self.model, label, X_dev, self.n_classes,
+                            self.device, eps=eps_scalar, norm=norm, dtype=dtype
+                        )
+
+                    X_stored = X_dev.cpu().numpy()
+                    if self.cnn:
+                        X_stored = X_stored.reshape(X_stored.shape[0], -1)
+
+            else:
+                # ----------------------------------------------------------------
+                # Per-sample path: loop one sample at a time
+                # ----------------------------------------------------------------
                 lA_list, lbias_list = [], []
                 uA_list, ubias_list = [], []
                 X_stored_list = []
 
-                n_batches = (len(X) + batch_size - 1) // batch_size
+                for i in range(len(X)):
+                    X_single = X[i:i+1].to(dtype).to(self.device)
 
-                for i in range(n_batches):
-                    start_idx = i * batch_size
-                    end_idx = min((i + 1) * batch_size, len(X))
-                    X_batch = X[start_idx:end_idx].to(dtype).to(self.device)
-
-                    # Reshape for CNN if needed
                     if self.cnn:
-                        X_batch = X_batch.view(-1, 1, 28, 28)
+                        X_single = X_single.view(-1, 1, 28, 28)
 
-                    # Run LiRPA on batch
                     with torch.no_grad():
-                        lA, lbias, uA, ubias = run_lirpa(
-                            self.model,
-                            label,
-                            X_batch,
-                            self.n_classes,
-                            self.device,
-                            eps=eps,
-                            norm=norm,
-                            dtype=dtype
+                        lA_i, lbias_i, uA_i, ubias_i = run_lirpa(
+                            self.model, label, X_single, self.n_classes,
+                            self.device, eps=float(eps_label[i]), norm=norm, dtype=dtype
                         )
 
-                    # Store batch results
-                    lA_list.append(lA)
-                    lbias_list.append(lbias)
-                    uA_list.append(uA)
-                    ubias_list.append(ubias)
+                    lA_list.append(lA_i)
+                    lbias_list.append(lbias_i)
+                    uA_list.append(uA_i)
+                    ubias_list.append(ubias_i)
 
-                    # Store X - flatten for CNN
-                    X_batch_stored = X_batch.cpu().numpy()
+                    X_single_stored = X_single.cpu().numpy()
                     if self.cnn:
-                        X_batch_stored = X_batch_stored.reshape(X_batch_stored.shape[0], -1)
-                    X_stored_list.append(X_batch_stored)
+                        X_single_stored = X_single_stored.reshape(1, -1)
+                    X_stored_list.append(X_single_stored)
 
-                    # Free GPU memory
-                    del X_batch
+                    del X_single
                     if self.device.type == 'cuda':
                         torch.cuda.empty_cache()
 
-                # Concatenate all batches
                 lA = np.concatenate(lA_list, axis=0)
                 lbias = np.concatenate(lbias_list, axis=0)
                 uA = np.concatenate(uA_list, axis=0)
                 ubias = np.concatenate(ubias_list, axis=0)
                 X_stored = np.concatenate(X_stored_list, axis=0)
 
-            else:
-                # Process all at once (original behavior)
-                X = X.to(dtype).to(self.device)
-
-                # Reshape for CNN if needed
-                if self.cnn:
-                    X = X.view(-1, 1, 28, 28)
-
-                # Run LiRPA
-                lA, lbias, uA, ubias = run_lirpa(
-                    self.model,
-                    label,
-                    X,
-                    self.n_classes,
-                    self.device,
-                    eps=eps,
-                    norm=norm,
-                    dtype=dtype
-                )
-
-                # Store bounds - flatten X for CNN to make it compatible with sampler
-                X_stored = X.cpu().numpy()
-                if self.cnn:
-                    # Flatten (N, 1, 28, 28) -> (N, 784)
-                    X_stored = X_stored.reshape(X_stored.shape[0], -1)
-
             all_bounds[label] = {
                 'lA': lA,
                 'lbias': lbias,
                 'uA': uA,
                 'ubias': ubias,
-                'X': X_stored
+                'X': X_stored,
+                'eps': eps_label,
             }
 
         return all_bounds

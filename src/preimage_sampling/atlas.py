@@ -28,6 +28,7 @@ except ImportError:
     CVXPY_AVAILABLE = False
 
 from .certification.lirpa import PreimageApproximation
+from .eps_strategies import EpsStrategy, ConstantEpsStrategy
 from .geometry.polytopes import ball_box_constraints, make_polygon
 from .geometry.operations import build_class_union, refine_unions_by_priority
 from .indexing.bvh import BVHIndex
@@ -86,10 +87,13 @@ class CertifiedAtlas:
         Number of classes in the dataset.
     bounds : dict or None
         LiRPA bounds for each class (after calling build()).
+        Each entry contains an 'eps' key with per-sample epsilon values.
     bvh_indices : dict or None
         BVH spatial indices for each class (after calling build()).
     eps : float or None
-        Perturbation radius used for building (after calling build()).
+        Perturbation radius if a constant strategy was used; None otherwise.
+    eps_strategy : EpsStrategy or None
+        The strategy used to compute per-sample epsilon (after calling build()).
     norm : int or None
         Lp norm used for building (after calling build()).
     """
@@ -136,7 +140,8 @@ class CertifiedAtlas:
         # These are populated by build()
         self.bounds: Optional[Dict] = None
         self.bvh_indices: Optional[Dict[int, BVHIndex]] = None
-        self.eps: Optional[float] = None
+        self.eps: Optional[float] = None          # scalar iff ConstantEpsStrategy
+        self.eps_strategy: Optional[EpsStrategy] = None
         self.norm: Optional[int] = None
 
         # Optional: Shapely polygon unions (only for 2D visualization)
@@ -144,8 +149,9 @@ class CertifiedAtlas:
 
     def build(
         self,
-        eps: float = 0.1,
+        eps: Optional[float] = None,
         norm: int = 2,
+        eps_strategy: Optional[EpsStrategy] = None,
         max_samples_per_class: Optional[int] = None,
         batch_size: Optional[int] = None,
         build_unions: bool = False,
@@ -161,13 +167,20 @@ class CertifiedAtlas:
         Parameters
         ----------
         eps : float, optional
-            Perturbation radius for Lp ball (default: 0.1).
+            Constant perturbation radius for all samples.  Mutually exclusive
+            with ``eps_strategy``.  Kept for backward compatibility.
         norm : int, optional
             Lp norm for perturbation: 1, 2, or np.inf (default: 2).
+        eps_strategy : EpsStrategy, optional
+            A pluggable strategy that returns a per-sample epsilon array.
+            Mutually exclusive with ``eps``.  When omitted and ``eps`` is also
+            omitted, defaults to ``ConstantEpsStrategy(0.1)``.
         max_samples_per_class : int, optional
             Maximum samples per class. If None, use all available.
         batch_size : int, optional
             Process samples in batches (for GPU memory). If None, process all at once.
+            Ignored when the resolved strategy produces varying epsilon values
+            (samples are then processed individually).
         build_unions : bool, optional
             Build Shapely polygon unions for visualization (default: False).
             Only works for 2D data.
@@ -179,22 +192,42 @@ class CertifiedAtlas:
         self
             Returns self for method chaining.
         """
-        self.eps = eps
+        # --- Resolve eps strategy ---
+        if eps is not None and eps_strategy is not None:
+            raise ValueError("Specify eps or eps_strategy, not both.")
+        if eps is not None:
+            eps_strategy = ConstantEpsStrategy(eps)
+        elif eps_strategy is None:
+            eps_strategy = ConstantEpsStrategy(0.1)
+
+        self.eps_strategy = eps_strategy
+        self.eps = eps  # scalar for ConstantEpsStrategy, None otherwise
         self.norm = norm
 
+        # Compute per-sample epsilon for the full dataset
+        X_all = self._preimage.dataset.tensors[0].numpy()
+        y_all = self._preimage.dataset.tensors[1].numpy()
+        eps_array = eps_strategy.compute_eps(X_all, y_all)
+
         if verbose:
-            print(f"Building certified atlas (eps={eps}, L{norm} norm)...")
+            eps_min, eps_max = eps_array.min(), eps_array.max()
+            if eps_min == eps_max:
+                eps_desc = f"eps={eps_min:.4g}"
+            else:
+                eps_desc = f"eps in [{eps_min:.4g}, {eps_max:.4g}] ({type(eps_strategy).__name__})"
+            print(f"Building certified atlas ({eps_desc}, L{norm} norm)...")
 
         # Step 1: Compute LiRPA bounds for all classes
         if verbose:
             print("  Computing LiRPA bounds...")
 
         self.bounds = self._preimage.compute_all_bounds(
-            eps=eps,
+            eps=0.1,            # fallback scalar (unused when eps_array is provided)
             norm=norm,
             max_samples_per_class=max_samples_per_class,
             batch_size=batch_size,
-            dtype=dtype if dtype is not None else torch.float32
+            dtype=dtype if dtype is not None else torch.float32,
+            eps_array=eps_array,
         )
 
         # Step 2: Build BVH spatial index for each class
@@ -204,7 +237,8 @@ class CertifiedAtlas:
         self.bvh_indices = {}
         for label in range(self.n_classes):
             centers = self.bounds[label]['X']
-            self.bvh_indices[label] = BVHIndex(centers, eps)
+            eps_class = self.bounds[label]['eps']
+            self.bvh_indices[label] = BVHIndex(centers, eps_class)
 
             if verbose:
                 bvh = self.bvh_indices[label]
@@ -221,7 +255,7 @@ class CertifiedAtlas:
                 self._class_unions = {}
                 for label in range(self.n_classes):
                     self._class_unions[label] = build_class_union(
-                        label, self.bounds, eps
+                        label, self.bounds, self.bounds[label]['eps']
                     )
 
         if verbose:
@@ -262,16 +296,17 @@ class CertifiedAtlas:
         center: np.ndarray,
         d: int,
         delta: float,
-        robust_norm
+        robust_norm,
+        eps_i: float,
     ) -> Tuple[np.ndarray, np.ndarray, float, float]:
         """
         Compute eroded constraints for delta-robust projection.
 
         Returns (A_full, b_full, box_eps, ball_eps) or raises if infeasible.
         """
-        box_eps = self.eps - delta
+        box_eps = eps_i - delta
         ball_factor = self._norm_conversion_factor(d, robust_norm, self.norm)
-        ball_eps = self.eps - delta * ball_factor
+        ball_eps = eps_i - delta * ball_factor
 
         if box_eps <= 0 or ball_eps <= 0:
             return None, None, 0.0, 0.0
@@ -416,6 +451,7 @@ class CertifiedAtlas:
         A: np.ndarray,
         b: np.ndarray,
         center: np.ndarray,
+        eps_i: float,
         delta: float = 0.0,
         robust_norm: Optional[int] = None,
         maxiter: Optional[int] = None,
@@ -445,6 +481,8 @@ class CertifiedAtlas:
             LiRPA constraint bias.
         center : np.ndarray
             Center of the polytope (anchor point).
+        eps_i : float
+            Perturbation radius for this specific polytope.
         delta : float, optional
             Robustness radius for polytope erosion. Default: 0.0 (no erosion).
         robust_norm : int or float, optional
@@ -462,7 +500,7 @@ class CertifiedAtlas:
 
         d = len(x0)
         A_full, b_full, box_eps, ball_eps = self._erode_constraints(
-            A, b, center, d, delta, robust_norm
+            A, b, center, d, delta, robust_norm, eps_i
         )
         if A_full is None:
             return None, np.inf
@@ -541,6 +579,7 @@ class CertifiedAtlas:
                     bd['lA'][idx],
                     bd['lbias'][idx],
                     bd['X'][idx],
+                    eps_i=float(bd['eps'][idx]),
                     delta=delta,
                     robust_norm=robust_norm,
                     maxiter=solver_maxiter,
@@ -568,6 +607,7 @@ class CertifiedAtlas:
                     bd['lA'][idx],
                     bd['lbias'][idx],
                     bd['X'][idx],
+                    eps_i=float(bd['eps'][idx]),
                     delta=delta,
                     robust_norm=robust_norm,
                     maxiter=solver_maxiter,
@@ -739,11 +779,20 @@ class CertifiedAtlas:
         if self.bounds is None:
             return "CertifiedAtlas (not built)"
 
+        if self.eps is not None:
+            eps_desc = f"eps={self.eps} (constant)"
+        else:
+            all_eps = np.concatenate([self.bounds[l]['eps'] for l in range(self.n_classes)])
+            eps_desc = (
+                f"eps in [{all_eps.min():.4g}, {all_eps.max():.4g}]"
+                f" ({type(self.eps_strategy).__name__})"
+            )
+
         lines = [
             f"CertifiedAtlas Summary",
             f"=" * 40,
             f"Classes: {self.n_classes}",
-            f"Perturbation: eps={self.eps}, L{self.norm} norm",
+            f"Perturbation: {eps_desc}, L{self.norm} norm",
             f"Device: {self.device}",
             f""
         ]

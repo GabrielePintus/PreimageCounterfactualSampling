@@ -162,6 +162,7 @@ class TabularClassifier(nn.Module):
             else:
                 raise ValueError(f"Unknown input type: {t}")
         self.embed_dim = pos
+        self.bn = nn.BatchNorm1d(input_dim)
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dims[0]),
             nn.ReLU(),
@@ -195,7 +196,7 @@ class TabularClassifier(nn.Module):
                 parts.append(x[:, i:i+1])
             else:
                 parts.append(emb(x[:, i].long()))
-        return torch.cat(parts, dim=1)
+        return self.bn(torch.cat(parts, dim=1))
 
     @torch.no_grad()
     def decode(self, z: torch.Tensor) -> torch.Tensor:

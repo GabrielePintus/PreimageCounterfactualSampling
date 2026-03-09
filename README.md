@@ -331,3 +331,4 @@ The VAE's KL regularization brings decision boundaries closer (vs. plain AE: 95%
 - [auto_LiRPA](https://github.com/Verified-Intelligence/auto_LiRPA) — neural network certification via linear relaxation
 - [CVXPY](https://www.cvxpy.org/) / [CLARABEL](https://github.com/oxfordcontrol/Clarabel.jl) — convex optimization solver
 - [Shapely](https://shapely.readthedocs.io/) — 2D polygon operations for ground-truth area computation
+tabular data focused

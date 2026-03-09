@@ -34,14 +34,14 @@ model:
     model:
       class_path: models.ae_channels.ConvAutoencoder
       init_args:
-        latent_dim: 32
+        latent_dim: 3
     
     initial_lr: 5e-3
-    final_lr: 1e-6
+    final_lr: 5e-6
     warmup_steps: 1000
-    weight_decay: 1e-4
+    weight_decay: 1e-5
 
-    beta: 1.0
+    beta: 0.01
     
     
     

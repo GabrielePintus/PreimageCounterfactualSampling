@@ -25,6 +25,13 @@ __version__ = "0.2.0"
 # High-level API (recommended)
 from .atlas import CertifiedAtlas, CounterfactualResult
 
+# Epsilon strategies
+from .eps_strategies import (
+    EpsStrategy,
+    ConstantEpsStrategy,
+    NearestOppositeClassClearanceStrategy,
+)
+
 # Lower-level components (for advanced users)
 from .certification import WrappedModel, PreimageApproximation
 from .sampling import CounterfactualSampler
@@ -34,6 +41,10 @@ __all__ = [
     # High-level API
     "CertifiedAtlas",
     "CounterfactualResult",
+    # Epsilon strategies
+    "EpsStrategy",
+    "ConstantEpsStrategy",
+    "NearestOppositeClassClearanceStrategy",
     # Lower-level components
     "WrappedModel",
     "PreimageApproximation",

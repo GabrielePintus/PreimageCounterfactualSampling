@@ -24,6 +24,7 @@ class LitAutoencoder(L.LightningModule):
         L2 regularization coefficient for AdamW.
     beta : float
         Weight for the KL divergence term (beta-VAE coefficient).
+        With the canonical sum/batch-size loss scaling, values around 0.1 work well.
     warmup_steps : int
         Number of optimizer steps for linear LR warmup.
     final_lr : float
@@ -35,7 +36,7 @@ class LitAutoencoder(L.LightningModule):
         model: nn.Module,
         initial_lr: float = 5e-3,
         weight_decay: float = 1e-4,
-        beta: float = 1.0,
+        beta: float = 0.1,
         warmup_steps: int = 1000,
         final_lr: float = 1e-6,
     ):
@@ -43,12 +44,11 @@ class LitAutoencoder(L.LightningModule):
         self.save_hyperparameters(ignore=["model"])
         self.model = model
 
-        self.mse = nn.MSELoss(reduction="mean")
-        self.kl = lambda mu, logvar: -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-
     def vae_loss(self, x, mu, logvar, recon):
-        recon_loss = self.mse(recon, x)
-        kl_loss = self.kl(mu, logvar)
+        # Canonical VAE loss: sum over pixels/dims per sample, mean over batch.
+        # This matches the original notebook formulation and keeps beta interpretable (~0.1).
+        recon_loss = F.mse_loss(recon, x, reduction="sum") / x.size(0)
+        kl_loss = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
         total = recon_loss + self.hparams.beta * kl_loss
         return {"loss": total, "recon_loss": recon_loss, "kl_loss": kl_loss}
 
@@ -63,18 +63,18 @@ class LitAutoencoder(L.LightningModule):
         return {"mu": mu, "logvar": logvar, "recon": recon}, loss
 
     def training_step(self, batch, batch_idx):
-        prediction, loss = self.shared_step(batch, batch_idx)
-        self.log_dict({f"train/{k}": v for k, v in prediction.items()}, prog_bar=True)
+        _, loss = self.shared_step(batch, batch_idx)
+        self.log_dict({f"train/{k}": v for k, v in loss.items()}, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        prediction, loss = self.shared_step(batch, batch_idx)
-        self.log_dict({f"val/{k}": v for k, v in prediction.items()}, prog_bar=True)
+        _, loss = self.shared_step(batch, batch_idx)
+        self.log_dict({f"val/{k}": v for k, v in loss.items()}, prog_bar=True)
         return loss
 
     def test_step(self, batch, batch_idx):
-        prediction, loss = self.shared_step(batch, batch_idx)
-        self.log_dict({f"test/{k}": v for k, v in prediction.items()}, prog_bar=True)
+        _, loss = self.shared_step(batch, batch_idx)
+        self.log_dict({f"test/{k}": v for k, v in loss.items()}, prog_bar=True)
 
 
     def configure_optimizers(self):

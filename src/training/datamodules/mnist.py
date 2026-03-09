@@ -48,8 +48,12 @@ class MNISTDataModule(L.LightningDataModule):
         if not self.hparams.augment:
             return self._base_transform()
         return transforms.Compose([
-            transforms.RandomAffine(degrees=10, translate=(0.1, 0.1)),
+            # Random pixel dropout
             transforms.ToTensor(),
+            transforms.RandomApply([
+                transforms.Lambda(lambda x: x * (torch.rand_like(x) > 0.1).float())
+            ], p=0.5),
+            transforms.Lambda(lambda x: x + 0.05 * torch.randn_like(x)),
         ])
 
     def prepare_data(self):

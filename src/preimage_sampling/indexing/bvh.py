@@ -79,7 +79,7 @@ class BVHIndex:
         Dimensionality of the input space.
     """
 
-    def __init__(self, centers: np.ndarray, eps: float):
+    def __init__(self, centers: np.ndarray, eps):
         """
         Build a BVH from polytope centers and perturbation radius.
 
@@ -87,8 +87,10 @@ class BVHIndex:
         ----------
         centers : np.ndarray
             Array of polytope centers, shape (n_polytopes, d).
-        eps : float
-            Perturbation radius defining each polytope's bounding box.
+        eps : float or np.ndarray
+            Perturbation radius defining each polytope's bounding box.  Can be
+            a scalar (same radius for all) or a 1-D array of shape
+            ``(n_polytopes,)`` for per-polytope radii.
         """
         self.centers = centers
         self.eps = eps
@@ -101,7 +103,7 @@ class BVHIndex:
         # Compute tree statistics
         self._n_internal, self._n_leaves = self._count_nodes(self.root)
 
-    def _build_tree(self, centers: np.ndarray, eps: float) -> BVHNode:
+    def _build_tree(self, centers: np.ndarray, eps) -> BVHNode:
         """
         Recursively build the BVH tree.
 
@@ -114,9 +116,10 @@ class BVHIndex:
         leaves = []
         for i in range(n):
             center = centers[i]
+            eps_i = eps[i] if isinstance(eps, np.ndarray) else eps
             leaves.append(BVHNode(
-                bbox_min=center - eps,
-                bbox_max=center + eps,
+                bbox_min=center - eps_i,
+                bbox_max=center + eps_i,
                 polytope_idx=i
             ))
 

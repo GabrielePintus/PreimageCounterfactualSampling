@@ -49,7 +49,7 @@ def plot_geom(
 
 def plot_polytopes(
     bounds: dict,
-    eps: float,
+    eps,
     n_classes: int,
     figsize: tuple = (7, 7),
     cmap_name: str = 'tab10'
@@ -63,8 +63,12 @@ def plot_polytopes(
     ----------
     bounds : dict
         Bounds dictionary from PreimageApproximation.compute_all_bounds().
-    eps : float
-        Perturbation radius used for clipping.
+        If the dict contains an 'eps' key per class, it is used in preference
+        to the ``eps`` argument.
+    eps : float or np.ndarray
+        Perturbation radius used for clipping.  Can be a scalar or a 1-D
+        array of shape ``(N,)`` for per-sample radii.  Ignored when
+        ``bounds[label]['eps']`` is present.
     n_classes : int
         Number of classes.
     figsize : tuple, optional
@@ -83,13 +87,17 @@ def plot_polytopes(
         bd = bounds[label]
         color = cmap(label)
 
+        # Prefer per-sample eps stored in the bounds dict
+        eps_class = bd.get('eps', eps)
+
         # Plot sample points
         ax.scatter(bd['X'][:, 0], bd['X'][:, 1],
                    s=12, alpha=0.4, color=color, edgecolors='none')
 
         # Plot polytopes
         for i in range(bd['lA'].shape[0]):
-            poly = make_polygon(bd['lA'][i], bd['lbias'][i], bd['X'][i], eps)
+            eps_i = float(eps_class[i]) if isinstance(eps_class, np.ndarray) else eps_class
+            poly = make_polygon(bd['lA'][i], bd['lbias'][i], bd['X'][i], eps_i)
             if poly is None:
                 continue
 

@@ -4,71 +4,57 @@ import torch.nn as nn
 
 
 
+
 class ConvEncoder(nn.Module):
-    """
-    Convolutional VAE encoder for image data.
-
-    Architecture:
-        (1, 28, 28) → Conv(1,16,5)+BN+ReLU → Conv(16,16,5)+BN+ReLU → MaxPool
-        → (16, 14, 14) → Conv(16,32,3)+BN+ReLU → Conv(32,32,3)+BN+ReLU → MaxPool
-        → (32, 7, 7) → Conv(32,64,3,pad=0)+BN+ReLU → MaxPool
-        → (64, 2, 2) → Flatten → Linear(256, latent_dim*2)
-        → mu_head(latent_dim*2 → latent_dim)
-        → logvar_head(latent_dim*2 → latent_dim)
-
-    Returns (mu, logvar) for VAE reparameterization.
-
-    Parameters
-    ----------
-    latent_dim : int
-        Dimensionality of the latent space
-    """
-
     def __init__(self, latent_dim=32):
         super(ConvEncoder, self).__init__()
 
-        self.net = nn.Sequential(
-            # Input: (batch_size, 1, 28, 28)
-            nn.Conv2d(1, 16, kernel_size=5, stride=1, padding=2), # Output: (batch_size, 16, 28, 28)
-            nn.BatchNorm2d(16),
+        self.encoder = nn.Sequential(
+            # Input: (1, 28, 28)
+            nn.Conv2d(1, 16, kernel_size=5, stride=2, padding=2), # (16, 14, 14)
+            # nn.BatchNorm2d(16),
+            nn.GroupNorm(4, 16), # (16, 14, 14)
             nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=5, stride=1, padding=2), # Output: (batch_size, 16, 28, 28)
-            nn.BatchNorm2d(16),
+            nn.Conv2d(16, 16, kernel_size=5, stride=1, padding=2), # (16, 14, 14)
+            # nn.BatchNorm2d(16),
+            nn.GroupNorm(4, 16), # (16, 14, 14)
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # Output: (batch_size, 16, 14, 14)
+            nn.MaxPool2d(kernel_size=2, stride=2), # (16, 7, 7)
 
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1), # Output: (batch_size, 32, 14, 14)
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1), # (32, 4, 4)
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1), # Output: (batch_size, 32, 14, 14)
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1), # (32, 4, 4)
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # Output: (batch_size, 32, 7, 7)
 
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=0), # Output: (batch_size, 64, 5, 5)
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), # (64, 2, 2)
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # Output: (batch_size, 64, 2, 2)
-        )
-        self.head = nn.Sequential(
-            nn.Linear(64 * 2 * 2, latent_dim*2),
-        )
-        self.mu_head = nn.Sequential(
-            nn.ReLU(),
-            nn.Linear(latent_dim*2, latent_dim),
-        )
-        self.logvar_head = nn.Sequential(
-            nn.ReLU(),
-            nn.Linear(latent_dim*2, latent_dim),
         )
 
+        self.head = nn.Sequential(
+            nn.Linear(256, 128),
+        )
+
+        self.fc_mu = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(128, latent_dim),
+        )
+        self.fc_logvar = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(128, latent_dim),
+        )
+    
     def forward(self, x):
-        h = self.net(x)
-        h = h.view(h.size(0), -1)  # Flatten
-        h = self.head(h)
-        mu = self.mu_head(h)
-        logvar = self.logvar_head(h)
+        x = self.encoder(x) # (batch_size, 64, 1, 1)
+        x = x.view(x.size(0), -1) # (batch_size, 64)
+        x = self.head(x) # (batch_size, 128)
+        mu = self.fc_mu(x) # (batch_size, latent_dim)
+        logvar = self.fc_logvar(x) # (batch_size, latent_dim)
         return mu, logvar
+
+            
 
 
 

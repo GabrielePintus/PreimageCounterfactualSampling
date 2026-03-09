@@ -9,7 +9,7 @@ from .polytopes import make_polygon
 def build_class_union(
     label: int,
     bounds: dict,
-    eps: float,
+    eps,
     tol: float = 1e-7
 ) -> Polygon | MultiPolygon:
     """
@@ -25,8 +25,10 @@ def build_class_union(
     bounds : dict
         Dictionary mapping labels to bound dictionaries with keys:
         'lA', 'lbias', 'X' (from PreimageApproximation.compute_all_bounds).
-    eps : float
-        Perturbation radius used for clipping polytopes.
+    eps : float or np.ndarray
+        Perturbation radius used for clipping polytopes.  Can be a scalar
+        (same for all samples) or a 1-D array of shape ``(N,)`` for
+        per-sample radii.
     tol : float, optional
         Tolerance for polytope construction (default: 1e-7).
 
@@ -36,11 +38,14 @@ def build_class_union(
         The union of all valid polytopes for this class.
         Returns an empty Polygon if no valid polytopes exist.
     """
+    import numpy as np
+
     bd = bounds[label]
     polys = []
 
     for i in range(bd['lA'].shape[0]):
-        p = make_polygon(bd['lA'][i], bd['lbias'][i], bd['X'][i], eps, tol=tol)
+        eps_i = float(eps[i]) if isinstance(eps, np.ndarray) else eps
+        p = make_polygon(bd['lA'][i], bd['lbias'][i], bd['X'][i], eps_i, tol=tol)
         if p is not None:
             polys.append(p)
 
@@ -62,7 +67,7 @@ def refine_unions_by_priority(
     classes keep their full footprint, while lower-priority classes
     have overlapping regions removed.
 
-    U'_y = U_y \ (union of all U_y' for y' with higher priority)
+    U'_y = U_y minus (union of all U_y' for y' with higher priority)
 
     Parameters
     ----------
