@@ -1,0 +1,49 @@
+seed: 42
+
+dataset:
+  name: adult
+  params:
+    data_dir: data/
+
+model:
+  name: sklearn_mlp
+  params: {}
+
+sampling:
+  n_train: 1000          # k-medoids target size for the shared train pool
+  n_queries: 100         # number of test queries (same set used by all methods)
+  train_method: kmedoids # "kmedoids" (requires scikit-learn-extra) | "random"
+
+timeout_per_sample: 60   # seconds per (method, query); set to 0 to disable
+
+output:
+  path: results/benchmark_adult.parquet
+
+methods:
+  - name: dice
+    params:
+      total_cfs: 4
+      proximity_weight: 0.5
+      diversity_weight: 0.0
+
+  - name: face
+    params:
+      graph_mode: knn
+      n_neighbors: 15
+      tp: 0.5
+      td: 0.0
+
+  - name: nearest_neighbor
+    params: {}
+
+  - name: growing_spheres
+    params: {}
+
+  - name: my_method
+    params:
+      checkpoint: checkpoints/adult_classifier/last-v3.ckpt
+      device: cpu
+      eps_alpha: 0.25      # NearestOppositeClassClearanceStrategy alpha
+      k_per_class: 500     # medoids per class for the atlas train set
+      norm: 1              # L1 perturbation norm
+      batch_size: 256

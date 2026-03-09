@@ -203,8 +203,13 @@ class TabularClassifier(nn.Module):
         """
         Decode an embedded representation back to original feature space.
 
-        Numerical dims are read directly. For each categorical block, the
-        nearest category is found via argmin L2 distance to the embedding table.
+        ``embed()`` applies batch normalisation after concatenating numerical
+        and categorical embedding dims.  This method inverts that BN first
+        (recovering pre-BN values), then:
+
+        * Numerical features: the pre-BN value equals the original raw value.
+        * Categorical features: the pre-BN value is compared against the raw
+          embedding weights (before BN) to find the nearest valid category.
 
         Parameters
         ----------
@@ -217,13 +222,18 @@ class TabularClassifier(nn.Module):
             Shape (batch_size, n_features). Categorical columns contain the
             nearest valid integer category index (as float).
         """
+        # Invert batch normalisation: z = γ*(x_pre - μ)/√(σ²+ε) + β
+        # → x_pre = (z - β)/γ * √(σ²+ε) + μ
+        std = torch.sqrt(self.bn.running_var + self.bn.eps)
+        x_prebn = (z - self.bn.bias) / self.bn.weight * std + self.bn.running_mean
+
         x_out = torch.empty(z.shape[0], len(self.input_types), device=z.device, dtype=z.dtype)
         for i, (emb, t, (start, end)) in enumerate(zip(self.embeddings, self.input_types, self._slices)):
             if t == "numerical":
-                x_out[:, i] = z[:, start]
+                x_out[:, i] = x_prebn[:, start]
             else:
-                z_block = z[:, start:end]                    # (batch, emb_dim)
-                dists = torch.cdist(z_block, emb.weight)     # (batch, cardinality)
+                prebn_block = x_prebn[:, start:end]          # (batch, emb_dim)
+                dists = torch.cdist(prebn_block, emb.weight) # (batch, cardinality)
                 x_out[:, i] = dists.argmin(dim=1).to(z.dtype)
         return x_out
 
