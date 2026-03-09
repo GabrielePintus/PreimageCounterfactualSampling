@@ -6,6 +6,7 @@ Counterfactual generation methods behind a shared interface.
 - `wachter.py`: Wachter-style search.
 - `dice.py`: DiCE-style diverse candidate generation.
 - `growing_spheres.py`: shell expansion baseline.
+- `face.py`: graph-based feasible/actionable recourse (FACE).
 - `my_method.py`: adapter for `CertifiedAtlas`.
 
 ## Example

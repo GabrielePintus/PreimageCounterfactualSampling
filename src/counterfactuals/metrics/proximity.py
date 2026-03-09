@@ -10,7 +10,7 @@ from counterfactuals.core.interfaces import MetricInterface
 class L2Proximity(MetricInterface):
     """Euclidean distance between factual and counterfactual points."""
 
-    name = "proximity"
+    name = "proximity_l2"
 
     def evaluate(self, x_orig: np.ndarray, x_cf: np.ndarray, context=None) -> float:
         del context

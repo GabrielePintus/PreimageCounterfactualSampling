@@ -2,7 +2,9 @@ import numpy as np
 
 from counterfactuals.core.base_classes import CounterfactualExample
 from counterfactuals.methods.dice import DiceMethod
+from counterfactuals.methods.face import FACEMethod
 from counterfactuals.methods.growing_spheres import GrowingSpheresMethod
+from counterfactuals.methods.nearest_neighbor import NearestNeighborMethod
 from counterfactuals.methods.wachter import WachterMethod
 
 
@@ -46,3 +48,20 @@ def test_dice_method_contract():
 
 def test_growing_spheres_contract():
     _assert_method_works(GrowingSpheresMethod(n_in_layer=128, max_radius=2.0, random_seed=10))
+
+
+def test_face_method_contract():
+    x_train, y_train = _train_data()
+    model = ThresholdModel()
+    method = FACEMethod(graph_mode="knn", n_neighbors=2, tp=0.5, td=0.0, random_seed=10)
+    method.fit(x_train=x_train, y_train=y_train, model=model)
+    result = method.generate(
+        CounterfactualExample(x=np.array([-0.8, 0.0], dtype=np.float32), target_class=1),
+        model=model,
+    )
+    assert result.x_cf.shape == (2,)
+    assert isinstance(result.success, bool)
+
+
+def test_nearest_neighbor_method_contract():
+    _assert_method_works(NearestNeighborMethod(random_seed=10))

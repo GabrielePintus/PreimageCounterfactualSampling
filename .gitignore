@@ -209,3 +209,11 @@ __marimo__/
 
 data/
 
+# Project-generated experiment artifacts
+wandb/
+checkpoints/
+tmp.ipynb
+lightning_logs/
+outputs/
+config.yaml
+
