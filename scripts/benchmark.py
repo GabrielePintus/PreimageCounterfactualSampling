@@ -126,6 +126,8 @@ def _failure_row(
         "l2_distance": float("nan"),
         "l1_distance": float("nan"),
         "l0_sparsity": float("nan"),
+        "mad_l1_distance": float("nan"),
+        "redundancy": float("nan"),
     }
     for k in range(n_features):
         row[f"x_orig_{k}"] = float(x_orig[k])
@@ -144,6 +146,9 @@ def _success_row(
     runtime_s: float,
     n_features: int,
     space: str = "raw",
+    mad_weights: Optional[np.ndarray] = None,
+    input_types: Optional[List[str]] = None,
+    redundancy: Optional[float] = None,
 ) -> Dict[str, Any]:
     diff = np.abs(x_cf.astype(np.float64) - x_orig.astype(np.float64))
     row: Dict[str, Any] = {
@@ -159,6 +164,19 @@ def _success_row(
         "l1_distance": float(np.linalg.norm(diff, ord=1)),
         "l0_sparsity": float(np.mean(diff > 1e-6)),
     }
+    # MAD-normalized L1: numerical features scaled by per-feature MAD,
+    # categorical features contribute a binary mismatch term.
+    if mad_weights is not None and input_types is not None:
+        per_feat = np.empty(n_features)
+        for i, t in enumerate(input_types):
+            if t == "numerical":
+                per_feat[i] = diff[i] / mad_weights[i]
+            else:
+                per_feat[i] = float(diff[i] > 1e-6)
+        row["mad_l1_distance"] = float(per_feat.mean())
+    else:
+        row["mad_l1_distance"] = float("nan")
+    row["redundancy"] = float(redundancy) if redundancy is not None else float("nan")
     for k in range(n_features):
         row[f"x_orig_{k}"] = float(x_orig[k])
         row[f"x_cf_{k}"] = float(x_cf[k])
@@ -339,6 +357,25 @@ def main() -> None:
     x_test_full, _ = dataset.get_test()
     n_features = x_train_full.shape[1]
 
+    # --- MAD weights for MAD-normalized L1 proximity ---
+    # Try to load feature type annotations from the dataset's datamodule.
+    # Falls back to treating all features as numerical if not available.
+    try:
+        from training.datamodules.adult import INPUT_TYPES as _input_types
+    except ImportError:
+        _input_types = ["numerical"] * n_features
+
+    mad_weights = np.ones(n_features, dtype=np.float64)
+    for i, t in enumerate(_input_types):
+        if t == "numerical":
+            col = x_train_full[:, i].astype(np.float64)
+            mad = float(np.median(np.abs(col - np.median(col))))
+            # For zero-inflated features (e.g. capital-gain/loss) MAD=0 because the
+            # median equals most values.  These features are already StandardScaler-
+            # normalised (std=1), so use 1.0 as the unit scale.
+            mad_weights[i] = mad if mad > 0 else 1.0
+    # Categorical features keep weight = 1.0 (binary mismatch is already in [0, 1]).
+
     # --- Train subsampling (once, shared by all methods) ---
     sampling_cfg = cfg.get("sampling", {})
     n_train = int(sampling_cfg.get("n_train", len(x_train_full)))
@@ -456,10 +493,30 @@ def main() -> None:
                 else:
                     x_cf_row = x_cf_active
 
+                # Redundancy: fraction of changed features that can be individually
+                # reverted without flipping the CF out of the target class.
+                # Always uses the shared benchmark classifier (model) for consistency.
+                redundancy_val = 0.0
+                diff_raw = np.abs(
+                    x_cf_row.astype(np.float64) - x_orig_raw.astype(np.float64)
+                )
+                changed_feats = np.where(diff_raw > 1e-6)[0]
+                if len(changed_feats) > 0:
+                    n_redundant = 0
+                    for k in changed_feats:
+                        x_test = x_cf_row.copy().astype(np.float32)
+                        x_test[k] = x_orig_raw[k]
+                        if int(model.predict(x_test[None, :])[0]) == target_class:
+                            n_redundant += 1
+                    redundancy_val = n_redundant / len(changed_feats)
+
                 all_rows.append(
                     _success_row(
                         method_name, q_idx, x_orig_raw, int(y_orig),
                         x_cf_row, y_cf, result.success, runtime_s, n_features, space,
+                        mad_weights=mad_weights,
+                        input_types=_input_types,
+                        redundancy=redundancy_val,
                     )
                 )
                 n_ok += int(result.success)
