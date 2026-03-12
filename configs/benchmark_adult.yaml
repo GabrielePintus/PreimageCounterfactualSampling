@@ -18,34 +18,46 @@ sampling:
 
 timeout_per_sample: 60   # seconds per (method, query); set to 0 to disable
 
+# Optional shared preprocessing for generation space only.
+# All benchmark metrics are computed after inverse-transform in original feature space.
+# preprocessing:
+#   enabled: true
+#   name: pca
+#   params:
+#     n_components: 0.99
+#     svd_solver: full
+#     whiten: false
+#     random_state: 42
+
 output:
-  path: results/benchmark_adult_3.parquet
+  path: results/benchmark_adult_test.parquet
 
 methods:
-  - name: dice
-    params:
-      total_cfs: 4
-      proximity_weight: 0.5
-      diversity_weight: 0.0
+  # - name: dice
+  #   params:
+  #     total_cfs: 4
+  #     proximity_weight: 0.5
+  #     diversity_weight: 0.0
 
-  - name: face
-    params:
-      graph_mode: knn
-      n_neighbors: 15
-      tp: 0.5
-      td: 0.0
+  # - name: face
+  #   params:
+  #     graph_mode: knn
+  #     n_neighbors: 15
+  #     tp: 0.5
+  #     td: 0.0
 
   - name: nearest_neighbor
     params: {}
 
-  - name: growing_spheres
-    params: {}
+  # - name: growing_spheres
+  #   params: {}
 
   - name: cpp
     params:
       checkpoint: checkpoints/adult_classifier/best.ckpt
       device: cpu
       eps_alpha: 0.25      # NearestOppositeClassClearanceStrategy alpha
+      query_method: sorted # CPP search strategy: sorted | bvh | knn
       k_per_class: null    # Use all available points for the atlas train set
       max_samples_per_class: null  # LiRPA certifies all k_per_class polytopes per class
       norm: 1            # L1 perturbation norm → sparse CFs (CVXPY/CLARABEL)

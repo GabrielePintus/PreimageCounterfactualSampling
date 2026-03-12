@@ -31,6 +31,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from counterfactuals.core.base_classes import CounterfactualExample
 from counterfactuals.experiments.runner import create_default_registries
+from counterfactuals.preprocessing import (
+    IdentityTransform,
+    InverseTransformModel,
+    PCATransform,
+    adult_ohe_blocks,
+    snap_ohe_blocks,
+)
 from counterfactuals.utils.config import read_yaml
 from counterfactuals.utils.seed import seed_everything
 
@@ -223,6 +230,17 @@ def _build_certified_atlas_method(
     k_per_class = int(_k_per_class) if _k_per_class is not None else None
     _norm_raw = params.get("norm", 2)
     norm = np.inf if str(_norm_raw).lower() in ("inf", "infinity") else int(_norm_raw)
+    query_method = str(params.get("query_method", "sorted")).lower()
+    if query_method not in {"sorted", "bvh", "knn"}:
+        raise ValueError(
+            f"my_method.query_method must be one of {{'sorted', 'bvh', 'knn'}}, got {query_method!r}"
+        )
+    cvxpy_solver_policy = str(params.get("cvxpy_solver_policy", "auto")).lower()
+    if cvxpy_solver_policy not in {"auto", "legacy"}:
+        raise ValueError(
+            f"my_method.cvxpy_solver_policy must be one of {{'auto', 'legacy'}}, got {cvxpy_solver_policy!r}"
+        )
+
     batch_size = int(params.get("batch_size", 256))
     _msc = params.get("max_samples_per_class", None)
     max_samples_per_class = int(_msc) if _msc is not None else None
@@ -281,7 +299,13 @@ def _build_certified_atlas_method(
 
     # Build atlas in input space (standardized numerical + raw OHE categorical).
     eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
-    atlas = CertifiedAtlas(net_for_atlas, medoid_ds, device=device)
+    atlas = CertifiedAtlas(
+        net_for_atlas,
+        medoid_ds,
+        device=device,
+        default_query_method=query_method,
+        cvxpy_solver_policy=cvxpy_solver_policy,
+    )
     atlas.build(
         eps_strategy=eps_strategy,
         norm=norm,
@@ -383,6 +407,35 @@ def _apply_cli_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[
     return cfg
 
 
+def _build_shared_preprocessing(cfg: Dict[str, Any], seed: int):
+    prep_cfg = cfg.get("preprocessing")
+    if prep_cfg is None:
+        return IdentityTransform(), "identity"
+    if isinstance(prep_cfg, str):
+        name = prep_cfg
+        params: Dict[str, Any] = {}
+        enabled = True
+    else:
+        enabled = bool(prep_cfg.get("enabled", True))
+        if not enabled:
+            return IdentityTransform(), "identity"
+        name = str(prep_cfg.get("name", "identity"))
+        params = dict(prep_cfg.get("params", {}))
+
+    if name == "identity":
+        return IdentityTransform(), "identity"
+    if name == "pca":
+        pca_params = {
+            "n_components": params.get("n_components", 0.99),
+            "svd_solver": params.get("svd_solver", "full"),
+            "whiten": bool(params.get("whiten", False)),
+            "random_state": int(params.get("random_state", seed)),
+        }
+        return PCATransform(**pca_params), "pca"
+
+    raise ValueError(f"Unsupported preprocessing name: {name}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -449,6 +502,23 @@ def main() -> None:
     x_queries = x_test_full[query_indices]
     print(f"[INFO] {n_queries} test queries selected from {len(x_test_full)} test samples.")
 
+    # --- Shared preprocessing for generation space ---
+    transform, transform_name = _build_shared_preprocessing(cfg, seed=seed)
+    transform.fit(x_train)
+    x_train_gen = transform.transform(x_train)
+    x_queries_gen = transform.transform(x_queries)
+    print(
+        f"[INFO] Preprocessing: {transform_name} "
+        f"({x_train.shape[1]} -> {x_train_gen.shape[1]} dims)."
+    )
+
+    ohe_blocks = None
+    if ds_cfg["name"] == "adult":
+        try:
+            ohe_blocks = adult_ohe_blocks()
+        except Exception as exc:
+            print(f"[WARNING] Could not load Adult OHE block metadata for inverse snap: {exc}")
+
     # --- Model ---
     model_cfg = cfg["model"]
     if model_cfg["name"] == "tabular_classifier_ckpt":
@@ -466,6 +536,8 @@ def main() -> None:
             estimator.fit(x_train, y_train)
             acc = float(np.mean(model.predict(x_train) == y_train))
             print(f"[INFO] Train accuracy: {acc:.3f}")
+
+    model_for_methods = InverseTransformModel(base_model=model, transform=transform, ohe_blocks=ohe_blocks)
 
     # Pre-compute original class predictions for all queries (shared across methods).
     y_orig_all = model.predict(x_queries)
@@ -510,7 +582,7 @@ def main() -> None:
         else:
             try:
                 method = registries["method"].create(method_name, random_seed=seed, **method_params)
-                method.fit(x_train=x_train, y_train=y_train, model=model)
+                method.fit(x_train=x_train_gen, y_train=y_train, model=model_for_methods)
             except Exception as exc:
                 print(f"  [ERROR] fit() failed: {exc}")
                 for q_idx, x_orig, y_orig in zip(query_indices, x_queries, y_orig_all):
@@ -519,10 +591,10 @@ def main() -> None:
                                      f"fit_error: {exc}", 0.0)
                     )
                 continue
-            active_model = model
-            active_queries = x_queries
+            active_model = model_for_methods
+            active_queries = x_queries_gen
             active_y_orig = y_orig_all
-            space = "raw"
+            space = "gen"
 
         # --- Generate ---
         n_ok = 0
@@ -562,9 +634,11 @@ def main() -> None:
                     y_cf = int(model.predict(x_cf_row[None, :])[0])
                     cf_success = (y_cf == target_class)
                 else:
-                    x_cf_row = x_cf_active
-                    y_cf = int(active_model.predict(x_cf_active[None, :])[0])
-                    cf_success = result.success
+                    x_cf_row = np.asarray(transform.inverse_transform(x_cf_active), dtype=np.float32)
+                    if ohe_blocks is not None:
+                        x_cf_row = np.asarray(snap_ohe_blocks(x_cf_row, ohe_blocks), dtype=np.float32)
+                    y_cf = int(model.predict(x_cf_row[None, :])[0])
+                    cf_success = (y_cf == target_class)
 
                 # Redundancy: fraction of changed features that can be individually
                 # reverted without flipping the CF out of the target class.

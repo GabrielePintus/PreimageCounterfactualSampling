@@ -15,5 +15,16 @@ metrics:
   - sparsity
   - validity
   - plausibility
+
+# Optional shared preprocessing applied for CF generation only.
+# Counterfactuals are always inverse-mapped to original feature space before metrics.
+# preprocessing:
+#   enabled: true
+#   name: pca
+#   params:
+#     n_components: 0.99
+#     svd_solver: full
+#     whiten: false
+#     random_state: 42
 seed: 42
 max_test_samples: 32

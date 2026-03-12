@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 from scipy.optimize import minimize
 from typing import Optional, Dict, List, Tuple, Union
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 try:
     import cvxpy as cp
@@ -53,6 +53,8 @@ class CounterfactualResult:
         Number of QP projections computed.
     success : bool
         Whether a valid counterfactual was found.
+    profiling : dict
+        Query-time profiling metadata.
     """
     x_cf: Optional[np.ndarray]
     distance: float
@@ -60,6 +62,7 @@ class CounterfactualResult:
     anchor_idx: Optional[int]
     n_qp_solved: int
     success: bool
+    profiling: Dict[str, float] = field(default_factory=dict)
 
 
 class CertifiedAtlas:
@@ -104,6 +107,8 @@ class CertifiedAtlas:
         dataset,
         device: Union[torch.device, str],
         cnn: bool = False,
+        default_query_method: str = "sorted",
+        cvxpy_solver_policy: str = "auto",
         solver_maxiter: int = 500,
         solver_tol: float = 1e-9
     ):
@@ -120,6 +125,16 @@ class CertifiedAtlas:
             Device for computation.
         cnn : bool, optional
             Whether the model is a CNN (default: False).
+        default_query_method : str, optional
+            Default search method used by ``find_counterfactual`` when
+            ``method`` is not explicitly provided. One of
+            ``{'sorted', 'bvh', 'knn'}`` (default: "sorted").
+        cvxpy_solver_policy : str, optional
+            Solver ordering policy for CVXPY projections.
+            - ``"auto"``: norm-aware ordering (L2: CLARABEL→OSQP→SCS,
+              L1: OSQP→CLARABEL→SCS)
+            - ``"legacy"``: OSQP→CLARABEL→SCS for all norms
+            Default: "auto".
         solver_maxiter : int, optional
             Maximum iterations for the QP solver (default: 500).
         solver_tol : float, optional
@@ -132,6 +147,20 @@ class CertifiedAtlas:
         # Solver parameters (can be overridden in find_counterfactual)
         self.solver_maxiter = solver_maxiter
         self.solver_tol = solver_tol
+
+        allowed_methods = {"sorted", "bvh", "knn"}
+        if default_query_method not in allowed_methods:
+            raise ValueError(
+                f"default_query_method must be one of {allowed_methods}, got {default_query_method!r}"
+            )
+        self.default_query_method = default_query_method
+
+        allowed_solver_policies = {"auto", "legacy"}
+        if cvxpy_solver_policy not in allowed_solver_policies:
+            raise ValueError(
+                f"cvxpy_solver_policy must be one of {allowed_solver_policies}, got {cvxpy_solver_policy!r}"
+            )
+        self.cvxpy_solver_policy = cvxpy_solver_policy
 
         # Initialize preimage approximation handler
         self._preimage = PreimageApproximation(model, dataset, self.device, cnn=cnn)
@@ -377,7 +406,20 @@ class CertifiedAtlas:
                 constraints.append(z[s:e] >= 0)
 
         problem = cp.Problem(objective, constraints)
-        solvers = ('OSQP', 'CLARABEL', 'SCS')
+
+        if self.cvxpy_solver_policy == "legacy":
+            solvers = ('OSQP', 'CLARABEL', 'SCS')
+        else:
+            # Norm-aware solver policy:
+            # - L2 uses SOCP constraints -> CLARABEL is typically strongest first choice.
+            # - L1 is linear-constrained/QP-like -> OSQP is usually fastest first try.
+            # - SCS remains the permissive fallback for both.
+            if self.norm == 2:
+                solvers = ('CLARABEL', 'OSQP', 'SCS')
+            elif self.norm == 1:
+                solvers = ('OSQP', 'CLARABEL', 'SCS')
+            else:
+                solvers = ('OSQP', 'CLARABEL', 'SCS')
         solved = False
         for i, _solver in enumerate(solvers):
             last = (i == len(solvers) - 1)
@@ -552,7 +594,7 @@ class CertifiedAtlas:
         self,
         x_query: np.ndarray,
         target_class: int,
-        method: str = 'bvh',
+        method: Optional[str] = None,
         k: int = 10,
         delta: float = 0.0,
         robust_norm: Optional[int] = None,
@@ -570,8 +612,9 @@ class CertifiedAtlas:
         target_class : int
             The target class for the counterfactual.
         method : str, optional
-            Search method: 'bvh' (branch-and-bound) or 'knn' (k-nearest neighbors).
-            Default: 'bvh'.
+            Search method: 'sorted' (vectorised center-distance lower-bound scan),
+            'bvh' (branch-and-bound BVH), or 'knn' (k-nearest neighbors).
+            Default: atlas ``default_query_method`` ("sorted" by default).
         k : int, optional
             For 'knn' method: number of nearest neighbors to try.
             Default: 10.
@@ -603,13 +646,27 @@ class CertifiedAtlas:
         if self.bounds is None:
             raise ValueError("Atlas not built. Call build() first.")
 
+        import time
+
         x_query = np.asarray(x_query).flatten()
         bd = self.bounds[target_class]
+        resolved_method = method or self.default_query_method
+        profiling: Dict[str, float] = {
+            "method": resolved_method,
+            "k": float(k),
+            "delta": float(delta),
+        }
+        t_total_start = time.perf_counter()
+        projection_time_s = 0.0
 
-        if method == 'bvh':
+        if resolved_method == 'bvh':
             # Branch-and-bound search using BVH
+            bvh_stats: Dict[str, float] = {}
+
             def project_fn(idx: int) -> Tuple[Optional[np.ndarray], float]:
-                return self._project_onto_polytope(
+                nonlocal projection_time_s
+                t0 = time.perf_counter()
+                out = self._project_onto_polytope(
                     x_query,
                     bd['lA'][idx],
                     bd['lbias'][idx],
@@ -621,15 +678,83 @@ class CertifiedAtlas:
                     tol=solver_tol,
                     fixed_dims=fixed_dims
                 )
+                projection_time_s += (time.perf_counter() - t0)
+                return out
 
             bvh = self.bvh_indices[target_class]
-            x_cf, dist, anchor_idx, n_qp = bvh.query_nearest(x_query, project_fn)
+            t_search_start = time.perf_counter()
+            x_cf, dist, anchor_idx, n_qp = bvh.query_nearest(
+                x_query,
+                project_fn,
+                stats_out=bvh_stats,
+            )
+            query_loop_time_s = time.perf_counter() - t_search_start
+            search_time_exclusive_s = max(0.0, query_loop_time_s - projection_time_s)
 
-        elif method == 'knn':
+            profiling.update({
+                "query_loop_time_ms": 1e3 * query_loop_time_s,
+                "search_time_ms": 1e3 * search_time_exclusive_s,
+                "projection_time_ms": 1e3 * projection_time_s,
+                "n_nodes_popped": bvh_stats.get("n_nodes_popped", np.nan),
+                "n_nodes_pruned": bvh_stats.get("n_nodes_pruned", np.nan),
+                "n_leaves_visited": bvh_stats.get("n_leaves_visited", np.nan),
+                "max_queue_size": bvh_stats.get("max_queue_size", np.nan),
+                "n_candidates_considered": bvh_stats.get("n_candidates_considered", np.nan),
+            })
+
+        elif resolved_method == 'sorted':
+            # Vectorised center-distance lower-bound scan with early stopping.
+            # Tighter lower bounds than BVH for L2 atlas norm → fewer QP solves.
+            sorted_stats: Dict[str, float] = {}
+
+            def project_fn(idx: int) -> Tuple[Optional[np.ndarray], float]:
+                nonlocal projection_time_s
+                t0 = time.perf_counter()
+                out = self._project_onto_polytope(
+                    x_query,
+                    bd['lA'][idx],
+                    bd['lbias'][idx],
+                    bd['X'][idx],
+                    eps_i=float(bd['eps'][idx]),
+                    delta=delta,
+                    robust_norm=robust_norm,
+                    maxiter=solver_maxiter,
+                    tol=solver_tol,
+                    fixed_dims=fixed_dims
+                )
+                projection_time_s += (time.perf_counter() - t0)
+                return out
+
+            bvh = self.bvh_indices[target_class]
+            atlas_norm = self.norm if self.norm is not None else 2
+            t_search_start = time.perf_counter()
+            x_cf, dist, anchor_idx, n_qp = bvh.query_sorted_lower_bounds(
+                x_query,
+                eps_array=bd['eps'],
+                project_fn=project_fn,
+                atlas_norm=atlas_norm,
+                stats_out=sorted_stats,
+            )
+            query_loop_time_s = time.perf_counter() - t_search_start
+            search_time_exclusive_s = max(0.0, query_loop_time_s - projection_time_s)
+
+            profiling.update({
+                "query_loop_time_ms": 1e3 * query_loop_time_s,
+                "search_time_ms": 1e3 * search_time_exclusive_s,
+                "projection_time_ms": 1e3 * projection_time_s,
+                "n_candidates_considered": sorted_stats.get("n_candidates_considered", np.nan),
+                "n_candidates_total": sorted_stats.get("n_candidates_total", np.nan),
+                "n_candidates_pruned_by_bound": sorted_stats.get("n_candidates_pruned_by_bound", np.nan),
+                "best_lower_bound_at_termination": sorted_stats.get("best_lower_bound_at_termination", np.nan),
+            })
+
+        elif resolved_method == 'knn':
             # K-nearest neighbors heuristic
+            t_search_start = time.perf_counter()
             anchors = bd['X']
             dists_to_anchors = np.linalg.norm(anchors - x_query, axis=1)
             nearest_indices = np.argsort(dists_to_anchors)[:k]
+            search_time_s = time.perf_counter() - t_search_start
 
             x_cf = None
             dist = np.inf
@@ -637,6 +762,7 @@ class CertifiedAtlas:
             n_qp = 0
 
             for idx in nearest_indices:
+                t0 = time.perf_counter()
                 proj, d = self._project_onto_polytope(
                     x_query,
                     bd['lA'][idx],
@@ -649,6 +775,7 @@ class CertifiedAtlas:
                     tol=solver_tol,
                     fixed_dims=fixed_dims
                 )
+                projection_time_s += (time.perf_counter() - t0)
                 n_qp += 1
 
                 if d < dist:
@@ -656,8 +783,24 @@ class CertifiedAtlas:
                     dist = d
                     anchor_idx = idx
 
+            profiling.update({
+                "query_loop_time_ms": 1e3 * (search_time_s + projection_time_s),
+                "search_time_ms": 1e3 * search_time_s,
+                "projection_time_ms": 1e3 * projection_time_s,
+                "n_candidates_considered": float(len(nearest_indices)),
+                "n_candidates_total": float(len(anchors)),
+            })
+
         else:
-            raise ValueError(f"Unknown method: {method}. Use 'bvh' or 'knn'.")
+            raise ValueError(f"Unknown method: {resolved_method}. Use 'sorted', 'bvh', or 'knn'.")
+
+        total_time_s = time.perf_counter() - t_total_start
+        profiling.update({
+            "total_time_ms": 1e3 * total_time_s,
+            "n_qp_solved": float(n_qp),
+            "success": float(x_cf is not None),
+            "distance": float(dist),
+        })
 
         return CounterfactualResult(
             x_cf=x_cf,
@@ -665,14 +808,15 @@ class CertifiedAtlas:
             target_class=target_class,
             anchor_idx=anchor_idx,
             n_qp_solved=n_qp,
-            success=x_cf is not None
+            success=x_cf is not None,
+            profiling=profiling,
         )
 
     def find_counterfactual_batch(
         self,
         X_query: np.ndarray,
         target_class: int,
-        method: str = 'bvh',
+        method: Optional[str] = None,
         k: int = 10,
         delta: float = 0.0,
         robust_norm: Optional[int] = None,
@@ -690,7 +834,8 @@ class CertifiedAtlas:
         target_class : int
             The target class for all counterfactuals.
         method : str, optional
-            Search method: 'bvh' or 'knn'. Default: 'bvh'.
+            Search method: 'sorted', 'bvh' or 'knn'.
+            Default: atlas ``default_query_method`` ("sorted" by default).
         k : int, optional
             For 'knn' method: number of nearest neighbors. Default: 10.
         delta : float, optional

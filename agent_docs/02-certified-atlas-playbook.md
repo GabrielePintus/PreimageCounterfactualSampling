@@ -42,7 +42,8 @@ Epsilon strategies:
 ## Query Phase (Online)
 
 `find_counterfactual(...)` supports:
-- `method='bvh'` (recommended exact branch-and-bound over BVH)
+- default `method='sorted'` (vectorised lower-bound ordering + early stop)
+- `method='bvh'` (exact branch-and-bound over BVH)
 - `method='knn'` heuristic over nearest anchors
 
 Robust counterfactual options:

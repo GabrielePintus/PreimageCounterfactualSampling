@@ -1,0 +1,43 @@
+seed: 42
+
+dataset:
+  name: adult
+  params:
+    data_dir: data/
+
+sampling:
+  n_train: 5000
+  n_queries: 200
+  train_method: kmedoids   # kmedoids | random
+
+atlas:
+  params:
+    checkpoint: checkpoints/adult_classifier/best.ckpt
+    device: cpu
+    eps_alpha: 0.25
+    k_per_class: null
+    max_samples_per_class: null
+    norm: 1
+    batch_size: 256
+
+variants:
+  - name: bvh
+    method: bvh
+    params:
+      delta: 0.0
+
+  - name: sorted
+    method: sorted
+    params:
+      delta: 0.0
+
+  - name: knn_25
+    method: knn
+    params:
+      k: 25
+      delta: 0.0
+
+output:
+  per_query_path: results/cpp_query_benchmark_adult.parquet
+  summary_path: results/cpp_query_benchmark_adult_summary.parquet
+  report_md_path: results/cpp_query_benchmark_adult_summary.md

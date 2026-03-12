@@ -12,3 +12,9 @@ from counterfactuals.experiments.runner import run_from_config_path
 
 summary = run_from_config_path("configs/counterfactual_experiment.yaml")
 ```
+
+## Shared preprocessing
+
+`run_experiment` supports an optional `preprocessing` block in the YAML config.
+When enabled (e.g. `name: pca`), methods operate in transformed space while all
+metrics are computed after inverse-transform in the original feature space.

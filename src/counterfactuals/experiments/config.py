@@ -22,6 +22,7 @@ class ExperimentConfig:
     model: ComponentConfig
     dataset: ComponentConfig
     metrics: List[ComponentConfig]
+    preprocessing: ComponentConfig | None = None
     seed: int = 42
     max_test_samples: int = 64
 
@@ -47,11 +48,28 @@ def parse_experiment_config(raw: Dict[str, Any]) -> ExperimentConfig:
         else:
             raise ValueError("Invalid metric entry. Use string or {'name': ..., 'params': ...}.")
 
+    preprocessing_raw = raw.get("preprocessing")
+    preprocessing: ComponentConfig | None = None
+    if preprocessing_raw is not None:
+        if isinstance(preprocessing_raw, str):
+            preprocessing = ComponentConfig(name=preprocessing_raw, params={})
+        elif isinstance(preprocessing_raw, dict):
+            enabled = bool(preprocessing_raw.get("enabled", True))
+            if enabled:
+                name = preprocessing_raw.get("name", "identity")
+                params = dict(preprocessing_raw.get("params", {}))
+                preprocessing = ComponentConfig(name=str(name), params=params)
+        else:
+            raise ValueError(
+                "Invalid 'preprocessing' config. Use string or mapping with optional enabled/name/params."
+            )
+
     return ExperimentConfig(
         method=parse_component("method"),
         model=parse_component("model"),
         dataset=parse_component("dataset"),
         metrics=metrics,
+        preprocessing=preprocessing,
         seed=int(raw.get("seed", 42)),
         max_test_samples=int(raw.get("max_test_samples", 64)),
     )

@@ -9,7 +9,7 @@ coverage and certifiability guarantees.
 import heapq
 import numpy as np
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Callable
+from typing import Optional, List, Tuple, Callable, Dict
 
 
 @dataclass
@@ -196,7 +196,8 @@ class BVHIndex:
     def query_nearest(
         self,
         x: np.ndarray,
-        project_fn: Callable[[int], Tuple[Optional[np.ndarray], float]]
+        project_fn: Callable[[int], Tuple[Optional[np.ndarray], float]],
+        stats_out: Optional[Dict[str, float]] = None,
     ) -> Tuple[Optional[np.ndarray], float, Optional[int], int]:
         """
         Find the nearest point in any polytope using branch-and-bound search.
@@ -228,18 +229,26 @@ class BVHIndex:
         best_dist = np.inf
         best_idx = None
         n_projections = 0
+        n_nodes_popped = 0
+        n_nodes_pruned = 0
+        n_leaves_visited = 0
+        max_queue_size = 1
 
         # Priority queue: (distance_to_bbox, unique_id, node)
         pq = [(self.root.distance_to_point(x), id(self.root), self.root)]
 
         while pq:
+            max_queue_size = max(max_queue_size, len(pq))
             dist_to_bbox, _, node = heapq.heappop(pq)
+            n_nodes_popped += 1
 
             # Pruning: skip if distance to bbox >= best found
             if dist_to_bbox >= best_dist:
+                n_nodes_pruned += 1
                 continue
 
             if node.is_leaf():
+                n_leaves_visited += 1
                 # Project onto this polytope
                 point, dist = project_fn(node.polytope_idx)
                 n_projections += 1
@@ -255,6 +264,13 @@ class BVHIndex:
                         child_dist = child.distance_to_point(x)
                         if child_dist < best_dist:
                             heapq.heappush(pq, (child_dist, id(child), child))
+
+        if stats_out is not None:
+            stats_out["n_nodes_popped"] = float(n_nodes_popped)
+            stats_out["n_nodes_pruned"] = float(n_nodes_pruned)
+            stats_out["n_leaves_visited"] = float(n_leaves_visited)
+            stats_out["max_queue_size"] = float(max_queue_size)
+            stats_out["n_candidates_considered"] = float(n_projections)
 
         return best_point, best_dist, best_idx, n_projections
 
@@ -285,3 +301,85 @@ class BVHIndex:
         # For small k, this is efficient enough
         dists = np.linalg.norm(self.centers - x, axis=1)
         return list(np.argsort(dists)[:k])
+
+    def query_sorted_lower_bounds(
+        self,
+        x: np.ndarray,
+        eps_array: np.ndarray,
+        project_fn: Callable[[int], Tuple[Optional[np.ndarray], float]],
+        atlas_norm: int = 2,
+        stats_out: Optional[Dict[str, float]] = None,
+    ) -> Tuple[Optional[np.ndarray], float, Optional[int], int]:
+        """Find the nearest polytope using a vectorised sorted lower-bound scan.
+
+        For each polytope i, a lower bound on the projection distance is computed
+        without solving any QP:
+
+        - L2 / L1 atlas norm: lb_i = max(0, ||x - c_i||_2 - eps_i)
+          [tight for L2 balls; valid for L1 since L1 ball ⊆ L2 ball]
+        - L∞ atlas norm: lb_i = ||max(0, |x - c_i| - eps_i)||_2
+          [exact for L∞ boxes — same formula as BVH but vectorised]
+
+        Polytopes are sorted ascending by lb_i. The loop terminates as soon as
+        lb_i >= best_dist, because all remaining polytopes are provably farther.
+
+        For L2 atlas norm this gives tighter lower bounds than the BVH (which uses
+        L∞ bounding boxes that are loose for L2 balls), so fewer QPs are solved.
+
+        Parameters
+        ----------
+        x : np.ndarray
+            Query point, shape (d,).
+        eps_array : np.ndarray
+            Per-polytope epsilon values, shape (n_polytopes,).
+        project_fn : callable
+            Function that takes a polytope index and returns (projected_point, distance).
+        atlas_norm : int or float
+            The Lp norm used for the certification ball. Default 2.
+
+        Returns
+        -------
+        best_point, best_dist, best_idx, n_projections
+        """
+        if atlas_norm == np.inf:
+            # Exact tight lower bound for L∞ box: ||max(0, |x-c| - eps)||_2
+            diff = np.abs(x[None, :] - self.centers) - eps_array[:, None]
+            lower_bounds = np.linalg.norm(np.maximum(0.0, diff), axis=1)
+        else:
+            # L2 and L1: max(0, ||x-c||_2 - eps)
+            center_dists = np.linalg.norm(self.centers - x, axis=1)
+            lower_bounds = np.maximum(0.0, center_dists - eps_array)
+
+        sorted_idx = np.argsort(lower_bounds)
+
+        best_point: Optional[np.ndarray] = None
+        best_dist = np.inf
+        best_idx: Optional[int] = None
+        n_projections = 0
+        n_pruned_by_bound = 0
+        best_lower_bound_at_termination = np.inf
+
+        for i in sorted_idx:
+            if lower_bounds[i] >= best_dist:
+                n_pruned_by_bound = int(len(sorted_idx) - n_projections)
+                best_lower_bound_at_termination = float(lower_bounds[i])
+                break  # All remaining polytopes have lb >= best_dist — prune
+            point, dist = project_fn(int(i))
+            n_projections += 1
+            if dist < best_dist:
+                best_dist = dist
+                best_point = point
+                best_idx = int(i)
+
+        if n_pruned_by_bound == 0:
+            n_pruned_by_bound = int(len(sorted_idx) - n_projections)
+            if n_projections < len(sorted_idx):
+                best_lower_bound_at_termination = float(lower_bounds[sorted_idx[n_projections]])
+
+        if stats_out is not None:
+            stats_out["n_candidates_considered"] = float(n_projections)
+            stats_out["n_candidates_total"] = float(len(sorted_idx))
+            stats_out["n_candidates_pruned_by_bound"] = float(n_pruned_by_bound)
+            stats_out["best_lower_bound_at_termination"] = float(best_lower_bound_at_termination)
+
+        return best_point, best_dist, best_idx, n_projections
