@@ -118,128 +118,123 @@ class MNISTClassifier(nn.Module):
 
 class TabularClassifier(nn.Module):
     """
-    Simple feedforward neural network for tabular data classification.
+    Feedforward neural network for tabular data with one-hot encoded categoricals.
 
-    Numerical features are passed directly; categorical features are embedded
-    via nn.Embedding with per-feature cardinalities.
+    Input features are a flat float vector where numerical columns are
+    StandardScaler-normalized and categorical columns are one-hot encoded (OHE).
+    The network is: BatchNorm1d → Linear → ReLU → Linear → ReLU → Linear.
+    LiRPA certifies the full ``net`` (including BN) directly on the OHE input.
 
     Parameters
     ----------
     input_types : list[str]
-        List of feature types, one per column: "numerical" or "categorical".
+        List of feature types per *original* column: "numerical" or "categorical".
     cardinalities : list[int]
-        Number of unique values for each categorical feature, in the order they
-        appear in input_types. Must have length == number of "categorical" entries.
-    embedding_dim : int, optional
-        Embedding dimension used for all categorical features (default: 8).
+        Number of OHE categories for each categorical feature, in order.
+        Length must equal the number of "categorical" entries in input_types.
     hidden_dims : tuple[int, ...], optional
         Hidden layer dimensions (default: (64, 32)).
     num_classes : int, optional
         Number of output classes (default: 2).
+    dropout : float, optional
+        Dropout probability applied after each hidden ReLU (default: 0.0 = disabled).
     """
 
-    def __init__(self, input_types, cardinalities, embedding_dim=8, hidden_dims=(64, 32), num_classes=2):
+    def __init__(self, input_types, cardinalities, hidden_dims=(64, 32), num_classes=2, dropout=0.0):
         super(TabularClassifier, self).__init__()
         self.input_types = input_types
-        self.embeddings = nn.ModuleList()
-        cat_iter = iter(cardinalities)
-        # Precompute slice boundaries in the embedded representation
-        self._slices = []  # (start, end) per feature column
+        self.cardinalities = list(cardinalities)
+
+        # Precompute slice boundaries in the OHE feature vector.
+        self._slices = []  # (start, end) per original column
         pos = 0
-        input_dim = 0
+        cat_iter = iter(cardinalities)
         for t in input_types:
             if t == "numerical":
-                self.embeddings.append(None)
                 self._slices.append((pos, pos + 1))
                 pos += 1
-                input_dim += 1
             elif t == "categorical":
-                cardinality = next(cat_iter)
-                self.embeddings.append(nn.Embedding(cardinality, embedding_dim))
-                self._slices.append((pos, pos + embedding_dim))
-                pos += embedding_dim
-                input_dim += embedding_dim
+                card = next(cat_iter)
+                self._slices.append((pos, pos + card))
+                pos += card
             else:
                 raise ValueError(f"Unknown input type: {t}")
-        self.embed_dim = pos
-        self.bn = nn.BatchNorm1d(input_dim)
+
+        n_features = pos
+        self.embed_dim = n_features
         self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dims[0]),
+            nn.Dropout(dropout),
+            nn.Linear(n_features, hidden_dims[0]),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dims[0], hidden_dims[1]),
             nn.ReLU(),
-            nn.Linear(hidden_dims[1], num_classes)
+            nn.Linear(hidden_dims[1], num_classes),
         )
-
-    def embed(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Map raw features to the embedded representation.
-
-        Numerical columns are passed through as-is; categorical columns are
-        looked up in their embedding table. The result is a single float tensor
-        suitable for LiRPA bound propagation through self.net.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Shape (batch_size, n_features). Categorical columns must contain
-            integer indices in [0, cardinality).
-
-        Returns
-        -------
-        torch.Tensor
-            Shape (batch_size, embed_dim).
-        """
-        parts = []
-        for i, (emb, t) in enumerate(zip(self.embeddings, self.input_types)):
-            if t == "numerical":
-                parts.append(x[:, i:i+1])
-            else:
-                parts.append(emb(x[:, i].long()))
-        return self.bn(torch.cat(parts, dim=1))
 
     @torch.no_grad()
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         """
-        Decode an embedded representation back to original feature space.
+        Snap a continuous OHE vector (from the QP solver) to valid discrete features.
 
-        ``embed()`` applies batch normalisation after concatenating numerical
-        and categorical embedding dims.  This method inverts that BN first
-        (recovering pre-BN values), then:
-
-        * Numerical features: the pre-BN value equals the original raw value.
-        * Categorical features: the pre-BN value is compared against the raw
-          embedding weights (before BN) to find the nearest valid category.
+        The QP solver operates in the continuous OHE space, so categorical blocks
+        may have fractional values. This method snaps each block to the nearest
+        valid one-hot vertex via argmax; numerical features are passed through.
 
         Parameters
         ----------
         z : torch.Tensor
-            Shape (batch_size, embed_dim).
+            Shape (batch_size, n_ohe_features). Continuous output from QP solver.
 
         Returns
         -------
         torch.Tensor
-            Shape (batch_size, n_features). Categorical columns contain the
-            nearest valid integer category index (as float).
+            Shape (batch_size, n_ohe_features). Numerical slots unchanged;
+            categorical slots are 0/1 one-hot.
         """
-        # Invert batch normalisation: z = γ*(x_pre - μ)/√(σ²+ε) + β
-        # → x_pre = (z - β)/γ * √(σ²+ε) + μ
-        std = torch.sqrt(self.bn.running_var + self.bn.eps)
-        x_prebn = (z - self.bn.bias) / self.bn.weight * std + self.bn.running_mean
-
-        x_out = torch.empty(z.shape[0], len(self.input_types), device=z.device, dtype=z.dtype)
-        for i, (emb, t, (start, end)) in enumerate(zip(self.embeddings, self.input_types, self._slices)):
+        x_out = torch.zeros_like(z)
+        for t, (start, end) in zip(self.input_types, self._slices):
             if t == "numerical":
-                x_out[:, i] = x_prebn[:, start]
+                x_out[:, start] = z[:, start]
             else:
-                prebn_block = x_prebn[:, start:end]          # (batch, emb_dim)
-                dists = torch.cdist(prebn_block, emb.weight) # (batch, cardinality)
-                x_out[:, i] = dists.argmin(dim=1).to(z.dtype)
+                idx = z[:, start:end].argmax(dim=1)
+                x_out[:, start:end].scatter_(1, idx.unsqueeze(1), 1.0)
         return x_out
+
+    @torch.no_grad()
+    def decode_bn(self, z_bn: torch.Tensor, bn: torch.nn.BatchNorm1d) -> torch.Tensor:
+        """Invert BatchNorm then argmax-snap categorical blocks.
+
+        The QP solver (Fix 2) operates in BN-normalized space. This method
+        maps z_bn back to the raw OHE space (by inverting BN), then snaps
+        categorical blocks to valid one-hot vertices via decode().
+
+        Parameters
+        ----------
+        z_bn : torch.Tensor
+            Shape (batch_size, n_ohe_features). Point in BN-normalized space.
+        bn : torch.nn.BatchNorm1d
+            The BatchNorm layer with running stats from training.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape (batch_size, n_ohe_features). Valid discrete OHE vector.
+        """
+        weight = bn.weight.data   # (d,)
+        bias   = bn.bias.data     # (d,)
+        mean   = bn.running_mean  # (d,)
+        var    = bn.running_var   # (d,)
+        eps    = bn.eps           # scalar
+
+        z_bn = z_bn.to(weight.device)
+        # Invert BN: x = (z_bn - bias) / weight * sqrt(var + eps) + mean
+        x_ohe = (z_bn - bias) / weight * torch.sqrt(var + eps) + mean
+        return self.decode(x_ohe)
 
     def feature_dims(self, feature_names: list, all_cols: list) -> 'np.ndarray':
         """
-        Return the embedding-space dimension indices for the given feature names.
+        Return the OHE-space dimension indices for the given original feature names.
 
         Use this to build the ``fixed_dims`` argument for
         ``CertifiedAtlas.find_counterfactual``.
@@ -249,12 +244,12 @@ class TabularClassifier(nn.Module):
         feature_names : list[str]
             Column names that should be held constant.
         all_cols : list[str]
-            Ordered list of all column names (same order used at training time).
+            Ordered list of all original column names (same order used at training time).
 
         Returns
         -------
         np.ndarray of int
-            Indices into the embed_dim-dimensional space.
+            Indices into the n_ohe_features-dimensional space.
 
         Example
         -------
@@ -273,12 +268,11 @@ class TabularClassifier(nn.Module):
         Parameters
         ----------
         x : torch.Tensor
-            Input tensor of shape (batch_size, n_features). Categorical columns
-            must contain integer indices in [0, cardinality).
+            Shape (batch_size, n_ohe_features).
 
         Returns
         -------
         torch.Tensor
             Logits of shape (batch_size, num_classes).
         """
-        return self.net(self.embed(x))
+        return self.net(x)

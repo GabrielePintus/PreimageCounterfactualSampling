@@ -219,28 +219,38 @@ def _build_certified_atlas_method(
 
     device = params.get("device", "cpu")
     eps_alpha = float(params.get("eps_alpha", 0.25))
-    k_per_class = int(params.get("k_per_class", 500))
-    norm = int(params.get("norm", 1))
+    _k_per_class = params.get("k_per_class", 500)
+    k_per_class = int(_k_per_class) if _k_per_class is not None else None
+    _norm_raw = params.get("norm", 2)
+    norm = np.inf if str(_norm_raw).lower() in ("inf", "infinity") else int(_norm_raw)
     batch_size = int(params.get("batch_size", 256))
+    _msc = params.get("max_samples_per_class", None)
+    max_samples_per_class = int(_msc) if _msc is not None else None
 
     # Load backbone + Lightning checkpoint.
     backbone = TabularClassifier(
         input_types=INPUT_TYPES,
         cardinalities=CARDINALITIES,
-        embedding_dim=1,
-        hidden_dims=[64, 32],
+        hidden_dims=[32, 8],
         num_classes=2,
+        dropout=0.2,
     )
     lit = LitClassifier.load_from_checkpoint(ckpt, model=backbone, map_location=device)
     model = lit.model.eval().to(device)
-    atlas_model = TorchModelWrapper(model=model.net, device=device)
 
-    # Embed train and query points.
-    with torch.no_grad():
-        z_train = model.embed(torch.from_numpy(x_train).to(device)).cpu().numpy().astype(np.float32)
-        z_queries = model.embed(torch.from_numpy(x_queries).to(device)).cpu().numpy().astype(np.float32)
+    # Strip Dropout layers before LiRPA certification (identity in eval mode).
+    # Numerical features are already StandardScaler-normalised by the datamodule;
+    # the network has no BatchNorm, so the QP operates directly in the input space.
+    net_for_atlas = torch.nn.Sequential(
+        *[m for m in model.net if not isinstance(m, torch.nn.Dropout)]
+    )
+    atlas_model = TorchModelWrapper(model=net_for_atlas, device=device)
 
-    # Class-wise k-medoids on embedded train points (mirrors the notebook setup).
+    # Input space = embedding space; data is already standardized by the datamodule.
+    z_train   = x_train
+    z_queries = x_queries
+
+    # Class-wise k-medoids on raw OHE train points.
     try:
         from sklearn_extra.cluster import KMedoids
         def _medoid_indices(X: np.ndarray, k: int) -> np.ndarray:
@@ -259,23 +269,72 @@ def _build_certified_atlas_method(
     z_parts, y_parts = [], []
     for cls in np.unique(y_train):
         cls_idx = np.where(y_train == cls)[0]
-        med_idx = _medoid_indices(z_train[cls_idx], k_per_class)
+        if k_per_class is not None:
+            med_idx = _medoid_indices(z_train[cls_idx], k_per_class)
+        else:
+            med_idx = np.arange(len(cls_idx))
         z_parts.append(torch.from_numpy(z_train[cls_idx[med_idx]]).float())
         y_parts.append(torch.full((len(med_idx),), int(cls), dtype=torch.long))
         print(f"  [my_method] class {int(cls)}: {len(cls_idx)} -> {len(med_idx)} medoids")
 
     medoid_ds = TensorDataset(torch.cat(z_parts), torch.cat(y_parts))
 
-    # Build atlas on the embedding head.
+    # Build atlas in input space (standardized numerical + raw OHE categorical).
     eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
-    atlas = CertifiedAtlas(model.net, medoid_ds, device=device)
-    atlas.build(eps_strategy=eps_strategy, norm=norm, batch_size=batch_size)
+    atlas = CertifiedAtlas(net_for_atlas, medoid_ds, device=device)
+    atlas.build(
+        eps_strategy=eps_strategy,
+        norm=norm,
+        batch_size=batch_size,
+        max_samples_per_class=max_samples_per_class,
+    )
+
+    # OHE simplex constraints: sum(block)==1 is valid in raw OHE space.
+    cat_slices = [
+        (s, e)
+        for t, (s, e) in zip(INPUT_TYPES, model._slices)
+        if t == "categorical"
+    ]
+    atlas.ohe_slices = cat_slices if cat_slices else None
+
     print(atlas.summary())
 
     atlas_method = CertifiedAtlasMethod(atlas=atlas, random_seed=seed)
     atlas_method.fit(x_train=z_train, y_train=y_train, model=atlas_model)
 
-    return atlas_method, atlas_model, model, z_train, z_queries
+    return atlas_method, atlas_model, model, z_train, z_queries, None
+
+
+# ---------------------------------------------------------------------------
+# PyTorch checkpoint model loader
+# ---------------------------------------------------------------------------
+
+def _build_torch_model_from_checkpoint(checkpoint: str, device: str = "cpu") -> 'TorchModelWrapper':
+    """Load TabularClassifier from a Lightning checkpoint and return a TorchModelWrapper.
+
+    Dropout layers are stripped so the model is deterministic at inference time.
+    This wrapper can be used as the shared benchmark model so that all methods
+    (DiCE, FACE, NN, growing_spheres, CPP) target the same classifier.
+    """
+    import torch
+    from models.classifiers import TabularClassifier
+    from training.datamodules.adult import CARDINALITIES, INPUT_TYPES
+    from training.lit_classifier import LitClassifier
+    from counterfactuals.models.torch_model import TorchModelWrapper
+
+    backbone = TabularClassifier(
+        input_types=INPUT_TYPES,
+        cardinalities=CARDINALITIES,
+        hidden_dims=[32, 8],
+        num_classes=2,
+        dropout=0.2,
+    )
+    lit = LitClassifier.load_from_checkpoint(checkpoint, model=backbone, map_location=device)
+    net = lit.model.eval().to(device)
+    net_no_dropout = torch.nn.Sequential(
+        *[m for m in net.net if not isinstance(m, torch.nn.Dropout)]
+    )
+    return TorchModelWrapper(model=net_no_dropout, device=device)
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +420,7 @@ def main() -> None:
     # Try to load feature type annotations from the dataset's datamodule.
     # Falls back to treating all features as numerical if not available.
     try:
-        from training.datamodules.adult import INPUT_TYPES as _input_types
+        from training.datamodules.adult import OHE_FEATURE_TYPES as _input_types
     except ImportError:
         _input_types = ["numerical"] * n_features
 
@@ -392,13 +451,21 @@ def main() -> None:
 
     # --- Model ---
     model_cfg = cfg["model"]
-    model = registries["model"].create(model_cfg["name"], **model_cfg.get("params", {}))
-    estimator = getattr(model, "estimator", None)
-    if estimator is not None and hasattr(estimator, "fit"):
-        print(f"[INFO] Fitting model ({model_cfg['name']}) on {len(x_train)} train samples...")
-        estimator.fit(x_train, y_train)
+    if model_cfg["name"] == "tabular_classifier_ckpt":
+        ckpt = model_cfg.get("params", {}).get("checkpoint")
+        device = model_cfg.get("params", {}).get("device", "cpu")
+        print(f"[INFO] Loading TabularClassifier from checkpoint: {ckpt}")
+        model = _build_torch_model_from_checkpoint(ckpt, device=device)
         acc = float(np.mean(model.predict(x_train) == y_train))
         print(f"[INFO] Train accuracy: {acc:.3f}")
+    else:
+        model = registries["model"].create(model_cfg["name"], **model_cfg.get("params", {}))
+        estimator = getattr(model, "estimator", None)
+        if estimator is not None and hasattr(estimator, "fit"):
+            print(f"[INFO] Fitting model ({model_cfg['name']}) on {len(x_train)} train samples...")
+            estimator.fit(x_train, y_train)
+            acc = float(np.mean(model.predict(x_train) == y_train))
+            print(f"[INFO] Train accuracy: {acc:.3f}")
 
     # Pre-compute original class predictions for all queries (shared across methods).
     y_orig_all = model.predict(x_queries)
@@ -420,12 +487,12 @@ def main() -> None:
         # we decode CFs back to raw feature space for fair comparison.
         embed_model = None   # full TabularClassifier (has .decode()); set for my_method only
         embed_device = "cpu"
-        if method_name == "my_method":
+        if method_name in ("my_method", "cpp"):
             try:
-                method, active_model, embed_model, _, active_queries = _build_certified_atlas_method(
+                method, active_model, embed_model, _, active_queries, _ = _build_certified_atlas_method(
                     params=method_params,
-                    x_train=x_train_full,
-                    y_train=y_train_full,
+                    x_train=x_train,
+                    y_train=y_train,
                     x_queries=x_queries,
                     seed=seed,
                 )
@@ -481,17 +548,23 @@ def main() -> None:
                 )
                 runtime_s = time.perf_counter() - t0
                 x_cf_active = np.asarray(result.x_cf, dtype=np.float32)
-                y_cf = int(active_model.predict(x_cf_active[None, :])[0])
 
-                # For my_method: decode embedding-space CF to raw feature space.
+                # For cpp/my_method: QP returns a point in raw OHE space; apply
+                # argmax-snap to produce a valid discrete OHE vector.
+                # y_cf and success are re-evaluated on the decoded CF using the
+                # shared full model, so all methods are judged in the same space.
                 if embed_model is not None:
                     import torch
                     with torch.no_grad():
                         x_cf_row = embed_model.decode(
                             torch.from_numpy(x_cf_active[None, :]).to(embed_device)
                         ).cpu().numpy()[0].astype(np.float32)
+                    y_cf = int(model.predict(x_cf_row[None, :])[0])
+                    cf_success = (y_cf == target_class)
                 else:
                     x_cf_row = x_cf_active
+                    y_cf = int(active_model.predict(x_cf_active[None, :])[0])
+                    cf_success = result.success
 
                 # Redundancy: fraction of changed features that can be individually
                 # reverted without flipping the CF out of the target class.
@@ -513,13 +586,13 @@ def main() -> None:
                 all_rows.append(
                     _success_row(
                         method_name, q_idx, x_orig_raw, int(y_orig),
-                        x_cf_row, y_cf, result.success, runtime_s, n_features, space,
+                        x_cf_row, y_cf, cf_success, runtime_s, n_features, space,
                         mad_weights=mad_weights,
                         input_types=_input_types,
                         redundancy=redundancy_val,
                     )
                 )
-                n_ok += int(result.success)
+                n_ok += int(cf_success)
             except TimeoutError:
                 runtime_s = time.perf_counter() - t0
                 all_rows.append(
@@ -538,7 +611,7 @@ def main() -> None:
             pbar.set_postfix(valid=n_ok, failed=n_failed)
 
     df = pd.DataFrame(all_rows)
-    df.to_parquet(output_path, index=False)
+    df.to_parquet(output_path, index=False, compression="gzip")
     print(f"\n[INFO] Saved {len(df)} rows to {output_path}")
 
     _print_summary(df)

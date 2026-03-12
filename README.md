@@ -69,7 +69,7 @@ $$\min_{\mathbf{z}}\; \|\mathbf{z} - \mathbf{x}_0\|_2^2 \quad \text{s.t.} \quad 
 
 Solver dispatch depends on the norm:
 - **$L_\infty$**: SLSQP (all constraints are linear, very fast)
-- **$L_2$ / $L_1$**: CVXPY + CLARABEL (handles SOCP and $L_1$ ball constraints natively)
+- **$L_2$ / $L_1$**: CVXPY with solver fallback chain OSQP → CLARABEL → SCS (handles SOCP and $L_1$ ball constraints natively)
 
 **3. Return the global minimum.** The counterfactual is the projection with smallest distance across all evaluated polytopes. BVH guarantees this is the global minimum over the full atlas.
 
@@ -100,6 +100,41 @@ Setting $\delta = 0$ recovers the standard (non-robust) formulation.
 
 ---
 
+### Adaptive ε via Clearance Strategy
+
+A global fixed ε is a poor fit for heterogeneous datasets: points near the class boundary need a small ball (for feasibility); isolated interior points can tolerate a much larger one (richer polytope). The library provides pluggable **ε strategies** decoupled from atlas construction:
+
+```
+eps = strategy.compute_eps(X, y)   # shape (N,) — one value per training point
+```
+
+| Strategy | Formula | Use case |
+|---|---|---|
+| `ConstantEpsStrategy(eps)` | $\varepsilon_i = \varepsilon$ | Baseline, backward-compatible |
+| `NearestOppositeClassClearanceStrategy(alpha)` | $\varepsilon_i = \alpha \cdot \min_{j:\, y_j \neq y_i} \|\mathbf{x}_i - \mathbf{x}_j\|_\infty$ | Adaptive; recommended for tabular data |
+
+**NearestOppositeClassClearanceStrategy** sets each point's ε to a fraction $\alpha \in (0, 0.5)$ of its L∞ distance to the nearest opposite-class training point. At $\alpha < 0.5$ the certification ball never crosses a class boundary, guaranteeing feasibility. The default $\alpha = 0.25$ leaves a comfortable 50% safety margin. The O(N²) pairwise Chebyshev distance computation runs once offline via `scipy.spatial.distance.cdist`.
+
+---
+
+### Atlas Construction via k-Medoids
+
+For large training sets, building one polytope per training point is expensive (each requires a LiRPA backward pass). The atlas is therefore built on a **representative subsample** rather than the full training set.
+
+For each class $t$, the $k$ medoids of the class's training points are selected using **k-medoids clustering** (sklearn-extra). Medoids are actual data points (unlike k-means centroids), so every atlas center is a genuine training example. This preserves the semantic interpretation of each polytope center.
+
+```python
+# benchmark.py / atlas construction
+from sklearn_extra.cluster import KMedoids
+km = KMedoids(n_clusters=k_per_class, metric='euclidean')
+km.fit(X_class)
+X_atlas = X_class[km.medoid_indices_]   # k real training points per class
+```
+
+The atlas size is controlled by `k_per_class` (set to `None` to use the full shared train pool). A fallback to random subsampling is provided if sklearn-extra is not installed.
+
+---
+
 ### Latent-Space Extension (VAE)
 
 For high-dimensional inputs like images, working directly in input space has two drawbacks: QP solves in 784D are slow, and LiRPA bounds tend to be loose (polytopes collapse to the unconstrained ball). The library supports an alternative: **build the atlas in the latent space of a VAE**.
@@ -114,6 +149,46 @@ For high-dimensional inputs like images, working directly in input space has two
 $$\mathcal{L} = \underbrace{\frac{1}{N}\sum \|\mathbf{x} - \hat{\mathbf{x}}\|^2_{\text{sum}}}_{\text{reconstruction}} + \beta \cdot \underbrace{\left(-\frac{1}{2}\mathbb{E}\left[\sum_k (1 + \log\sigma_k^2 - \mu_k^2 - \sigma_k^2)\right]\right)}_{\text{KL divergence}}$$
 
 The KL regularization encourages a structured latent space where class decision boundaries are closer to data points — directly targeting the polytope quality problem.
+
+---
+
+### Tabular Data Extension
+
+The library supports tabular datasets with mixed numerical and categorical features. Categorical features are encoded as **one-hot vectors** (OHE), giving a well-defined continuous input space suitable for LiRPA certification and QP projection.
+
+#### TabularClassifier Architecture
+
+`TabularClassifier` (`src/models/classifiers.py`) uses a simple feedforward MLP operating directly on OHE-encoded inputs:
+
+```
+raw x  ──►  [OHE encoding by datamodule]  ──►  Dropout  ──►  Linear  ──►  ReLU  ──►  Dropout  ──►  Linear  ──►  ReLU  ──►  Linear  ──►  logits
+```
+
+Numerical features are **StandardScaler-normalised** by the datamodule (fit on the training split) before being concatenated with the OHE categorical features. There is no BatchNorm layer in the model — standardisation happens offline in the data pipeline, so the 104D input vector is already in a clean, geometrically meaningful space.
+
+LiRPA certifies the full network (Dropout-stripped in eval mode) directly on the 104D OHE input.
+
+#### Adult Dataset Features
+
+The UCI Adult dataset has 14 features — 6 numerical and 8 categorical. After OHE encoding, the total input dimension is **104D** (6 numerical + 98 OHE categorical dims):
+
+| Feature | Type | Encoding |
+|---|---|---|
+| age, fnlwgt, education-num, capital-gain, capital-loss, hours-per-week | Numerical | StandardScaler (fit on train split) |
+| workclass (9), education (16), marital-status (7), occupation (15), relationship (6), race (5), sex (2), native-country (42) | Categorical | One-hot encoding (cardinality dims per feature) |
+
+#### OHE Simplex Constraints
+
+Each categorical block in the OHE vector must satisfy $\sum_{k \in \text{block}} x_k = 1$ and $x_k \geq 0$. These are enforced as **equality constraints in the QP** via `atlas.ohe_slices` — a list of `(start, end)` index pairs for each categorical block. After projection, `model.decode()` argmax-snaps each block to the nearest valid one-hot vertex.
+
+#### The Atlas → Decode Pipeline
+
+At query time:
+
+1. **Find CF in raw OHE space**: `atlas.find_counterfactual(x_query, target_class=t)` — projects `x_query` onto the nearest opposite-class polytope, with OHE simplex constraints enforced in the QP.
+2. **Snap to valid OHE**: `x_cf = model.decode(x_cf_raw)` — argmax-snaps each categorical block to a one-hot vertex, producing a valid discrete feature vector.
+
+Distances (L1, L2, L0) are measured in raw feature space after snapping, on the same footing as all other methods.
 
 ---
 
@@ -254,6 +329,7 @@ result_cross = atlas.find_counterfactual(
 | `2 - Preimage approximation.ipynb` | Compute and visualize certified polytopes in 2D |
 | `3.1 - MNIST-AE counterfactual sampling.ipynb` | Full pipeline in 32D VAE latent space |
 | `3.2 - Spiral counterfactual sampling.ipynb` | Full pipeline on 2D spiral (ground-truth polytope visualization, value-add metrics, BVH benchmark) |
+| `6.1 - Benchmark analysis.ipynb` | Full comparative analysis of 5 methods on Adult dataset: validity, sparsity, redundancy, on-manifoldness, empirical and certified robustness |
 
 ---
 
@@ -298,6 +374,24 @@ Polytopes are **genuinely non-trivial**: halfspace constraints bind, CFs are 15%
 
 The VAE's KL regularization brings decision boundaries closer (vs. plain AE: 95% feasibility at eps=0.1, 49D spatial), creating a harder feasibility tradeoff. **Key open problem**: finding the right (eps, norm) regime where polytopes are both feasible and non-trivially constrained in latent space.
 
+### Adult tabular dataset (OHE input space, `L1`, adaptive ε, n=500 queries, 5 000 train medoids)
+
+Benchmark comparing CPP against DiCE, FACE, nearest_neighbor, and growing_spheres on the UCI Adult dataset. All methods operate and are evaluated in the same raw OHE feature space.
+
+| Method | Validity | L1 (mean) | L2 (mean) | Sparsity (mean) | Runtime (mean) |
+|---|---|---|---|---|---|
+| **CPP** | **98.8%** | 7.34 | 2.65 | **8.5%** | 0.86 s |
+| nearest_neighbor | 100% | 6.91 | 2.57 | — | <1 ms |
+| FACE | 100% | 7.44 | 2.71 | — | — |
+| DiCE | 100% | 8.23 | 1.69 | 60% | — |
+| growing_spheres | 82.6% | 6.13 | 0.99 | 100% | — |
+
+Key findings:
+- **Validity**: CPP achieves 98.8% with certified guarantees. growing_spheres fails on 17.4% of queries.
+- **Sparsity**: CPP changes only 8.5% of features on average — the sparsest of all methods — consistent with its QP minimising the L1 norm with OHE simplex constraints.
+- **Proximity**: CPP's L1/L2 distances are competitive with retrieval-based methods (nearest_neighbor, FACE) and better than DiCE.
+- **Runtime**: 0.86 s/query for CPP reflects online BVH traversal + a small number of CVXPY solves. The atlas is built once offline.
+
 ---
 
 ## Key Design Decisions
@@ -331,4 +425,3 @@ The VAE's KL regularization brings decision boundaries closer (vs. plain AE: 95%
 - [auto_LiRPA](https://github.com/Verified-Intelligence/auto_LiRPA) — neural network certification via linear relaxation
 - [CVXPY](https://www.cvxpy.org/) / [CLARABEL](https://github.com/oxfordcontrol/Clarabel.jl) — convex optimization solver
 - [Shapely](https://shapely.readthedocs.io/) — 2D polygon operations for ground-truth area computation
-tabular data focused

@@ -47,10 +47,10 @@ model:
           - numerical    # capital-loss
           - numerical    # hours-per-week
           - categorical  # native-country
-        cardinalities: [9, 16, 7, 15, 6, 5, 2, 42]  # per categorical column, in order
-        embedding_dim: 1
-        hidden_dims: [64, 32]
+        cardinalities: [7, 16, 7, 14, 6, 5, 2, 41]  # per categorical column, in order
+        hidden_dims: [32, 8]
         num_classes: 2
+        dropout: 0.2
 
     initial_lr: 1e-3
     final_lr: 1e-6

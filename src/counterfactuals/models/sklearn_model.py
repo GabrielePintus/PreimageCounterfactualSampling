@@ -39,7 +39,7 @@ def build_sklearn_mlp(random_seed: int = 42) -> SklearnModelWrapper:
         solver="adam",
         alpha=1e-4,
         learning_rate_init=1e-3,
-        max_iter=200,
+        max_iter=1000,
         random_state=random_seed,
     )
     return SklearnModelWrapper(estimator=estimator)

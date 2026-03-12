@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.datasets import fetch_openml
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 # Column ordering (matches UCI Adult schema)
@@ -20,11 +20,24 @@ _NUMERICAL = {"age", "fnlwgt", "education-num", "capital-gain", "capital-loss", 
 _CATEGORICAL = ["workclass", "education", "marital-status", "occupation",
                 "relationship", "race", "sex", "native-country"]
 
-# Module-level constants: reference values for TabularClassifier init.
-# Cardinalities are computed after NaN → "missing" fill + LabelEncoder on the full dataset.
+# Module-level constants for TabularClassifier init.
+# Cardinalities are computed after NaN-row removal (empirically verified, see data/Adult/README.md).
 INPUT_TYPES = ["numerical" if c in _NUMERICAL else "categorical" for c in _ALL_COLS]
-CARDINALITIES = [9, 16, 7, 15, 6, 5, 2, 42]  # workclass, education, marital-status,
-                                               # occupation, relationship, race, sex, native-country
+CARDINALITIES = [7, 16, 7, 14, 6, 5, 2, 41]  # workclass, education, marital-status,
+                                              # occupation, relationship, race, sex, native-country
+# Computed from fetch_openml("adult", version=2) after dropna() — NaN rows are dropped,
+# so "missing" is never a category. The CSV-based count differs because it included NaN rows.
+N_FEATURES = len(_NUMERICAL) + sum(CARDINALITIES)  # 6 + 98 = 104
+
+# Per-OHE-dimension type annotation (length N_FEATURES = 108).
+# Used downstream for MAD computation: numerical dims get MAD-scaled, categorical dims get 1.0.
+_cat_iter = iter(CARDINALITIES)
+OHE_FEATURE_TYPES: list = []
+for _t in INPUT_TYPES:
+    if _t == "numerical":
+        OHE_FEATURE_TYPES.append("numerical")
+    else:
+        OHE_FEATURE_TYPES.extend(["categorical"] * next(_cat_iter))
 
 
 class AdultDataModule(L.LightningDataModule):
@@ -34,8 +47,11 @@ class AdultDataModule(L.LightningDataModule):
     Binary classification: income <=50K (class 0) vs >50K (class 1).
 
     Preprocessing:
-    - Categorical NaN → "missing"; integer-encoded via LabelEncoder (fit on full dataset).
-    - Numerical: StandardScaler (fit on train split only).
+    - Rows with any NaN in the 14 feature columns are dropped.
+    - Categorical features: one-hot encoded via OneHotEncoder fit on the full
+      cleaned dataset (stable column assignments across splits).
+    - Numerical features: StandardScaler fit on the train split only.
+    - Output feature dimension: N_FEATURES = 108 (6 numerical + 102 OHE).
 
     Parameters
     ----------
@@ -55,6 +71,8 @@ class AdultDataModule(L.LightningDataModule):
 
     INPUT_TYPES = INPUT_TYPES
     CARDINALITIES = CARDINALITIES
+    N_FEATURES = N_FEATURES
+    OHE_FEATURE_TYPES = OHE_FEATURE_TYPES
 
     def __init__(
         self,
@@ -75,44 +93,56 @@ class AdultDataModule(L.LightningDataModule):
         bunch = fetch_openml(
             "adult", version=2, data_home=self.hparams.data_dir, as_frame=True
         )
-        df = bunch.frame.copy()
+        df = bunch.frame[_ALL_COLS + ["class"]].dropna().reset_index(drop=True)
 
         # Target: <=50K → 0, >50K → 1
         y = (df["class"] == ">50K").astype(int).values.astype(np.int64)
 
-        # Features
-        X = df[_ALL_COLS].copy()
-
-        # Encode categoricals (fit on full dataset — all values are seen)
-        # astype(object) first to drop the Categorical dtype, then fillna works with new strings
-        self.label_encoders = {}
-        for col in _CATEGORICAL:
-            X[col] = X[col].astype(object).fillna("missing").astype(str)
-            le = LabelEncoder()
-            X[col] = le.fit_transform(X[col])
-            self.label_encoders[col] = le
-
-        X = X.values.astype(np.float32)
-
         # Shuffle and split
         rng = np.random.default_rng(self.hparams.seed)
-        idx = rng.permutation(len(X))
-        n = len(X)
+        idx = rng.permutation(len(df))
+        n = len(df)
         n_test = int(n * self.hparams.test_fraction)
         n_val = int(n * self.hparams.val_fraction)
         test_idx = idx[:n_test]
         val_idx = idx[n_test:n_test + n_val]
         train_idx = idx[n_test + n_val:]
 
+        # Fit OHE on full cleaned dataset for stable column assignments.
+        self.ohe = OneHotEncoder(sparse_output=False, handle_unknown="ignore", dtype=np.float32)
+        self.ohe.fit(df[_CATEGORICAL].astype(str).values)
+
+        # OHE transform: shape (N, 102), columns ordered as in _CATEGORICAL.
+        X_ohe = self.ohe.transform(df[_CATEGORICAL].astype(str).values)
+
+        # Map each categorical column to its slice in X_ohe.
+        _cat_offsets: dict = {}
+        offset = 0
+        for j, col in enumerate(_CATEGORICAL):
+            card = len(self.ohe.categories_[j])
+            _cat_offsets[col] = (offset, offset + card)
+            offset += card
+
+        # Build full feature matrix in _ALL_COLS order (interleaved numerical + OHE blocks).
+        parts = []
+        for col in _ALL_COLS:
+            if col in _NUMERICAL:
+                parts.append(df[[col]].values.astype(np.float32))
+            else:
+                s, e = _cat_offsets[col]
+                parts.append(X_ohe[:, s:e])
+        X = np.concatenate(parts, axis=1)  # (N, 108)
+
+        # StandardScaler on numerical positions, fit on train only.
+        num_pos = [i for i, t in enumerate(OHE_FEATURE_TYPES) if t == "numerical"]
+        self.scaler = StandardScaler()
+        self.scaler.fit(X[train_idx][:, num_pos].astype(np.float64))
+        X[:, num_pos] = self.scaler.transform(
+            X[:, num_pos].astype(np.float64)
+        ).astype(np.float32)
+
         X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
         y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
-
-        # Normalize numerical columns (fit on train only)
-        num_idx = [i for i, t in enumerate(INPUT_TYPES) if t == "numerical"]
-        self.scaler = StandardScaler()
-        X_train[:, num_idx] = self.scaler.fit_transform(X_train[:, num_idx])
-        X_val[:, num_idx] = self.scaler.transform(X_val[:, num_idx])
-        X_test[:, num_idx] = self.scaler.transform(X_test[:, num_idx])
 
         self.train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
         self.val_ds = TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))

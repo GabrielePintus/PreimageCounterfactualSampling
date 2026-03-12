@@ -21,7 +21,7 @@ class TabularCounterfactualEvaluator:
         
         # Precompute embeddings for all training data for Plausibility Metrics
         with torch.no_grad():
-            self.Z_train = self.model.embed(X_train_tensor.to(device)).cpu().numpy()
+            self.Z_train = X_train_tensor.cpu().numpy()
             
         # Fit k-NN for plausibility
         self.knn_5 = NearestNeighbors(n_neighbors=5, metric='euclidean')
@@ -58,7 +58,7 @@ class TabularCounterfactualEvaluator:
         # --- 1. VALIDITY ---
         with torch.no_grad():
             x_cf_tensor = torch.tensor(x_cf_np, dtype=torch.float32).unsqueeze(0).to(self.device)
-            logits = self.model.net(self.model.embed(x_cf_tensor))
+            logits = self.model(x_cf_tensor)
             pred = logits.argmax(dim=1).item()
         
         metrics['validity'] = int(pred == target_class)
@@ -89,7 +89,7 @@ class TabularCounterfactualEvaluator:
         # --- 3. PLAUSIBILITY (Manifold Adherence) ---
         # We measure plausibility in the embedding space to capture complex hierarchical feature correlations
         with torch.no_grad():
-            z_cf = self.model.embed(x_cf_tensor).cpu().numpy()
+            z_cf = x_cf_tensor.cpu().numpy()
         
         # 3a. k-NN Distance (Density/Proximity to Training Manifold)
         # Lower is better (closer to the training manifold)

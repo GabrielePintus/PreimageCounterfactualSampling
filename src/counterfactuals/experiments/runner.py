@@ -44,6 +44,7 @@ def create_default_registries() -> Dict[str, Registry]:
     method_registry.register("growing_spheres", GrowingSpheresMethod)
     method_registry.register("nearest_neighbor", NearestNeighborMethod)
     method_registry.register("my_method", CertifiedAtlasMethod)
+    method_registry.register("cpp", CertifiedAtlasMethod)
 
     dataset_registry.register("adult", AdultDataset)
 

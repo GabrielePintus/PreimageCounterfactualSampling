@@ -6,18 +6,20 @@ dataset:
     data_dir: data/
 
 model:
-  name: sklearn_mlp
-  params: {}
+  name: tabular_classifier_ckpt
+  params:
+    checkpoint: checkpoints/adult_classifier/best.ckpt
+    device: cpu
 
 sampling:
-  n_train: 10000          # k-medoids target size for the shared train pool
-  n_queries: 2000         # number of test queries (same set used by all methods)
+  n_train: 5000          # k-medoids target size for the shared train pool
+  n_queries: 500         # number of test queries (same set used by all methods)
   train_method: kmedoids # "kmedoids" (requires scikit-learn-extra) | "random"
 
 timeout_per_sample: 60   # seconds per (method, query); set to 0 to disable
 
 output:
-  path: results/benchmark_adult_1.parquet
+  path: results/benchmark_adult_3.parquet
 
 methods:
   - name: dice
@@ -39,11 +41,12 @@ methods:
   - name: growing_spheres
     params: {}
 
-  - name: my_method
+  - name: cpp
     params:
-      checkpoint: checkpoints/adult_classifier/last-v3.ckpt
+      checkpoint: checkpoints/adult_classifier/best.ckpt
       device: cpu
       eps_alpha: 0.25      # NearestOppositeClassClearanceStrategy alpha
-      k_per_class: 500     # medoids per class for the atlas train set
-      norm: 1              # L1 perturbation norm
+      k_per_class: null    # Use all available points for the atlas train set
+      max_samples_per_class: null  # LiRPA certifies all k_per_class polytopes per class
+      norm: 1            # L1 perturbation norm → sparse CFs (CVXPY/CLARABEL)
       batch_size: 256

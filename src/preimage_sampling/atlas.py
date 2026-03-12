@@ -147,6 +147,10 @@ class CertifiedAtlas:
         # Optional: Shapely polygon unions (only for 2D visualization)
         self._class_unions: Optional[Dict] = None
 
+        # OHE categorical block slices: list of (start, end) index pairs.
+        # When set (e.g. for TabularClassifier), the QP enforces sum(x[s:e])==1 per block.
+        self.ohe_slices: Optional[List[Tuple[int, int]]] = None
+
     def build(
         self,
         eps: Optional[float] = None,
@@ -338,7 +342,8 @@ class CertifiedAtlas:
         center: np.ndarray,
         box_eps: float,
         ball_eps: float,
-        fixed_dims: Optional[np.ndarray] = None
+        fixed_dims: Optional[np.ndarray] = None,
+        ohe_slices: Optional[List[Tuple[int, int]]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Project using CVXPY — handles L2 (SOCP) and L1 ball constraints natively.
@@ -365,13 +370,27 @@ class CertifiedAtlas:
         if fixed_dims is not None and len(fixed_dims) > 0:
             constraints.append(z[fixed_dims] == x0[fixed_dims])
 
-        problem = cp.Problem(objective, constraints)
-        try:
-            problem.solve(solver='CLARABEL', verbose=False)
-        except Exception:
-            return None, np.inf
+        # OHE simplex constraints: each categorical block must sum to 1 and be >= 0
+        if ohe_slices is not None:
+            for s, e in ohe_slices:
+                constraints.append(cp.sum(z[s:e]) == 1.0)
+                constraints.append(z[s:e] >= 0)
 
-        if problem.status not in ('optimal', 'optimal_inaccurate') or z.value is None:
+        problem = cp.Problem(objective, constraints)
+        solvers = ('OSQP', 'CLARABEL', 'SCS')
+        solved = False
+        for i, _solver in enumerate(solvers):
+            last = (i == len(solvers) - 1)
+            try:
+                problem.solve(solver=_solver, verbose=False)
+                # Accept inaccurate only from the last solver (SCS) as a fallback.
+                ok_status = ('optimal', 'optimal_inaccurate') if last else ('optimal',)
+                if problem.status in ok_status and z.value is not None:
+                    solved = True
+                    break
+            except Exception:
+                continue
+        if not solved:
             return None, np.inf
 
         x_proj = z.value
@@ -387,7 +406,8 @@ class CertifiedAtlas:
         box_eps: float,
         maxiter: int,
         tol: float,
-        fixed_dims: Optional[np.ndarray] = None
+        fixed_dims: Optional[np.ndarray] = None,
+        ohe_slices: Optional[List[Tuple[int, int]]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Project using SLSQP — fast for L∞ (all-linear constraints).
@@ -412,6 +432,19 @@ class CertifiedAtlas:
         if fixed_dims is not None:
             for i in fixed_dims:
                 bounds[i] = (x0[i], x0[i])
+
+        # OHE simplex constraints: clamp categorical dims to [0,1] and enforce sum==1
+        if ohe_slices is not None:
+            for s, e in ohe_slices:
+                for i in range(s, e):
+                    lo, hi = bounds[i]
+                    bounds[i] = (max(lo, 0.0), min(hi, 1.0))
+                s_, e_ = int(s), int(e)
+                constraints.append({
+                    'type': 'eq',
+                    'fun': lambda x, s=s_, e=e_: np.sum(x[s:e]) - 1.0,
+                    'jac': lambda x, s=s_, e=e_: np.eye(len(x))[s:e].sum(axis=0),
+                })
 
         # Start from center, but snap fixed dims to their required values so the
         # initial point already satisfies the box bounds.
@@ -508,10 +541,12 @@ class CertifiedAtlas:
         # Dispatch: CVXPY for L2/L1 (handles SOCP / L1 natively), SLSQP for L∞
         if self.norm in (1, 2) and CVXPY_AVAILABLE:
             return self._project_cvxpy(x0, A_full, b_full, center, box_eps, ball_eps,
-                                       fixed_dims=fixed_dims)
+                                       fixed_dims=fixed_dims,
+                                       ohe_slices=self.ohe_slices)
         else:
             return self._project_slsqp(x0, A_full, b_full, center, box_eps, maxiter, tol,
-                                       fixed_dims=fixed_dims)
+                                       fixed_dims=fixed_dims,
+                                       ohe_slices=self.ohe_slices)
 
     def find_counterfactual(
         self,
