@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
-from counterfactuals.core.base_classes import CounterfactualExample, CounterfactualResult
+from counterfactuals.core.base_classes import CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface
 
 from .base_method import ProbabilisticMethod
@@ -13,24 +15,26 @@ from .base_method import ProbabilisticMethod
 class CertifiedAtlasMethod(ProbabilisticMethod):
     """Wrap ``preimage_sampling.CertifiedAtlas`` into the common method interface."""
 
-    def __init__(self, atlas, random_seed: int = 42):
-        super().__init__(random_seed=random_seed)
+    def __init__(self, model: ModelInterface, atlas, random_seed: int = 42):
+        super().__init__(model=model, random_seed=random_seed)
         self.atlas = atlas
 
-    def fit(self, x_train: np.ndarray, y_train: np.ndarray, model: ModelInterface) -> None:
-        del x_train, y_train, model
-        self._is_fitted = True
+    def _fit(self) -> None:
+        # Atlas construction happens outside this adapter. The common interface still
+        # expects a fit() phase, so we mark the wrapper as ready here.
+        pass
 
-    def generate(self, example: CounterfactualExample, model: ModelInterface) -> CounterfactualResult:
-        del model
+    def generate(self, x: np.ndarray, target_class: Optional[int] = None) -> CounterfactualResult:
         if not self._is_fitted:
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
-        if example.target_class is None:
+        if target_class is None:
             raise ValueError("CertifiedAtlasMethod requires target_class.")
 
+        # The atlas already owns all search logic; this adapter only converts the
+        # project-specific result object into the shared benchmark result schema.
         result = self.atlas.find_counterfactual(
-            x_query=np.asarray(example.x, dtype=np.float32),
-            target_class=int(example.target_class),
+            x_query=np.asarray(x, dtype=np.float32),
+            target_class=int(target_class),
         )
 
         x_cf = np.asarray(result.x_cf, dtype=np.float32)

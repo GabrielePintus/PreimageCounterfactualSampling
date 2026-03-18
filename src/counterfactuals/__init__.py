@@ -2,14 +2,12 @@
 
 from counterfactuals.core.base_classes import (
     BaseCounterfactualMethod,
-    CounterfactualExample,
     CounterfactualResult,
 )
 from counterfactuals.experiments.runner import run_experiment, run_from_config_path
 
 __all__ = [
     "BaseCounterfactualMethod",
-    "CounterfactualExample",
     "CounterfactualResult",
     "run_experiment",
     "run_from_config_path",

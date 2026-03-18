@@ -110,7 +110,7 @@ class CertifiedAtlas:
         default_query_method: str = "sorted",
         cvxpy_solver_policy: str = "auto",
         solver_maxiter: int = 500,
-        solver_tol: float = 1e-9
+        solver_tol: float = 1e-9,
     ):
         """
         Initialize the CertifiedAtlas.
@@ -520,6 +520,75 @@ class CertifiedAtlas:
         dist = np.linalg.norm(x_proj - x0)
         return x_proj, dist
 
+    def _polytope_aware_decode(
+        self,
+        x_star: np.ndarray,
+        x_query: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        ball_eps: float,
+        top_k: int = 3,
+        tol: float = 1e-6,
+    ) -> Tuple[Optional[np.ndarray], float]:
+        """
+        Snap the continuous QP solution to the nearest certified OHE vertex.
+
+        Generates up to 1 + top_k discrete candidates (argmax baseline +
+        variants where the most uncertain categorical blocks use their 2nd-best
+        category) and returns the closest one to x_query that satisfies the
+        eroded polytope certificate. Returns (None, inf) if none pass.
+        """
+        ohe_slices = self.ohe_slices  # list of (start, end) per categorical block
+        d = len(x_star)
+
+        # Build the argmax baseline
+        x_base = x_star.copy()
+        for s, e in ohe_slices:
+            block = x_star[s:e]
+            snap = np.zeros(e - s)
+            snap[int(np.argmax(block))] = 1.0
+            x_base[s:e] = snap
+
+        candidates = [x_base]
+
+        # Identify the top_k most uncertain blocks (smallest top1 - top2 margin)
+        margins = []
+        for s, e in ohe_slices:
+            block = x_star[s:e]
+            if len(block) < 2:
+                continue
+            sorted_vals = np.sort(block)[::-1]
+            margins.append((sorted_vals[0] - sorted_vals[1], s, e))
+        margins.sort(key=lambda t: t[0])  # ascending: most uncertain first
+
+        for _, s, e in margins[:top_k]:
+            block = x_star[s:e]
+            order = np.argsort(block)[::-1]  # indices sorted by value descending
+            if len(order) < 2:
+                continue
+            x_alt = x_base.copy()
+            snap_alt = np.zeros(e - s)
+            snap_alt[order[1]] = 1.0  # use 2nd-best category
+            x_alt[s:e] = snap_alt
+            candidates.append(x_alt)
+
+        def _check(x_cand: np.ndarray) -> bool:
+            if np.any(A_full @ x_cand + b_full < -tol):
+                return False
+            if self.norm == np.inf:
+                return bool(np.max(np.abs(x_cand - center)) <= ball_eps + tol)
+            return bool(np.linalg.norm(x_cand - center, ord=self.norm) <= ball_eps + tol)
+
+        best_x, best_dist = None, np.inf
+        for cand in candidates:
+            if _check(cand):
+                d_cand = float(np.linalg.norm(cand - x_query))
+                if d_cand < best_dist:
+                    best_x, best_dist = cand, d_cand
+
+        return best_x, best_dist
+
     def _project_onto_polytope(
         self,
         x0: np.ndarray,
@@ -580,15 +649,24 @@ class CertifiedAtlas:
         if A_full is None:
             return None, np.inf
 
-        # Dispatch: CVXPY for L2/L1 (handles SOCP / L1 natively), SLSQP for L∞
+        # Dispatch: CVXPY for L2/L1, or SLSQP for L∞
         if self.norm in (1, 2) and CVXPY_AVAILABLE:
-            return self._project_cvxpy(x0, A_full, b_full, center, box_eps, ball_eps,
-                                       fixed_dims=fixed_dims,
-                                       ohe_slices=self.ohe_slices)
+            x_proj, dist = self._project_cvxpy(x0, A_full, b_full, center, box_eps, ball_eps,
+                                               fixed_dims=fixed_dims,
+                                               ohe_slices=self.ohe_slices)
         else:
-            return self._project_slsqp(x0, A_full, b_full, center, box_eps, maxiter, tol,
-                                       fixed_dims=fixed_dims,
-                                       ohe_slices=self.ohe_slices)
+            x_proj, dist = self._project_slsqp(x0, A_full, b_full, center, box_eps, maxiter, tol,
+                                               fixed_dims=fixed_dims,
+                                               ohe_slices=self.ohe_slices)
+
+        # If OHE slices are set, snap the continuous solution to the nearest
+        # certified discrete vertex. Reject the polytope if none exists.
+        if x_proj is not None and self.ohe_slices:
+            x_proj, dist = self._polytope_aware_decode(
+                x_proj, x0, A_full, b_full, center, ball_eps
+            )
+
+        return x_proj, dist
 
     def find_counterfactual(
         self,
@@ -705,6 +783,8 @@ class CertifiedAtlas:
         elif resolved_method == 'sorted':
             # Vectorised center-distance lower-bound scan with early stopping.
             # Tighter lower bounds than BVH for L2 atlas norm → fewer QP solves.
+            t_search_start = time.perf_counter()
+
             sorted_stats: Dict[str, float] = {}
 
             def project_fn(idx: int) -> Tuple[Optional[np.ndarray], float]:
@@ -727,7 +807,6 @@ class CertifiedAtlas:
 
             bvh = self.bvh_indices[target_class]
             atlas_norm = self.norm if self.norm is not None else 2
-            t_search_start = time.perf_counter()
             x_cf, dist, anchor_idx, n_qp = bvh.query_sorted_lower_bounds(
                 x_query,
                 eps_array=bd['eps'],
@@ -737,7 +816,6 @@ class CertifiedAtlas:
             )
             query_loop_time_s = time.perf_counter() - t_search_start
             search_time_exclusive_s = max(0.0, query_loop_time_s - projection_time_s)
-
             profiling.update({
                 "query_loop_time_ms": 1e3 * query_loop_time_s,
                 "search_time_ms": 1e3 * search_time_exclusive_s,

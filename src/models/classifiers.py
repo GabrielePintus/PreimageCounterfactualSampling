@@ -122,8 +122,9 @@ class TabularClassifier(nn.Module):
 
     Input features are a flat float vector where numerical columns are
     StandardScaler-normalized and categorical columns are one-hot encoded (OHE).
-    The network is: BatchNorm1d → Linear → ReLU → Linear → ReLU → Linear.
-    LiRPA certifies the full ``net`` (including BN) directly on the OHE input.
+    The network is: Dropout → Linear → ReLU → Dropout → Linear → ReLU → Linear.
+    The first Linear layer is lazy, so input dimensionality is inferred at
+    runtime and can match either raw OHE features or PCA-projected features.
 
     Parameters
     ----------
@@ -160,17 +161,33 @@ class TabularClassifier(nn.Module):
             else:
                 raise ValueError(f"Unknown input type: {t}")
 
-        n_features = pos
-        self.embed_dim = n_features
+        self._ohe_dim = pos
+        self.embed_dim = pos
+        self._input_dim_observed = None
         self.net = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Linear(n_features, hidden_dims[0]),
+            nn.LazyLinear(hidden_dims[0]),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dims[0], hidden_dims[1]),
             nn.ReLU(),
             nn.Linear(hidden_dims[1], num_classes),
         )
+
+    def _resolved_input_dim(self):
+        first_linear = self.net[1]
+        in_features = getattr(first_linear, "in_features", None)
+        if isinstance(in_features, int) and in_features > 0:
+            return in_features
+        return self._input_dim_observed
+
+    def _ensure_ohe_space(self) -> None:
+        resolved_input_dim = self._resolved_input_dim()
+        if resolved_input_dim is not None and resolved_input_dim != self._ohe_dim:
+            raise RuntimeError(
+                "decode/feature_dims are only valid in raw OHE space "
+                f"(expected dim={self._ohe_dim}, got dim={resolved_input_dim})."
+            )
 
     @torch.no_grad()
     def decode(self, z: torch.Tensor) -> torch.Tensor:
@@ -192,6 +209,7 @@ class TabularClassifier(nn.Module):
             Shape (batch_size, n_ohe_features). Numerical slots unchanged;
             categorical slots are 0/1 one-hot.
         """
+        self._ensure_ohe_space()
         x_out = torch.zeros_like(z)
         for t, (start, end) in zip(self.input_types, self._slices):
             if t == "numerical":
@@ -221,6 +239,7 @@ class TabularClassifier(nn.Module):
         torch.Tensor
             Shape (batch_size, n_ohe_features). Valid discrete OHE vector.
         """
+        self._ensure_ohe_space()
         weight = bn.weight.data   # (d,)
         bias   = bn.bias.data     # (d,)
         mean   = bn.running_mean  # (d,)
@@ -256,6 +275,7 @@ class TabularClassifier(nn.Module):
         fixed = model.feature_dims(['race', 'sex'], _ALL_COLS)
         result = atlas.find_counterfactual(z_query, target_class=1, fixed_dims=fixed)
         """
+        self._ensure_ohe_space()
         dims = []
         for name in feature_names:
             i = all_cols.index(name)
@@ -275,4 +295,6 @@ class TabularClassifier(nn.Module):
         torch.Tensor
             Logits of shape (batch_size, num_classes).
         """
+        if self._input_dim_observed is None:
+            self._input_dim_observed = int(x.shape[-1])
         return self.net(x)

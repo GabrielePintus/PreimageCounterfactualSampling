@@ -9,93 +9,130 @@ Poyiadzi et al. (2020):
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import networkx as nx
 import numpy as np
 from sklearn.metrics import pairwise_distances
-from sklearn.neighbors import KernelDensity, NearestNeighbors, kneighbors_graph, radius_neighbors_graph
+from sklearn.neighbors import radius_neighbors_graph
 
-from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualExample, CounterfactualResult
+from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface
+from counterfactuals.density import BaseDensityEstimator, build_density_estimator
 
 
-ActionabilityFn = Callable[[np.ndarray, np.ndarray], bool]
-CostFn = Callable[[np.ndarray, np.ndarray], float]
-EmbeddingFn = Callable[[np.ndarray], np.ndarray]
+ConditionsFn = Callable[[np.ndarray, np.ndarray], bool]
+WeightFn = Callable[[np.ndarray, np.ndarray], float]
 
 
 class FACEMethod(BaseCounterfactualMethod):
     """Feasible and Actionable Counterfactual Explanations (FACE).
 
-    Parameters mirror the paper's core controls:
-    - graph construction (`knn` or `epsilon`),
-    - confidence threshold (`tp`),
-    - density threshold (`td`).
+    Builds an ε-radius graph over training data; edge weights follow the paper's
+    density-weighted distance formula. The density estimator is pluggable and
+    determines both the density values used for weights and the candidate thresholds.
     """
+
+    @staticmethod
+    def _parse_density_estimator(config: Union[BaseDensityEstimator, dict]) -> BaseDensityEstimator:
+        if isinstance(config, BaseDensityEstimator):
+            return config
+        elif isinstance(config, dict):
+            return build_density_estimator(config["name"], **config.get("params", {}))
+        else:
+            raise ValueError("density_estimator must be either a BaseDensityEstimator instance or a config dict")
 
     def __init__(
         self,
-        graph_mode: str = "knn",
-        n_neighbors: int = 15,
-        epsilon: float = 0.5,
+        model: ModelInterface,
+
+        # Main params of the FACE method
+        density_estimator: Union[BaseDensityEstimator, dict],
+        epsilon: float = float("inf"),
         tp: float = 0.5,
         td: float = 0.0,
-        density_bandwidth: float = 0.5,
-        actionability_fn: Optional[ActionabilityFn] = None,
-        cost_fn: Optional[CostFn] = None,
-        embedding_fn: Optional[EmbeddingFn] = None,
+        conditions_fn: Optional[ConditionsFn] = None,
+        weight_fn: Optional[WeightFn] = None,
+
+        # Custom downsampling strategy, not mentioned in the original paper
+        subsample_method: str = "kmedoids",
+        k_per_class: Optional[int] = None,
+
+        # Random seed for reproducibility (e.g., in subsampling)
         random_seed: int = 42,
     ):
-        super().__init__(random_seed=random_seed)
-        if graph_mode not in {"knn", "epsilon"}:
-            raise ValueError("graph_mode must be one of {'knn', 'epsilon'}")
-        self.graph_mode = graph_mode
-        self.n_neighbors = n_neighbors
+        """Initialize the FACE method.
+        Args:
+            model: the classifier to explain
+            density_estimator: a density estimator
+            epsilon: threshold of closeness for two nodes to be neighbors. the paper uses euclidean norm
+            tp: the model's prediction confidence threshold
+            td: density threshold
+
+            conditions_fn: per-query actionability filter; called as conditions_fn(x_query, x_candidate) to decide whether a candidate is a valid target for this specific query (e.g. "do not change feature sex")
+            weight_fn: custom function to compute the edge weight between two nodes, by default it's based on density and distance as in the paper
+
+            subsample_method: Method for downsampling the training data (e.g., "kmedoids", "kmeans", or None)
+            k_per_class: Number of samples per class for downsampling
+            random_seed: Random seed for reproducibility
+        """
+        super().__init__(model=model, random_seed=random_seed, k_per_class=k_per_class, subsample_method=subsample_method)
+
+        self.density_estimator = FACEMethod._parse_density_estimator(density_estimator)
         self.epsilon = epsilon
         self.tp = tp
         self.td = td
-        self.density_bandwidth = density_bandwidth
-        self.actionability_fn = actionability_fn
-        self.cost_fn = cost_fn
-        self.embedding_fn = embedding_fn
+        if conditions_fn is not None:
+            self.conditions_fn = conditions_fn
+        if weight_fn is not None:
+            self.weight_fn = weight_fn
 
-        self._x_train: Optional[np.ndarray] = None
-        self._z_train: Optional[np.ndarray] = None
-        self._train_proba: Optional[np.ndarray] = None
-        self._density: Optional[np.ndarray] = None
-        self._kde: Optional[KernelDensity] = None
-        self._graph: Optional[nx.Graph] = None
+        self.train_proba: Optional[np.ndarray] = None
+        self.density: Optional[np.ndarray] = None
+        self.graph: Optional[nx.Graph] = None
 
-    def fit(self, x_train: np.ndarray, y_train: np.ndarray, model: ModelInterface) -> None:
-        del y_train
-        self._x_train = np.asarray(x_train, dtype=np.float32)
-        self._z_train = self._embed(self._x_train)
+    def conditions_fn(self, x_query: np.ndarray, x_candidate: np.ndarray) -> bool:
+        """Default conditions function that allows all candidates."""
+        return True
 
-        self._kde = KernelDensity(kernel="gaussian", bandwidth=self.density_bandwidth)
-        self._kde.fit(self._z_train)
-        self._density = np.exp(self._kde.score_samples(self._z_train)).astype(np.float32)
+    def weight_fn(self, xi: np.ndarray, xj: np.ndarray) -> float:
+        midpoint = ((xi + xj) / 2.0)
+        distance = np.linalg.norm(xi - xj, ord=2)
+        density = self.density_estimator(midpoint.reshape(1, -1))[0]
 
-        self._train_proba = np.asarray(model.predict_proba(self._x_train), dtype=np.float32)
-        self._graph = self._build_graph(self._z_train)
-        self._is_fitted = True
+        # Avoid log(0) by adding a small epsilon to the density
+        return -np.log(density) * distance if density > 1e-10 else float("inf")
 
-    def generate(self, example: CounterfactualExample, model: ModelInterface) -> CounterfactualResult:
+    def _fit(self) -> None:
+        # We start by fitting the density estimator and store all the density values for the training data
+        self.density_estimator.fit(self._x_train)
+        self.density = self.density_estimator(self._x_train).astype(np.float32)
+        self.train_proba = np.asarray(self.model.predict_proba(self._x_train), dtype=np.float32)
+
+        # Build the graph
+        self.graph = self.build_graph(self._x_train)
+        self._log_graph_stats(self.graph)
+
+    def generate(self, x: np.ndarray, target_class: int) -> CounterfactualResult:
         if not self._is_fitted:
             raise RuntimeError("FACEMethod is not fitted. Call fit() before generate().")
-        assert self._x_train is not None
-        assert self._z_train is not None
-        assert self._train_proba is not None
-        assert self._density is not None
-        assert self._graph is not None
 
-        x_query = np.asarray(example.x, dtype=np.float32).reshape(1, -1)
-        z_query = self._embed(x_query)
-        target_class = self._resolve_target_class(example=example, model=model)
-        start_node = int(np.argmin(pairwise_distances(z_query, self._z_train)[0]))
+        x_query = np.asarray(x, dtype=np.float32).reshape(1, -1)
 
-        candidates = self._candidate_nodes(target_class=target_class)
+        # Project query onto the graph via nearest neighbor respecting the starting label.
+        query_label = int(self.model.predict(x_query)[0])
+        predicted_train_labels = np.argmax(self.train_proba, axis=1)
+        same_class_indices = np.where(predicted_train_labels == query_label)[0]
+        local_idx = int(np.argmin(pairwise_distances(x_query, self._x_train[same_class_indices])[0]))
+        start_node = int(same_class_indices[local_idx])
+
+        # Compute the candidate nodes filtering by
+        # - confidence threshold (tp) and
+        # - density threshold (td)
+        candidates = self.candidate_nodes(x_query=x_query[0], target_class=target_class)
+
         if len(candidates) == 0:
+            # No candidates meet the confidence and density thresholds, return failure with reason.
             return CounterfactualResult(
                 x_cf=x_query[0],
                 success=False,
@@ -103,9 +140,10 @@ class FACEMethod(BaseCounterfactualMethod):
                 metadata={"target_class": target_class, "reason": "no_candidates", "start_node": start_node},
             )
 
-        lengths, paths = nx.single_source_dijkstra(self._graph, start_node, weight="weight")
-        reachable = [node for node in candidates if node in lengths]
-        if len(reachable) == 0:
+        # Compute shortest paths from the start node to all candidates, and select the best reachable one.
+        try:
+            path_cost, path = nx.multi_source_dijkstra(self.graph, sources=set(candidates), target=start_node, weight="weight")
+        except nx.NetworkXNoPath:
             return CounterfactualResult(
                 x_cf=x_query[0],
                 success=False,
@@ -113,10 +151,9 @@ class FACEMethod(BaseCounterfactualMethod):
                 metadata={"target_class": target_class, "reason": "no_reachable_candidate", "start_node": start_node},
             )
 
-        best_node = min(reachable, key=lambda n: float(lengths[n]))
-        path_indices = [int(i) for i in paths[best_node]]
+        best_node = path[0]
         x_cf = self._x_train[best_node]
-        success = int(model.predict(x_cf)[0]) == target_class
+        success = int(self.model.predict(x_cf)[0]) == target_class
 
         return CounterfactualResult(
             x_cf=x_cf,
@@ -126,71 +163,57 @@ class FACEMethod(BaseCounterfactualMethod):
                 "target_class": target_class,
                 "start_node": start_node,
                 "target_node": int(best_node),
-                "path_cost": float(lengths[best_node]),
-                "path_indices": path_indices,
+                "path_cost": float(path_cost),
+                "path_indices": [int(i) for i in path],
                 "n_candidates": int(len(candidates)),
             },
         )
 
-    def _build_graph(self, z_train: np.ndarray) -> nx.Graph:
-        if self.graph_mode == "knn":
-            adjacency = kneighbors_graph(
-                z_train,
-                n_neighbors=self.n_neighbors,
-                mode="distance",
-                include_self=False,
-            )
-        else:
-            nn = NearestNeighbors(radius=self.epsilon, metric="euclidean")
-            nn.fit(z_train)
-            adjacency = radius_neighbors_graph(nn, z_train, radius=self.epsilon, mode="distance", include_self=False)
-
+    def build_graph(self, x_train: np.ndarray) -> nx.Graph:
+        # ε-radius graph: connect points within distance epsilon.
+        # Set epsilon=inf for a complete graph (no pruning).
+        adjacency = radius_neighbors_graph(
+            x_train,
+            radius=self.epsilon,
+            mode="distance",
+            include_self=False,
+        )
         graph = nx.from_scipy_sparse_array(adjacency)
 
-        # Re-weight edges with inverse midpoint density, as in density-weighted shortest paths.
-        for i, j, attrs in list(graph.edges(data=True)):
-            xi = self._x_train[i]
-            xj = self._x_train[j]
-            zi = z_train[i]
-            zj = z_train[j]
-            dist = float(attrs.get("weight", np.linalg.norm(zi - zj, ord=2)))
+        for i, j, _ in list(graph.edges(data=True)):
+            xi = x_train[i]
+            xj = x_train[j]
 
-            if self.actionability_fn is not None and not self.actionability_fn(xi, xj):
-                graph.remove_edge(i, j)
-                continue
+            graph[i][j]["weight"] = self.weight_fn(xi, xj)
 
-            # Evaluate KDE at the true midpoint (zi+zj)/2, as in Algorithm 1 of the paper.
-            # Edge weight: w(p̂(mid)) · d(xi, xj) with w(z) = -log(z), the weight function
-            # used in the FACE experiments (Section 4).
-            mid = ((zi + zj) / 2.0).reshape(1, -1)
-            p_mid = float(np.exp(self._kde.score_samples(mid)[0]))
-            edge_cost = float(-np.log(max(p_mid, 1e-300)) * dist)
-            if self.cost_fn is not None:
-                edge_cost = float(self.cost_fn(xi, xj))
-
-            graph[i][j]["weight"] = edge_cost
         return graph
 
-    def _candidate_nodes(self, target_class: int) -> np.ndarray:
-        assert self._train_proba is not None
-        assert self._density is not None
-        conf_mask = self._train_proba[:, target_class] >= float(self.tp)
-        density_mask = self._density >= float(self.td)
-        return np.where(conf_mask & density_mask)[0]
 
-    def _embed(self, x: np.ndarray) -> np.ndarray:
-        arr = np.asarray(x, dtype=np.float32)
-        if self.embedding_fn is None:
-            return arr
-        embedded = np.asarray(self.embedding_fn(arr), dtype=np.float32)
-        return embedded
+    def _log_graph_stats(self, graph: nx.Graph) -> None:
+        n_nodes = graph.number_of_nodes()
+        n_edges = graph.number_of_edges()
+        degrees = [d for _, d in graph.degree()]
+        components = list(nx.connected_components(graph))
+        n_components = len(components)
+        n_isolated = sum(1 for c in components if len(c) == 1)
+        largest_cc = max(len(c) for c in components) if components else 0
 
-    @staticmethod
-    def _resolve_target_class(example: CounterfactualExample, model: ModelInterface) -> int:
-        if example.target_class is not None:
-            return int(example.target_class)
-        pred = int(model.predict(example.x)[0])
-        proba = model.predict_proba(example.x)
-        if proba.shape[1] != 2:
-            raise ValueError("target_class is required for non-binary tasks")
-        return 1 - pred
+        avg_deg = float(np.mean(degrees)) if degrees else 0.0
+        med_deg = float(np.median(degrees)) if degrees else 0.0
+        max_deg = int(max(degrees)) if degrees else 0
+
+        print(
+            f"[FACE graph] nodes={n_nodes}  edges={n_edges}  "
+            f"degree avg={avg_deg:.1f} median={med_deg:.0f} max={max_deg}  "
+            f"connected_components={n_components}  isolated_nodes={n_isolated}  "
+            f"largest_component={largest_cc} ({100*largest_cc/n_nodes:.1f}%)"
+        )
+
+    def candidate_nodes(self, x_query: np.ndarray, target_class: int) -> np.ndarray:
+        conf_mask    = self.train_proba[:, target_class] >= self.tp
+        density_mask = self.density >= self.td
+        indices = np.where(conf_mask & density_mask)[0]
+        return np.array([i for i in indices if self.conditions_fn(x_query, self._x_train[i])])
+
+
+

@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.datasets import fetch_openml
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
@@ -51,6 +52,8 @@ class AdultDataModule(L.LightningDataModule):
     - Categorical features: one-hot encoded via OneHotEncoder fit on the full
       cleaned dataset (stable column assignments across splits).
     - Numerical features: StandardScaler fit on the train split only.
+        - Optional PCA projection: fit on the train split only, then applied to
+            train/val/test to train directly in reduced-dimensional space.
     - Output feature dimension: N_FEATURES = 108 (6 numerical + 102 OHE).
 
     Parameters
@@ -67,6 +70,16 @@ class AdultDataModule(L.LightningDataModule):
         Random seed for the train/val/test split permutation.
     num_workers : int
         Workers for DataLoader.
+    pca_enabled : bool
+        Whether to apply PCA dimensionality reduction after OHE + scaling.
+    pca_n_components : float | int
+        PCA n_components argument (e.g. 0.99 for explained variance ratio).
+    pca_svd_solver : str
+        PCA SVD solver.
+    pca_whiten : bool
+        PCA whiten flag.
+    pca_random_state : int | None
+        PCA random_state; when None, defaults to ``seed``.
     """
 
     INPUT_TYPES = INPUT_TYPES
@@ -82,6 +95,11 @@ class AdultDataModule(L.LightningDataModule):
         test_fraction: float = 0.1,
         seed: int = 42,
         num_workers: int = 4,
+        pca_enabled: bool = False,
+        pca_n_components: float | int = 0.99,
+        pca_svd_solver: str = "full",
+        pca_whiten: bool = False,
+        pca_random_state: int | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -142,6 +160,25 @@ class AdultDataModule(L.LightningDataModule):
         ).astype(np.float32)
 
         X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
+
+        self.pca = None
+        if bool(self.hparams.pca_enabled):
+            random_state = self.hparams.pca_random_state
+            if random_state is None:
+                random_state = int(self.hparams.seed)
+
+            self.pca = PCA(
+                n_components=self.hparams.pca_n_components,
+                svd_solver=self.hparams.pca_svd_solver,
+                whiten=bool(self.hparams.pca_whiten),
+                random_state=int(random_state),
+            )
+            self.pca.fit(X_train.astype(np.float32))
+            X_train = self.pca.transform(X_train.astype(np.float32)).astype(np.float32)
+            X_val = self.pca.transform(X_val.astype(np.float32)).astype(np.float32)
+            X_test = self.pca.transform(X_test.astype(np.float32)).astype(np.float32)
+
+        self.n_features_out = int(X_train.shape[1])
         y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
 
         self.train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))

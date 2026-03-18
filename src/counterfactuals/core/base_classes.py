@@ -3,21 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # field used by CounterfactualResult
 from typing import Any, Dict, Optional
 
 import numpy as np
 
 from .interfaces import ModelInterface
-
-
-@dataclass(frozen=True)
-class CounterfactualExample:
-    """Input sample and optional metadata for generation."""
-
-    x: np.ndarray
-    target_class: Optional[int] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -33,31 +24,62 @@ class CounterfactualResult:
 class BaseCounterfactualMethod(ABC):
     """Abstract base class for all counterfactual methods."""
 
-    def __init__(self, random_seed: int = 42):
+    def __init__(
+        self,
+        model: ModelInterface,
+        random_seed: int = 42,
+        k_per_class: Optional[int] = None,
+        subsample_method: str = "kmedoids",
+    ):
+        if subsample_method not in {"kmedoids", "kmeans", "fps"}:
+            raise ValueError("subsample_method must be one of {'kmedoids', 'kmeans', 'fps'}")
+        self.model = model
         self.random_seed = random_seed
+        self.k_per_class = k_per_class
+        self.subsample_method = subsample_method
+        self._x_train: Optional[np.ndarray] = None
+        self._y_train: Optional[np.ndarray] = None
         self._is_fitted = False
 
+    def fit(self, x_train: np.ndarray, y_train: np.ndarray) -> None:
+        """Store training data, apply optional clustering downsampling, then call _fit()."""
+        self._x_train = np.asarray(x_train, dtype=np.float32)
+        self._y_train = np.asarray(y_train, dtype=np.int64)
+        if self._x_train.shape[0] != self._y_train.shape[0]:
+            raise ValueError("x_train and y_train must have the same number of rows")
+        if self.k_per_class is not None:
+            from counterfactuals.utils.clustering import select_prototype_indices
+
+            parts_x, parts_y = [], []
+            for cls in np.unique(self._y_train):
+                idx = np.where(self._y_train == cls)[0]
+                proto = select_prototype_indices(
+                    self._x_train[idx], self.k_per_class,
+                    method=self.subsample_method, random_state=self.random_seed,
+                )
+                parts_x.append(self._x_train[idx[proto]])
+                parts_y.append(self._y_train[idx[proto]])
+            self._x_train = np.concatenate(parts_x)
+            self._y_train = np.concatenate(parts_y)
+        self._fit()
+        self._is_fitted = True
+
     @abstractmethod
-    def fit(self, x_train: np.ndarray, y_train: np.ndarray, model: ModelInterface) -> None:
-        """Optional offline setup stage using train data and model."""
+    def _fit(self) -> None:
+        """Method-specific setup. self._x_train, self._y_train, and self.model are already set."""
 
     @abstractmethod
     def generate(
         self,
-        example: CounterfactualExample,
-        model: ModelInterface,
+        x: np.ndarray,
+        target_class: Optional[int] = None,
     ) -> CounterfactualResult:
-        """Generate one counterfactual for a single example."""
+        """Generate one counterfactual for a single point."""
 
     def generate_batch(
         self,
         x: np.ndarray,
-        model: ModelInterface,
         target_class: Optional[int] = None,
     ) -> list[CounterfactualResult]:
         """Generate one counterfactual per row in ``x`` with shared settings."""
-        examples = [
-            CounterfactualExample(x=row, target_class=target_class)
-            for row in np.asarray(x)
-        ]
-        return [self.generate(example=example, model=model) for example in examples]
+        return [self.generate(x=row, target_class=target_class) for row in np.asarray(x)]

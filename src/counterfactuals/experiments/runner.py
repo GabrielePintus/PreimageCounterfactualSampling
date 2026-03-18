@@ -7,7 +7,6 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from counterfactuals.core.base_classes import CounterfactualExample
 from counterfactuals.core.interfaces import MetricInterface
 from counterfactuals.core.registry import Registry
 from counterfactuals.datasets.loaders import AdultDataset
@@ -103,8 +102,8 @@ def run_experiment(cfg: ExperimentConfig, registries: Optional[Dict[str, Registr
     _fit_model_if_needed(model=model, x_train=x_train, y_train=y_train)
     model_for_methods = InverseTransformModel(base_model=model, transform=transform, ohe_blocks=ohe_blocks)
 
-    method = registries["method"].create(cfg.method.name, random_seed=cfg.seed, **cfg.method.params)
-    method.fit(x_train=x_train_gen, y_train=y_train, model=model_for_methods)
+    method = registries["method"].create(cfg.method.name, model=model_for_methods, random_seed=cfg.seed, **cfg.method.params)
+    method.fit(x_train=x_train_gen, y_train=y_train)
 
     metrics = _build_metrics(cfg=cfg, registries=registries, model=model, x_train=x_train)
     n_samples = min(cfg.max_test_samples, len(x_test))
@@ -114,10 +113,7 @@ def run_experiment(cfg: ExperimentConfig, registries: Optional[Dict[str, Registr
         x_orig_eval = x_test[i]
         x_orig_gen = x_test_gen[i]
         target_class = _default_target_class(x_orig=x_orig_gen, model=model_for_methods)
-        result = method.generate(
-            example=CounterfactualExample(x=x_orig_gen, target_class=target_class),
-            model=model_for_methods,
-        )
+        result = method.generate(x=x_orig_gen, target_class=target_class)
 
         x_cf_eval = transform.inverse_transform(result.x_cf)
         if ohe_blocks is not None:

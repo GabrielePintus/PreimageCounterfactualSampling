@@ -49,7 +49,16 @@ def main() -> None:
     print(_fmt(diff))
 
     print("\n=== PHASE TIMING (NON-OVERLAPPING) ===")
-    phase_cols = [c for c in ["search_time_ms", "projection_time_ms", "query_loop_time_ms", "total_time_ms"] if c in perq.columns]
+    phase_cols = [
+        c
+        for c in [
+            "search_time_ms",
+            "projection_time_ms",
+            "query_loop_time_ms",
+            "total_time_ms",
+        ]
+        if c in perq.columns
+    ]
     phase = perq[["variant"] + phase_cols].groupby("variant").mean().reset_index()
     if "search_time_ms" in phase.columns and "projection_time_ms" in phase.columns:
         phase["search_share_%"] = 100.0 * phase["search_time_ms"] / (phase["search_time_ms"] + phase["projection_time_ms"] + 1e-12)

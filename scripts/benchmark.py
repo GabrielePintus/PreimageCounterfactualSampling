@@ -8,17 +8,18 @@ Usage:
     python scripts/benchmark.py --config configs/benchmark_adult.yaml --methods dice face nearest_neighbor
 
 Output:
-    A Parquet file with one row per (method, query) containing raw (x_orig, x_cf)
-    vectors plus immediate metrics (l2, l1, l0_sparsity). Failed attempts are
-    logged as rows with success=False and NaN feature columns.
+    A .bmk file (BenchmarkResult, pickle) and a .parquet file (flat, for notebooks).
+    Both are written to the path specified in the config (with suffix swapped for .bmk).
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import signal
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,10 +27,18 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+# Suppress noisy DeprecationWarning from sklearn_extra (distutils.LooseVersion).
+warnings.filterwarnings(
+    "ignore",
+    message="distutils Version classes are deprecated",
+    category=DeprecationWarning,
+    module=r"sklearn_extra",
+)
+
 # Allow running from repo root without installing as package.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from counterfactuals.core.base_classes import CounterfactualExample
+from counterfactuals.benchmarks.results import BenchmarkResult, MethodResult, QueryResult
 from counterfactuals.experiments.runner import create_default_registries
 from counterfactuals.preprocessing import (
     IdentityTransform,
@@ -65,6 +74,41 @@ def _call_with_timeout(fn, timeout_s: int):
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
+
+
+def _normalize_torch_device(device: Any) -> str:
+    """Normalize user/config device aliases to valid torch device strings."""
+    import torch
+
+    raw = str(device or "cpu").strip().lower()
+    if raw in {"cpu"}:
+        return "cpu"
+    if raw in {"auto", "gpu", "cuda"}:
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if raw.startswith("gpu:"):
+        idx = raw.split(":", 1)[1]
+        return f"cuda:{idx}" if torch.cuda.is_available() else "cpu"
+    if raw.startswith("cuda"):
+        return raw if torch.cuda.is_available() else "cpu"
+    if raw.startswith("mps"):
+        has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        return raw if has_mps else "cpu"
+    return raw
+
+
+def _load_lit_checkpoint_resilient(lit_cls, checkpoint: str, backbone, map_location: str):
+    """Load Lightning checkpoint with fallback for legacy/unknown storage tags."""
+    try:
+        return lit_cls.load_from_checkpoint(checkpoint, model=backbone, map_location=map_location)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "tagged with gpu" in msg and map_location != "cpu":
+            print(
+                "[WARNING] Checkpoint uses legacy 'gpu' storage tag. "
+                "Retrying load with map_location=cpu."
+            )
+            return lit_cls.load_from_checkpoint(checkpoint, model=backbone, map_location="cpu")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -108,71 +152,52 @@ def subsample_train(
 
 
 # ---------------------------------------------------------------------------
-# Row builders
+# Farthest Point Sampling
 # ---------------------------------------------------------------------------
 
-def _failure_row(
-    method_name: str,
-    query_idx: int,
-    x_orig: np.ndarray,
-    y_orig: int,
-    n_features: int,
-    error: str,
-    runtime_s: float,
-    space: str = "raw",
-) -> Dict[str, Any]:
-    row: Dict[str, Any] = {
-        "method": method_name,
-        "query_idx": int(query_idx),
-        "space": space,
-        "y_orig": int(y_orig),
-        "y_cf": float("nan"),
-        "success": False,
-        "runtime_s": float(runtime_s),
-        "error": error,
-        "l2_distance": float("nan"),
-        "l1_distance": float("nan"),
-        "l0_sparsity": float("nan"),
-        "mad_l1_distance": float("nan"),
-        "redundancy": float("nan"),
-    }
-    for k in range(n_features):
-        row[f"x_orig_{k}"] = float(x_orig[k])
-        row[f"x_cf_{k}"] = float("nan")
-    return row
+def _fps_indices(X: np.ndarray, k: int) -> np.ndarray:
+    """Greedy Farthest Point Sampling: return indices of k maximally spread points.
+
+    Initialization: the point closest to the class mean (deterministic, no
+    random seed needed).  Each subsequent step picks the point with the largest
+    minimum distance to the already-selected subset.  Uses scipy.cdist for
+    O(N·k) pairwise distance computation with no extra dependencies.
+    """
+    from scipy.spatial.distance import cdist
+
+    k = min(k, len(X))
+    if k == len(X):
+        return np.arange(len(X))
+
+    # Start from the point nearest to the class centroid.
+    mean = X.mean(axis=0, keepdims=True)
+    first = int(cdist(mean, X, metric="euclidean").argmin())
+
+    selected = [first]
+    # min_dists[i] = distance from X[i] to the closest selected point so far.
+    min_dists = cdist(X[first : first + 1], X, metric="euclidean")[0]
+
+    for _ in range(k - 1):
+        farthest = int(np.argmax(min_dists))
+        selected.append(farthest)
+        new_dists = cdist(X[farthest : farthest + 1], X, metric="euclidean")[0]
+        np.minimum(min_dists, new_dists, out=min_dists)
+
+    return np.array(selected)
 
 
-def _success_row(
-    method_name: str,
-    query_idx: int,
+def _compute_query_metrics(
     x_orig: np.ndarray,
-    y_orig: int,
     x_cf: np.ndarray,
-    y_cf: int,
-    success: bool,
-    runtime_s: float,
     n_features: int,
-    space: str = "raw",
-    mad_weights: Optional[np.ndarray] = None,
-    input_types: Optional[List[str]] = None,
-    redundancy: Optional[float] = None,
-) -> Dict[str, Any]:
+    mad_weights: Optional[np.ndarray],
+    input_types: Optional[List[str]],
+) -> tuple[float, float, float, float]:
+    """Return (l2, l1, l0_sparsity, mad_l1) for a successful CF."""
     diff = np.abs(x_cf.astype(np.float64) - x_orig.astype(np.float64))
-    row: Dict[str, Any] = {
-        "method": method_name,
-        "query_idx": int(query_idx),
-        "space": space,
-        "y_orig": int(y_orig),
-        "y_cf": int(y_cf),
-        "success": bool(success),
-        "runtime_s": float(runtime_s),
-        "error": None,
-        "l2_distance": float(np.linalg.norm(diff, ord=2)),
-        "l1_distance": float(np.linalg.norm(diff, ord=1)),
-        "l0_sparsity": float(np.mean(diff > 1e-6)),
-    }
-    # MAD-normalized L1: numerical features scaled by per-feature MAD,
-    # categorical features contribute a binary mismatch term.
+    l2 = float(np.linalg.norm(diff, ord=2))
+    l1 = float(np.linalg.norm(diff, ord=1))
+    l0 = float(np.mean(diff > 1e-6))
     if mad_weights is not None and input_types is not None:
         per_feat = np.empty(n_features)
         for i, t in enumerate(input_types):
@@ -180,14 +205,10 @@ def _success_row(
                 per_feat[i] = diff[i] / mad_weights[i]
             else:
                 per_feat[i] = float(diff[i] > 1e-6)
-        row["mad_l1_distance"] = float(per_feat.mean())
+        mad_l1 = float(per_feat.mean())
     else:
-        row["mad_l1_distance"] = float("nan")
-    row["redundancy"] = float(redundancy) if redundancy is not None else float("nan")
-    for k in range(n_features):
-        row[f"x_orig_{k}"] = float(x_orig[k])
-        row[f"x_cf_{k}"] = float(x_cf[k])
-    return row
+        mad_l1 = float("nan")
+    return l2, l1, l0, mad_l1
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +245,10 @@ def _build_certified_atlas_method(
     if not ckpt:
         raise ValueError("my_method requires a 'checkpoint' param pointing to the .ckpt file.")
 
-    device = params.get("device", "cpu")
+    requested_device = params.get("device", "cpu")
+    device = _normalize_torch_device(requested_device)
+    if str(requested_device).strip().lower() != device:
+        print(f"[INFO] cpp device normalized: {requested_device!r} -> {device!r}")
     eps_alpha = float(params.get("eps_alpha", 0.25))
     _k_per_class = params.get("k_per_class", 500)
     k_per_class = int(_k_per_class) if _k_per_class is not None else None
@@ -245,6 +269,16 @@ def _build_certified_atlas_method(
     _msc = params.get("max_samples_per_class", None)
     max_samples_per_class = int(_msc) if _msc is not None else None
 
+    atlas_subsample_method = str(params.get("atlas_subsample_method", "kmedoids")).lower()
+    if atlas_subsample_method not in {"kmedoids", "fps", "kmeans"}:
+        raise ValueError(
+            f"my_method.atlas_subsample_method must be one of {{'kmedoids', 'fps', 'kmeans'}}, "
+            f"got {atlas_subsample_method!r}"
+        )
+
+    solver_maxiter = int(params.get("solver_maxiter", 500))
+    solver_tol = float(params.get("solver_tol", 1e-9))
+
     # Load backbone + Lightning checkpoint.
     backbone = TabularClassifier(
         input_types=INPUT_TYPES,
@@ -253,7 +287,7 @@ def _build_certified_atlas_method(
         num_classes=2,
         dropout=0.2,
     )
-    lit = LitClassifier.load_from_checkpoint(ckpt, model=backbone, map_location=device)
+    lit = _load_lit_checkpoint_resilient(LitClassifier, ckpt, backbone, map_location=device)
     model = lit.model.eval().to(device)
 
     # Strip Dropout layers before LiRPA certification (identity in eval mode).
@@ -268,43 +302,43 @@ def _build_certified_atlas_method(
     z_train   = x_train
     z_queries = x_queries
 
-    # Class-wise k-medoids on raw OHE train points.
-    try:
-        from sklearn_extra.cluster import KMedoids
-        def _medoid_indices(X: np.ndarray, k: int) -> np.ndarray:
-            km = KMedoids(n_clusters=min(k, len(X)), metric="euclidean",
-                          method="alternate", random_state=seed)
-            km.fit(X)
-            return km.medoid_indices_
-    except ImportError:
-        from sklearn.cluster import KMeans
-        from sklearn.metrics import pairwise_distances as _pw
-        def _medoid_indices(X: np.ndarray, k: int) -> np.ndarray:
-            km = KMeans(n_clusters=min(k, len(X)), random_state=seed, n_init="auto")
-            km.fit(X)
-            return _pw(km.cluster_centers_, X).argmin(axis=1)
+    # ---------------------------------------------------------------------------
+    # Prototype selection for atlas construction.
+    # ---------------------------------------------------------------------------
+    # Builds a per-class index array of size min(k, |class|) using the chosen
+    # strategy, then assembles the TensorDataset passed to CertifiedAtlas.build().
+
+    from counterfactuals.utils.clustering import select_prototype_indices as _select_prototype_indices
+
+    def _select_prototype_indices_local(X: np.ndarray, k: int) -> np.ndarray:
+        return _select_prototype_indices(X, k, method=atlas_subsample_method, random_state=seed)
 
     z_parts, y_parts = [], []
     for cls in np.unique(y_train):
         cls_idx = np.where(y_train == cls)[0]
         if k_per_class is not None:
-            med_idx = _medoid_indices(z_train[cls_idx], k_per_class)
+            proto_idx = _select_prototype_indices_local(z_train[cls_idx], k_per_class)
         else:
-            med_idx = np.arange(len(cls_idx))
-        z_parts.append(torch.from_numpy(z_train[cls_idx[med_idx]]).float())
-        y_parts.append(torch.full((len(med_idx),), int(cls), dtype=torch.long))
-        print(f"  [my_method] class {int(cls)}: {len(cls_idx)} -> {len(med_idx)} medoids")
+            proto_idx = np.arange(len(cls_idx))
+        z_parts.append(torch.from_numpy(z_train[cls_idx[proto_idx]]).float())
+        y_parts.append(torch.full((len(proto_idx),), int(cls), dtype=torch.long))
+        print(
+            f"  [cpp] class {int(cls)}: {len(cls_idx)} -> {len(proto_idx)} prototypes "
+            f"({atlas_subsample_method})"
+        )
 
-    medoid_ds = TensorDataset(torch.cat(z_parts), torch.cat(y_parts))
+    prototype_ds = TensorDataset(torch.cat(z_parts), torch.cat(y_parts))
 
     # Build atlas in input space (standardized numerical + raw OHE categorical).
     eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
     atlas = CertifiedAtlas(
         net_for_atlas,
-        medoid_ds,
+        prototype_ds,
         device=device,
         default_query_method=query_method,
         cvxpy_solver_policy=cvxpy_solver_policy,
+        solver_maxiter=solver_maxiter,
+        solver_tol=solver_tol,
     )
     atlas.build(
         eps_strategy=eps_strategy,
@@ -323,8 +357,8 @@ def _build_certified_atlas_method(
 
     print(atlas.summary())
 
-    atlas_method = CertifiedAtlasMethod(atlas=atlas, random_seed=seed)
-    atlas_method.fit(x_train=z_train, y_train=y_train, model=atlas_model)
+    atlas_method = CertifiedAtlasMethod(model=atlas_model, atlas=atlas, random_seed=seed)
+    atlas_method.fit(x_train=z_train, y_train=y_train)
 
     return atlas_method, atlas_model, model, z_train, z_queries, None
 
@@ -346,6 +380,11 @@ def _build_torch_model_from_checkpoint(checkpoint: str, device: str = "cpu") -> 
     from training.lit_classifier import LitClassifier
     from counterfactuals.models.torch_model import TorchModelWrapper
 
+    requested_device = device
+    device = _normalize_torch_device(device)
+    if str(requested_device).strip().lower() != device:
+        print(f"[INFO] model device normalized: {requested_device!r} -> {device!r}")
+
     backbone = TabularClassifier(
         input_types=INPUT_TYPES,
         cardinalities=CARDINALITIES,
@@ -353,7 +392,9 @@ def _build_torch_model_from_checkpoint(checkpoint: str, device: str = "cpu") -> 
         num_classes=2,
         dropout=0.2,
     )
-    lit = LitClassifier.load_from_checkpoint(checkpoint, model=backbone, map_location=device)
+    lit = _load_lit_checkpoint_resilient(
+        LitClassifier, checkpoint, backbone, map_location=device
+    )
     net = lit.model.eval().to(device)
     net_no_dropout = torch.nn.Sequential(
         *[m for m in net.net if not isinstance(m, torch.nn.Dropout)]
@@ -362,31 +403,52 @@ def _build_torch_model_from_checkpoint(checkpoint: str, device: str = "cpu") -> 
 
 
 # ---------------------------------------------------------------------------
-# Summary table
+# Grid search expansion
 # ---------------------------------------------------------------------------
 
-def _print_summary(df: pd.DataFrame) -> None:
-    print("\n" + "=" * 85)
-    print("BENCHMARK SUMMARY")
-    print("=" * 85)
-    fmt = f"{'method':<22} {'validity%':>10} {'l2_mean':>9} {'l1_mean':>9} {'sparsity%':>10} {'runtime_s':>10} {'n_failed':>9}"
-    print(fmt)
-    print("-" * 85)
-    for method_name, grp in df.groupby("method", sort=False):
-        n_total = len(grp)
-        n_ok = int(grp["success"].sum())
-        n_failed = n_total - n_ok
-        ok = grp[grp["success"]]
-        validity = 100.0 * n_ok / n_total if n_total > 0 else float("nan")
-        l2 = float(ok["l2_distance"].mean()) if n_ok > 0 else float("nan")
-        l1 = float(ok["l1_distance"].mean()) if n_ok > 0 else float("nan")
-        sp = 100.0 * float(ok["l0_sparsity"].mean()) if n_ok > 0 else float("nan")
-        rt = float(grp["runtime_s"].mean())
-        print(
-            f"{method_name:<22} {validity:>9.1f}% {l2:>9.3f} {l1:>9.3f}"
-            f" {sp:>9.1f}% {rt:>10.3f} {n_failed:>9d}"
-        )
-    print("=" * 85)
+def _expand_grid(methods_cfg: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Expand method configs with list-valued params into all combinations.
+
+    Any param whose value is a list is treated as a sweep axis. The Cartesian
+    product of all sweep axes is generated, and the run_name gets a
+    ``_param=value`` suffix for each varied param. Fixed params (non-list) are
+    passed through unchanged.
+
+    Example::
+
+        - name: face
+          run_name: face_knn
+          params:
+            graph_mode: knn
+            n_neighbors: [5, 15, 50]
+            k_per_class: [200, 500, 1000]
+
+    expands to 9 entries: face_knn_n_neighbors=5_k_per_class=200, ...
+    """
+    expanded: List[Dict[str, Any]] = []
+    for entry in methods_cfg:
+        name = entry["name"]
+        run_name = entry.get("run_name", name)
+        params = dict(entry.get("params") or {})
+
+        sweep = {k: v for k, v in params.items() if isinstance(v, list)}
+        fixed = {k: v for k, v in params.items() if not isinstance(v, list)}
+
+        if not sweep:
+            expanded.append(entry)
+            continue
+
+        keys = list(sweep.keys())
+        for combo in itertools.product(*[sweep[k] for k in keys]):
+            combo_dict = dict(zip(keys, combo))
+            suffix = "-".join(f"{k}={v}" for k, v in combo_dict.items())
+            expanded.append({
+                "name": name,
+                "run_name": f"{run_name}_{suffix}",
+                "params": {**fixed, **combo_dict},
+            })
+
+    return expanded
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +465,10 @@ def _apply_cli_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[
         cfg.setdefault("sampling", {})["n_queries"] = args.n_queries
     if args.methods is not None:
         allowed = set(args.methods)
-        cfg["methods"] = [m for m in cfg.get("methods", []) if m["name"] in allowed]
+        cfg["methods"] = [
+            m for m in cfg.get("methods", [])
+            if m.get("run_name", m["name"]) in allowed
+        ]
     return cfg
 
 
@@ -488,13 +553,15 @@ def main() -> None:
             mad_weights[i] = mad if mad > 0 else 1.0
     # Categorical features keep weight = 1.0 (binary mismatch is already in [0, 1]).
 
-    # --- Train subsampling (once, shared by all methods) ---
+    # --- Train subsampling (shared by all methods EXCEPT cpp) ---
+    # k-medoids is reserved for the CPP method's own atlas construction (see
+    # k_per_class inside _build_certified_atlas_method).  Other methods receive
+    # either the full training set or a *random* subsample if n_train is set.
     sampling_cfg = cfg.get("sampling", {})
     n_train = int(sampling_cfg.get("n_train", len(x_train_full)))
     n_queries = int(sampling_cfg.get("n_queries", len(x_test_full)))
-    train_method = str(sampling_cfg.get("train_method", "random"))
 
-    x_train, y_train = subsample_train(x_train_full, y_train_full, n_train, train_method, rng)
+    x_train, y_train = subsample_train(x_train_full, y_train_full, n_train, "random", rng)
 
     # --- Test query selection (fixed set, shared by all methods) ---
     n_queries = min(n_queries, len(x_test_full))
@@ -546,21 +613,31 @@ def main() -> None:
     output_path = Path(cfg.get("output", {}).get("path", "results/benchmark.parquet"))
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    methods_cfg = cfg.get("methods", [])
-    all_rows: List[Dict[str, Any]] = []
+    methods_cfg = _expand_grid(cfg.get("methods", []))
+    print(f"[INFO] {len(methods_cfg)} method runs after grid expansion.")
+
+    benchmark_result = BenchmarkResult(
+        dataset=ds_cfg["name"],
+        seed=seed,
+        x_queries=x_queries,
+        y_orig=y_orig_all,
+    )
 
     for method_cfg in methods_cfg:
-        method_name: str = method_cfg["name"]
-        method_params: Dict[str, Any] = method_cfg.get("params", {})
-        print(f"\n[METHOD] {method_name}")
+        method_name: str = method_cfg["name"]        # registry key — selects the implementation
+        run_name: str = method_cfg.get("run_name", method_name)  # label used in results
+        method_params: Dict[str, Any] = method_cfg.get("params") or {}
+        print(f"\n[METHOD] {run_name}" + (f" (impl: {method_name})" if run_name != method_name else ""))
 
-        # --- Fit ---
+        # --- Fit / Build ---
         # my_method (CertifiedAtlas) operates in embedding space internally but
         # we decode CFs back to raw feature space for fair comparison.
         embed_model = None   # full TabularClassifier (has .decode()); set for my_method only
         embed_device = "cpu"
+        build_time_s = 0.0
         if method_name in ("my_method", "cpp"):
             try:
+                _t_build = time.perf_counter()
                 method, active_model, embed_model, _, active_queries, _ = _build_certified_atlas_method(
                     params=method_params,
                     x_train=x_train,
@@ -568,85 +645,97 @@ def main() -> None:
                     x_queries=x_queries,
                     seed=seed,
                 )
+                build_time_s = time.perf_counter() - _t_build
                 embed_device = method_params.get("device", "cpu")
                 active_y_orig = active_model.predict(active_queries)
                 space = "raw"  # CFs are decoded back to raw feature space
             except Exception as exc:
                 print(f"  [ERROR] build failed: {exc}")
-                for q_idx, x_orig, y_orig in zip(query_indices, x_queries, y_orig_all):
-                    all_rows.append(
-                        _failure_row(method_name, q_idx, x_orig, int(y_orig), n_features,
-                                     f"build_error: {exc}", 0.0, space="raw")
+                qrs = [
+                    QueryResult(
+                        query_idx=int(q_idx), x_cf=None, y_cf=None, success=False,
+                        runtime_s=0.0, error=f"build_error: {exc}",
+                        l2_distance=float("nan"), l1_distance=float("nan"),
+                        l0_sparsity=float("nan"), mad_l1_distance=float("nan"),
+                        redundancy=float("nan"),
                     )
+                    for q_idx in query_indices
+                ]
+                benchmark_result.method_results.append(MethodResult(
+                    method=method_name, run_name=run_name, params=method_params,
+                    build_time_s=0.0, space="raw", query_results=qrs,
+                ))
                 continue
         else:
             try:
-                method = registries["method"].create(method_name, random_seed=seed, **method_params)
-                method.fit(x_train=x_train_gen, y_train=y_train, model=model_for_methods)
+                method = registries["method"].create(method_name, model=model_for_methods, random_seed=seed, **method_params)
+                _t_build = time.perf_counter()
+                method.fit(x_train=x_train_gen, y_train=y_train)
+                build_time_s = time.perf_counter() - _t_build
             except Exception as exc:
                 print(f"  [ERROR] fit() failed: {exc}")
-                for q_idx, x_orig, y_orig in zip(query_indices, x_queries, y_orig_all):
-                    all_rows.append(
-                        _failure_row(method_name, q_idx, x_orig, int(y_orig), n_features,
-                                     f"fit_error: {exc}", 0.0)
+                qrs = [
+                    QueryResult(
+                        query_idx=int(q_idx), x_cf=None, y_cf=None, success=False,
+                        runtime_s=0.0, error=f"fit_error: {exc}",
+                        l2_distance=float("nan"), l1_distance=float("nan"),
+                        l0_sparsity=float("nan"), mad_l1_distance=float("nan"),
+                        redundancy=float("nan"),
                     )
+                    for q_idx in query_indices
+                ]
+                benchmark_result.method_results.append(MethodResult(
+                    method=method_name, run_name=run_name, params=method_params,
+                    build_time_s=0.0, space="gen", query_results=qrs,
+                ))
                 continue
             active_model = model_for_methods
             active_queries = x_queries_gen
             active_y_orig = y_orig_all
             space = "gen"
+        print(f"  [build] {build_time_s:.2f}s")
 
         # --- Generate ---
         n_ok = 0
         n_failed = 0
-        # raw_queries is always x_queries; used for row storage regardless of
-        # whether the method operates in embedding space internally.
+        query_results: List[QueryResult] = []
         pbar = tqdm(
             enumerate(zip(query_indices, active_queries, active_y_orig)),
             total=n_queries,
-            desc=f"  {method_name}",
+            desc=f"  {run_name}",
             unit="query",
         )
         for pos, (q_idx, x_active, y_orig) in pbar:
             x_orig_raw = x_queries[pos]   # raw feature vector, always
             target_class = 1 - int(y_orig)
-            example = CounterfactualExample(x=x_active, target_class=target_class)
 
             t0 = time.perf_counter()
             try:
                 result = _call_with_timeout(
-                    lambda: method.generate(example=example, model=active_model),
+                    lambda: method.generate(x=x_active, target_class=target_class),
                     timeout_s,
                 )
                 runtime_s = time.perf_counter() - t0
                 x_cf_active = np.asarray(result.x_cf, dtype=np.float32)
 
-                # For cpp/my_method: QP returns a point in raw OHE space; apply
-                # argmax-snap to produce a valid discrete OHE vector.
-                # y_cf and success are re-evaluated on the decoded CF using the
-                # shared full model, so all methods are judged in the same space.
+                # For cpp/my_method: atlas outputs are already in raw/OHE space.
                 if embed_model is not None:
-                    import torch
-                    with torch.no_grad():
-                        x_cf_row = embed_model.decode(
-                            torch.from_numpy(x_cf_active[None, :]).to(embed_device)
-                        ).cpu().numpy()[0].astype(np.float32)
+                    x_cf_row = x_cf_active
                     y_cf = int(model.predict(x_cf_row[None, :])[0])
-                    cf_success = (y_cf == target_class)
                 else:
                     x_cf_row = np.asarray(transform.inverse_transform(x_cf_active), dtype=np.float32)
                     if ohe_blocks is not None:
                         x_cf_row = np.asarray(snap_ohe_blocks(x_cf_row, ohe_blocks), dtype=np.float32)
                     y_cf = int(model.predict(x_cf_row[None, :])[0])
-                    cf_success = (y_cf == target_class)
+
+                # All methods are evaluated the same way:
+                # success means the returned CF flips the original model prediction.
+                cf_success = (y_cf == target_class)
 
                 # Redundancy: fraction of changed features that can be individually
                 # reverted without flipping the CF out of the target class.
-                # Always uses the shared benchmark classifier (model) for consistency.
                 redundancy_val = 0.0
-                diff_raw = np.abs(
-                    x_cf_row.astype(np.float64) - x_orig_raw.astype(np.float64)
-                )
+                diff_raw = np.abs(x_cf_row.astype(np.float64) - x_orig_raw.astype(np.float64))
                 changed_feats = np.where(diff_raw > 1e-6)[0]
                 if len(changed_feats) > 0:
                     n_redundant = 0
@@ -657,38 +746,65 @@ def main() -> None:
                             n_redundant += 1
                     redundancy_val = n_redundant / len(changed_feats)
 
-                all_rows.append(
-                    _success_row(
-                        method_name, q_idx, x_orig_raw, int(y_orig),
-                        x_cf_row, y_cf, cf_success, runtime_s, n_features, space,
-                        mad_weights=mad_weights,
-                        input_types=_input_types,
-                        redundancy=redundancy_val,
-                    )
+                l2, l1, l0, mad_l1 = _compute_query_metrics(
+                    x_orig_raw, x_cf_row, n_features, mad_weights, _input_types
                 )
+                query_results.append(QueryResult(
+                    query_idx=int(q_idx),
+                    x_cf=x_cf_row,
+                    y_cf=y_cf,
+                    success=cf_success,
+                    runtime_s=runtime_s,
+                    error=None,
+                    l2_distance=l2,
+                    l1_distance=l1,
+                    l0_sparsity=l0,
+                    mad_l1_distance=mad_l1,
+                    redundancy=redundancy_val,
+                ))
                 n_ok += int(cf_success)
             except TimeoutError:
                 runtime_s = time.perf_counter() - t0
-                all_rows.append(
-                    _failure_row(method_name, q_idx, x_orig_raw, int(y_orig),
-                                 n_features, "timeout", runtime_s, space)
-                )
+                query_results.append(QueryResult(
+                    query_idx=int(q_idx), x_cf=None, y_cf=None, success=False,
+                    runtime_s=runtime_s, error="timeout",
+                    l2_distance=float("nan"), l1_distance=float("nan"),
+                    l0_sparsity=float("nan"), mad_l1_distance=float("nan"),
+                    redundancy=float("nan"),
+                ))
                 n_failed += 1
             except Exception as exc:
                 runtime_s = time.perf_counter() - t0
-                all_rows.append(
-                    _failure_row(method_name, q_idx, x_orig_raw, int(y_orig),
-                                 n_features, str(exc), runtime_s, space)
-                )
+                query_results.append(QueryResult(
+                    query_idx=int(q_idx), x_cf=None, y_cf=None, success=False,
+                    runtime_s=runtime_s, error=str(exc),
+                    l2_distance=float("nan"), l1_distance=float("nan"),
+                    l0_sparsity=float("nan"), mad_l1_distance=float("nan"),
+                    redundancy=float("nan"),
+                ))
                 n_failed += 1
 
             pbar.set_postfix(valid=n_ok, failed=n_failed)
 
-    df = pd.DataFrame(all_rows)
-    df.to_parquet(output_path, index=False, compression="gzip")
-    print(f"\n[INFO] Saved {len(df)} rows to {output_path}")
+        benchmark_result.method_results.append(MethodResult(
+            method=method_name,
+            run_name=run_name,
+            params=method_params,
+            build_time_s=build_time_s,
+            space=space,
+            query_results=query_results,
+        ))
 
-    _print_summary(df)
+    # --- Save ---
+    bmk_path = output_path.with_suffix(".bmk")
+    benchmark_result.save(bmk_path)
+    print(f"\n[INFO] Saved BenchmarkResult to {bmk_path}")
+
+    df = benchmark_result.to_dataframe()
+    df.to_parquet(output_path, index=False, compression="gzip")
+    print(f"[INFO] Saved flat parquet to {output_path}")
+
+    benchmark_result.summary()
 
 
 if __name__ == "__main__":
