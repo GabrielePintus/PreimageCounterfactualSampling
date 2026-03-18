@@ -87,17 +87,22 @@ def test_dice_method_contract():
     assert int(model.predict(result.x_cf[None, :])[0]) == 1
 
 
-def test_dice_binary_validity_threshold_for_target_zero_uses_positive_class_probability():
+def test_dice_validity_mask_uses_argmax():
     method = DiceMethod(model=ThresholdModel(), random_seed=10)
 
     def fake_predict_proba(_x):
-        return np.array([[0.70, 0.30], [0.76, 0.24]], dtype=np.float32)
+        # First candidate: argmax=0; second: argmax=1
+        return np.array([[0.70, 0.30], [0.40, 0.60]], dtype=np.float32)
 
-    method._predict_proba_eval = fake_predict_proba  # type: ignore[method-assign]
-    mask, scores = method._validity_mask_eval(np.zeros((2, 2), dtype=np.float32), target_class=0)
+    method.predict_proba_eval = fake_predict_proba  # type: ignore[method-assign]
 
-    assert np.array_equal(mask, np.array([False, True]))
-    assert np.allclose(scores, np.array([0.30, 0.24], dtype=np.float32))
+    mask0, scores0 = method.validity_mask_eval(np.zeros((2, 2), dtype=np.float32), target_class=0)
+    assert np.array_equal(mask0, np.array([True, False]))
+    assert np.allclose(scores0, np.array([0.70, 0.40], dtype=np.float32))
+
+    mask1, scores1 = method.validity_mask_eval(np.zeros((2, 2), dtype=np.float32), target_class=1)
+    assert np.array_equal(mask1, np.array([False, True]))
+    assert np.allclose(scores1, np.array([0.30, 0.60], dtype=np.float32))
 
 
 def test_growing_spheres_contract():
