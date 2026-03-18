@@ -2,70 +2,63 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
-from counterfactuals.core.base_classes import CounterfactualResult
+from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface
 
-from .base_method import ProbabilisticMethod
 
-
-class NearestNeighborMethod(ProbabilisticMethod):
+class NearestNeighborMethod(BaseCounterfactualMethod):
     """Return the closest training sample from the requested target class."""
 
     def __init__(
         self,
+        # The trained classifier
         model: ModelInterface,
-        random_seed: int = 42,
-        k_per_class: int | None = None,
+
+        # Main params of the NN method
+        norm: int = 2,
+
+        # Custom downsampling strategy
         subsample_method: str = "kmedoids",
+        k_per_class: int | None = None,
+
+        # Random seed for reproducibility (e.g., in subsampling)
+        random_seed: int = 42,
     ):
         super().__init__(model=model, random_seed=random_seed, k_per_class=k_per_class, subsample_method=subsample_method)
+        self.norm = norm
 
     def _fit(self) -> None:
-        pass
+        self.train_pred = self.model.predict(self._x_train)
 
-    def generate(self, x: np.ndarray, target_class: Optional[int] = None) -> CounterfactualResult:
-        if not self._is_fitted or self._x_train is None or self._y_train is None:
+    def generate(self, x: np.ndarray, target_class: int) -> CounterfactualResult:
+        if not self._is_fitted:
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
 
-        x0 = self._as_1d(x)
-        target_class = self._resolve_target_class(x=x0, target_class=target_class)
+        x_query = np.asarray(x, dtype=np.float32).reshape(-1)
 
-        target_mask = self._y_train == target_class
+        target_mask = self.train_pred == target_class
         if not np.any(target_mask):
-            raise ValueError(f"No training samples available for target_class={target_class}")
+            raise ValueError(f"No training samples predicted as target_class={target_class}")
 
-        # Restrict the search to the requested target class, then do a plain L2
-        # nearest-neighbor query in the method's active feature space.
-        x_target = self._x_train[target_mask]
+        # Restrict the search to samples the model predicts as target_class, then
+        # do a plain L2 nearest-neighbor query in the method's active feature space.
+        candidates = self._x_train[target_mask]
         candidate_indices = np.flatnonzero(target_mask)
 
-        distances = np.linalg.norm(x_target - x0[None, :], ord=2, axis=1)
-        best_local_idx = int(np.argmin(distances))
-        best_global_idx = int(candidate_indices[best_local_idx])
-        x_cf = x_target[best_local_idx].astype(np.float32)
-
-        pred = int(self.model.predict(x_cf)[0])
-        success = pred == target_class
+        distances = np.linalg.norm(candidates - x_query[None, :], ord=self.norm, axis=1)
+        best_idx = int(np.argmin(distances))
+        x_cf = candidates[best_idx].astype(np.float32)
 
         return CounterfactualResult(
             x_cf=x_cf,
-            success=success,
-            distance=float(distances[best_local_idx]),
+            success=True,
+            distance=float(distances[best_idx]),
             metadata={
                 "target_class": int(target_class),
-                "nearest_train_index": best_global_idx,
-                "nearest_train_distance": float(distances[best_local_idx]),
+                "nearest_train_index": int(candidate_indices[best_idx]),
+                "nearest_train_distance": float(distances[best_idx]),
             },
         )
 
-    def _resolve_target_class(self, x: np.ndarray, target_class: Optional[int]) -> int:
-        if target_class is not None:
-            return int(target_class)
-        pred = int(self.model.predict(x)[0])
-        if self.model.predict_proba(x).shape[1] != 2:
-            raise ValueError("target_class is required for non-binary tasks")
-        return 1 - pred

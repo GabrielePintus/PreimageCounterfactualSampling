@@ -23,7 +23,7 @@ from counterfactuals.core.base_classes import CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface
 from counterfactuals.preprocessing.transforms import IdentityTransform, InverseTransformModel, OHEBlockSpec
 
-from .base_method import ProbabilisticMethod
+from counterfactuals.core.base_classes import BaseCounterfactualMethod
 
 try:
     import torch
@@ -42,7 +42,7 @@ class _DifferentiableModel:
     ohe_blocks: tuple[tuple[int, int], ...]
 
 
-class DiceMethod(ProbabilisticMethod):
+class DiceMethod(BaseCounterfactualMethod):
     """Generate counterfactuals with the original gradient-based DiCE objective."""
 
     def __init__(
@@ -159,7 +159,7 @@ class DiceMethod(ProbabilisticMethod):
 
         # DiCE optimises in normalised feature space, but the benchmark and final
         # model validation both happen in evaluation space after rounding.
-        x_query_eval = self._as_1d(x).astype(np.float32)
+        x_query_eval = np.asarray(x, dtype=np.float32).reshape(-1)
         target_class = self._resolve_target_class(x=x_query_eval, target_class=target_class)
         query_norm = self._normalize(x_query_eval)
 

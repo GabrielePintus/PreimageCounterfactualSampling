@@ -44,6 +44,7 @@ class FACEMethod(BaseCounterfactualMethod):
 
     def __init__(
         self,
+        # The trained model
         model: ModelInterface,
 
         # Main params of the FACE method

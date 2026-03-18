@@ -9,10 +9,10 @@ import numpy as np
 from counterfactuals.core.base_classes import CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface
 
-from .base_method import ProbabilisticMethod
+from counterfactuals.core.base_classes import BaseCounterfactualMethod
 
 
-class CertifiedAtlasMethod(ProbabilisticMethod):
+class CertifiedAtlasMethod(BaseCounterfactualMethod):
     """Wrap ``preimage_sampling.CertifiedAtlas`` into the common method interface."""
 
     def __init__(self, model: ModelInterface, atlas, random_seed: int = 42):

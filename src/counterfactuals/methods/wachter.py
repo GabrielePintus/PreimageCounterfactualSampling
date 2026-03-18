@@ -24,10 +24,10 @@ import scipy.optimize
 from counterfactuals.core.base_classes import CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface
 
-from .base_method import ProbabilisticMethod
+from counterfactuals.core.base_classes import BaseCounterfactualMethod
 
 
-class WachterMethod(ProbabilisticMethod):
+class WachterMethod(BaseCounterfactualMethod):
     """Wachter et al. (2017) counterfactual via L-BFGS-B + lambda schedule."""
 
     def __init__(
@@ -57,8 +57,8 @@ class WachterMethod(ProbabilisticMethod):
     def generate(self, x: np.ndarray, target_class: Optional[int] = None) -> CounterfactualResult:
         if not self._is_fitted or self._feature_scale is None:
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
-        x0 = self._as_1d(x).astype(np.float64)
-        target_class = self._resolve_target_class(x=x0, target_class=target_class)
+        x_query = np.asarray(x, dtype=np.float32).reshape(-1).astype(np.float64)
+        target_class = self._resolve_target_class(x=x_query, target_class=target_class)
         scale = self._feature_scale
 
         best_x: Optional[np.ndarray] = None
@@ -69,14 +69,14 @@ class WachterMethod(ProbabilisticMethod):
         for lam in self.lambda_schedule:
             # Each lambda controls the trade-off between staying close to the
             # query and reaching the decision boundary of the target class.
-            starts = [x0.copy()]
+            starts = [x_query.copy()]
             for _ in range(self.n_restarts):
-                noise = self.rng.normal(0.0, scale * self.restart_scale, size=x0.shape)
-                starts.append(x0 + noise)
+                noise = self.rng.normal(0.0, scale * self.restart_scale, size=x_query.shape)
+                starts.append(x_query + noise)
 
             for x_start in starts:
                 def _obj(x: np.ndarray) -> float:
-                    dist_sq = float(np.sum(((x - x0) / scale) ** 2))
+                    dist_sq = float(np.sum(((x - x_query) / scale) ** 2))
                     probs = self.model.predict_proba(x[None, :])[0]
                     # Wachter's objective only needs to reach the classification
                     # boundary; it does not try to drive the target probability to 1.
@@ -94,7 +94,7 @@ class WachterMethod(ProbabilisticMethod):
                 x_cand = res.x.astype(np.float64)
                 y_cand = int(self.model.predict(x_cand[None, :])[0])
                 if y_cand == target_class:
-                    dist = float(np.linalg.norm(x_cand - x0, ord=2))
+                    dist = float(np.linalg.norm(x_cand - x_query, ord=2))
                     if dist < best_dist:
                         best_dist = dist
                         best_x = x_cand
@@ -104,7 +104,7 @@ class WachterMethod(ProbabilisticMethod):
             if best_success:
                 break  # found a valid CF — no need for larger lambda
 
-        x_cf = (best_x if best_x is not None else x0).astype(np.float32)
+        x_cf = (best_x if best_x is not None else x_query).astype(np.float32)
         return CounterfactualResult(
             x_cf=x_cf,
             success=best_success,

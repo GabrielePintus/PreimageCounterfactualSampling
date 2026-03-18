@@ -37,6 +37,7 @@ class BaseCounterfactualMethod(ABC):
         self.random_seed = random_seed
         self.k_per_class = k_per_class
         self.subsample_method = subsample_method
+        self.rng = np.random.default_rng(random_seed)
         self._x_train: Optional[np.ndarray] = None
         self._y_train: Optional[np.ndarray] = None
         self._is_fitted = False

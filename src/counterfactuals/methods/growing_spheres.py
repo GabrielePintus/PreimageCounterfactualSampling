@@ -6,13 +6,11 @@ from typing import Optional
 
 import numpy as np
 
-from counterfactuals.core.base_classes import CounterfactualResult
+from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface  # noqa: F401 – used by type annotation in __init__
 
-from .base_method import ProbabilisticMethod
 
-
-class GrowingSpheresMethod(ProbabilisticMethod):
+class GrowingSpheresMethod(BaseCounterfactualMethod):
     """Growing Spheres with paper-style enemy search + feature selection."""
 
     def __init__(
@@ -41,8 +39,8 @@ class GrowingSpheresMethod(ProbabilisticMethod):
         if not self._is_fitted or self._feature_scale is None:
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
 
-        x0 = self._as_1d(x)
-        target_class = self._resolve_target_class(x=x0, target_class=target_class)
+        x_query = np.asarray(x, dtype=np.float32).reshape(-1)
+        target_class = self._resolve_target_class(x=x_query, target_class=target_class)
 
         radius = self.radius_step
         best = None
@@ -52,27 +50,27 @@ class GrowingSpheresMethod(ProbabilisticMethod):
         # one valid "enemy" point from the target class.
         while radius <= self.max_radius:
             inner_radius = max(0.0, radius - self.radius_step)
-            candidates = self._sample_layer(x0=x0, inner_radius=inner_radius, outer_radius=radius)
+            candidates = self._sample_layer(x0=x_query, inner_radius=inner_radius, outer_radius=radius)
             preds = self.model.predict(candidates)
             valid = candidates[preds == target_class]
             if len(valid) > 0:
                 # Among the first valid shell, keep the closest enemy and then apply
                 # Growing Spheres' post-hoc feature selection step for sparsity.
-                dists = np.linalg.norm(valid - x0[None, :], axis=1)
+                dists = np.linalg.norm(valid - x_query[None, :], axis=1)
                 idx = int(np.argmin(dists))
                 enemy = valid[idx]
                 best = self._feature_selection(
-                    x0=x0,
+                    x0=x_query,
                     enemy=enemy,
                     target_class=target_class,
                 )
-                best_dist = float(np.linalg.norm(best - x0, ord=2))
+                best_dist = float(np.linalg.norm(best - x_query, ord=2))
                 break
             radius += self.radius_step
 
         if best is None:
             return CounterfactualResult(
-                x_cf=x0.copy(),
+                x_cf=x_query.copy(),
                 success=False,
                 distance=0.0,
                 metadata={"target_class": target_class, "searched_radius": self.max_radius},
