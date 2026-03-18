@@ -16,8 +16,8 @@ class NearestNeighborMethod(BaseCounterfactualMethod):
         # The trained classifier
         model: ModelInterface,
 
-        # Main params of the NN method
-        norm: int = 2,
+        # Norm used to measure distance to candidates (e.g. 1, 2, "inf")
+        norm: int | float | str = 2,
 
         # Custom downsampling strategy
         subsample_method: str = "kmedoids",
@@ -27,7 +27,7 @@ class NearestNeighborMethod(BaseCounterfactualMethod):
         random_seed: int = 42,
     ):
         super().__init__(model=model, random_seed=random_seed, k_per_class=k_per_class, subsample_method=subsample_method)
-        self.norm = norm
+        self.norm = float(norm) if isinstance(norm, str) else norm
 
     def _fit(self) -> None:
         self.train_pred = self.model.predict(self._x_train)
