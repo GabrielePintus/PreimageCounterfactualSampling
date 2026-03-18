@@ -5,6 +5,15 @@ dataset:
   params:
     data_dir: data/
 
+preprocessing:
+  name: pca
+  params:
+    n_components: 0.99
+    svd_solver: full
+    whiten: false
+    random_state: 42
+
+
 model:
   name: tabular_classifier_ckpt
   params:
@@ -12,53 +21,107 @@ model:
     device: cpu
 
 sampling:
-  n_train: 5000          # k-medoids target size for the shared train pool
-  n_queries: 500         # number of test queries (same set used by all methods)
-  train_method: kmedoids # "kmedoids" (requires scikit-learn-extra) | "random"
+  n_queries: 1000         # number of test queries (same set used by all methods)
 
 timeout_per_sample: 60   # seconds per (method, query); set to 0 to disable
 
-# Optional shared preprocessing for generation space only.
-# All benchmark metrics are computed after inverse-transform in original feature space.
-# preprocessing:
-#   enabled: true
-#   name: pca
-#   params:
-#     n_components: 0.99
-#     svd_solver: full
-#     whiten: false
-#     random_state: 42
-
 output:
-  path: results/benchmark_adult_test.parquet
+  path: results/benchmark_adult_4.parquet
 
 methods:
-  # - name: dice
-  #   params:
-  #     total_cfs: 4
-  #     proximity_weight: 0.5
-  #     diversity_weight: 0.0
 
-  # - name: face
-  #   params:
-  #     graph_mode: knn
-  #     n_neighbors: 15
-  #     tp: 0.5
-  #     td: 0.0
-
-  - name: nearest_neighbor
-    params: {}
-
-  # - name: growing_spheres
+  # # --- Nearest Neighbor (no hyperparameters) ---
+  # # --- Nearest Neighbor ---
+  # # Full dataset baseline
+  # - name: nearest_neighbor
+  #   run_name: nn_full
   #   params: {}
 
-  - name: cpp
+  # # Grid: subsample_method=kmeans x k_per_class
+  # - name: nearest_neighbor
+  #   run_name: nn_kmeans
+  #   params:
+  #     subsample_method: kmeans
+  #     k_per_class: [100, 200, 500, 1000]
+
+  # # Grid: subsample_method=kmedoids x k_per_class
+  # - name: nearest_neighbor
+  #   run_name: nn_kmedoids
+  #   params:
+  #     subsample_method: kmedoids
+  #     k_per_class: [100, 200, 500, 1000]
+
+  # --- Growing Spheres ---
+  # Grid: radius_step x n_in_layer (fix max_radius=5.0)
+  # - name: growing_spheres
+  #   run_name: gs
+  #   params:
+  #     max_radius: 5.0
+  #     radius_step: [0.05, 0.15, 0.30]
+  #     n_in_layer: [256, 512, 1024]
+
+  # # --- DiCE ---
+  # # Grid: proximity_weight x yloss_type (fix diversity_weight=0.0, total_cfs=1)
+  # - name: dice
+  #   run_name: dice
+  #   params:
+  #     total_cfs: 1
+  #     diversity_weight: 0.0
+  #     proximity_weight: [0.5, 1.0, 2.0]
+  #     yloss_type: [hinge_loss, log_loss]
+
+  # --- FACE (kNN density, Eq. 3) ---
+  # Grid: n_neighbors x epsilon x k_per_class x tp
+  # - name: face
+  #   run_name: face_knn
+  #   params:
+  #     density_estimator:
+  #       name: knn
+  #       params:
+  #         n_neighbors: [10, 25]
+  #         epsilon: [0.5, 0.75, 1.0]
+  #     td: 0.0
+  #     tp: [0.5, 0.55, 0.6]
+  #     subsample_method: kmedoids
+  #     k_per_class: [2000, 10000]
+
+  # --- FACE (KDE density, Eq. 2) ---
+  # Grid: epsilon x bandwidth x k_per_class x tp
+  # - name: face
+  #   run_name: face_kde
+  #   params:
+  #     density_estimator:
+  #       name: kde
+  #       params:
+  #         epsilon: [0.5, 0.75, 1.0]
+  #         bandwidth: [0.3, 0.5, 1.0]
+  #     td: 0.0
+  #     tp: [0.5, 0.55, 0.6]
+  #     subsample_method: kmedoids
+  #     k_per_class: [2000, 10000]
+
+  - name: face
+    run_name: face_knn
     params:
-      checkpoint: checkpoints/adult_classifier/best.ckpt
-      device: cpu
-      eps_alpha: 0.25      # NearestOppositeClassClearanceStrategy alpha
-      query_method: sorted # CPP search strategy: sorted | bvh | knn
-      k_per_class: null    # Use all available points for the atlas train set
-      max_samples_per_class: null  # LiRPA certifies all k_per_class polytopes per class
-      norm: 1            # L1 perturbation norm → sparse CFs (CVXPY/CLARABEL)
-      batch_size: 256
+      density_estimator:
+        name: kde
+      epsilon: 3.0        # prunes long-range kNN edges
+      # td: 0.0           # no density threshold
+      # tp: 0.5
+      subsample_method: kmeans
+      k_per_class: 1000
+
+  # # --- CPP ---
+  # # Grid: k_per_class x eps_alpha x norm x atlas_subsample_method
+  # - name: cpp
+  #   run_name: cpp
+  #   params:
+  #     checkpoint: checkpoints/adult_classifier/best.ckpt
+  #     device: cpu
+  #     query_method: sorted
+  #     atlas_subsample_method: [kmedoids, kmeans]
+  #     max_samples_per_class: null
+  #     batch_size: 32
+  #     k_per_class: [50, 100, 200]
+  #     eps_alpha: [0.25, 0.35, 0.45]
+  #     norm: [1, 2]

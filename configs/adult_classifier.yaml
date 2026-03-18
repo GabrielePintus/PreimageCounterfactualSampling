@@ -66,3 +66,8 @@ data:
     test_fraction: 0.1
     seed: 42
     num_workers: 4
+    pca_enabled: false
+    pca_n_components: 0.99
+    pca_svd_solver: full
+    pca_whiten: false
+    pca_random_state: 42
