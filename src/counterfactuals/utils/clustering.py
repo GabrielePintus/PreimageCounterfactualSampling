@@ -63,8 +63,11 @@ def select_prototype_indices(
     try:
         from sklearn_extra.cluster import KMedoids
 
+        import warnings
         km = KMedoids(n_clusters=k, metric="euclidean", method="alternate", random_state=random_state)
-        km.fit(X)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Cluster .* is empty", category=UserWarning)
+            km.fit(X)
         return km.medoid_indices_
     except ImportError:
         from sklearn.cluster import KMeans

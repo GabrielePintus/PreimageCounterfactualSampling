@@ -20,7 +20,7 @@ class KDEEstimator(BaseDensityEstimator):
     Edge weights: -log(p̂(midpoint)) · dist.
     """
 
-    def __init__(self, bandwidth: float = 0.5, kernel: str = "gaussian") -> None:
+    def __init__(self, bandwidth: float | str = "scott", kernel: str = "gaussian") -> None:
         self.bandwidth = bandwidth
         self.kernel = kernel
         self._kde: KernelDensity | None = None
