@@ -99,6 +99,7 @@ class DiceMethod(BaseCounterfactualMethod):
         self._device = None
         self._ohe_blocks: tuple[tuple[int, int], ...] = ()
         self.feature_weights: Optional[np.ndarray] = None
+        self._feature_weights_t = None  # on-device tensor version, built in _fit
         self.continuous_indices: Optional[np.ndarray] = None
         self._continuous_steps: Optional[np.ndarray] = None
         self.sparsity_thresholds: Optional[np.ndarray] = None
@@ -110,13 +111,19 @@ class DiceMethod(BaseCounterfactualMethod):
 
         self._module, self._device, self._ohe_blocks = self._unwrap_model(model=self.model, n_features=self._x_train.shape[1])
 
+        # Identify which feature indices are continuous (complement of OHE blocks)
         cat_mask = np.zeros(self._x_train.shape[1], dtype=bool)
         for start, end in self._ohe_blocks:
             cat_mask[start:end] = True
         self.continuous_indices = np.flatnonzero(~cat_mask).astype(np.int64)
 
+        # Precompute training-data statistics used during generation
+        # inverse-MAD per feature, used in proximity and diversity terms
         self.feature_weights = self.compute_feature_weights(x_train=self._x_train)
-        self._continuous_steps = self._compute_continuous_steps(x_train=self._x_train)
+        self._feature_weights_t = torch.tensor(self.feature_weights, dtype=torch.float32, device=self._device)
+        # P10 step size per continuous feature, used in post-hoc sparsity search
+        self._continuous_steps = self.compute_continuous_steps(x_train=self._x_train)
+        # min(MAD, P10) per feature, threshold for snapping to query value
         self.sparsity_thresholds = self.compute_sparsity_thresholds(x_train=self._x_train)
 
     def generate(self, x: np.ndarray, target_class: Optional[int] = None) -> CounterfactualResult:
@@ -138,8 +145,7 @@ class DiceMethod(BaseCounterfactualMethod):
 
         prev_loss = 0.0
         converge_count = 0
-        best_backup_eval: Optional[np.ndarray] = None
-        best_backup_gap = np.inf
+        best_backup_eval = None  # torch.Tensor on self._device, set when all candidates are valid
         final_loss = np.inf
         n_iter = self.max_iter
 
@@ -156,15 +162,13 @@ class DiceMethod(BaseCounterfactualMethod):
             loss_diff = abs(prev_loss - final_loss)
             prev_loss = final_loss
 
-            # Track the best fully valid rounded batch as a backup in case the final
-            # iterate is not valid after categorical snapping.
-            rounded_eval = self.round_cfs_to_eval(candidates.detach().cpu().numpy())
-            valid_mask, probs_target = self.validity_mask_eval(rounded_eval, target_class=target_class)
-            if np.all(valid_mask):
-                gap = float(np.mean(np.abs(probs_target - 0.5)))
-                if gap < best_backup_gap:
-                    best_backup_gap = gap
-                    best_backup_eval = rounded_eval.copy()
+            # Track the most recent fully valid rounded batch as a backup in case the
+            # final iterate is not valid after categorical snapping. All operations stay
+            # on-device; no GPU→CPU transfer happens here.
+            rounded_t = self.round_cfs_to_eval_torch(candidates)
+            valid_mask_t, _ = self.validity_mask_eval_torch(rounded_t, target_class)
+            if valid_mask_t.all():
+                best_backup_eval = rounded_t.detach().clone()
 
             if itr + 1 < self.min_iter:
                 continue
@@ -174,15 +178,19 @@ class DiceMethod(BaseCounterfactualMethod):
             else:
                 converge_count = 0
 
-            if converge_count >= self.loss_converge_maxiter and np.all(valid_mask):
+            if converge_count >= self.loss_converge_maxiter and valid_mask_t.all():
                 n_iter = itr + 1
                 break
 
-        candidates_eval = self.round_cfs_to_eval(candidates.detach().cpu().numpy())
-        valid_mask, probs_target = self.validity_mask_eval(candidates_eval, target_class=target_class)
-        if not np.all(valid_mask) and best_backup_eval is not None:
-            candidates_eval = best_backup_eval
-            valid_mask, probs_target = self.validity_mask_eval(candidates_eval, target_class=target_class)
+        # Resolve the final candidate tensor on-device, then move to CPU once.
+        final_t = self.round_cfs_to_eval_torch(candidates)
+        valid_mask_t, probs_target_t = self.validity_mask_eval_torch(final_t, target_class)
+        if not valid_mask_t.all() and best_backup_eval is not None:
+            final_t = best_backup_eval
+            valid_mask_t, probs_target_t = self.validity_mask_eval_torch(final_t, target_class)
+        candidates_eval = final_t.cpu().numpy()
+        valid_mask = valid_mask_t.cpu().numpy()
+        probs_target = probs_target_t.cpu().numpy()
 
         if np.any(valid_mask):
             valid_eval = candidates_eval[valid_mask]
@@ -286,7 +294,7 @@ class DiceMethod(BaseCounterfactualMethod):
             weights[self.continuous_indices] = np.round(1.0 / mad, 2).astype(np.float32)
         return weights
 
-    def _compute_continuous_steps(self, x_train: np.ndarray) -> np.ndarray:
+    def compute_continuous_steps(self, x_train: np.ndarray) -> np.ndarray:
         """Compute the minimum observed unique-value gap per continuous feature, used as the linear sparsity step size."""
         assert self.continuous_indices is not None
         steps = np.zeros(x_train.shape[1], dtype=np.float32)
@@ -339,6 +347,37 @@ class DiceMethod(BaseCounterfactualMethod):
             return torch.stack([1.0 - p1, p1], dim=1)
         return torch.softmax(logits, dim=1)
 
+    def _predict_proba_torch_no_grad(self, cfs):
+        """Run the torch module on an on-device tensor without gradient tracking (used for in-loop validity checks)."""
+        assert torch is not None
+        with torch.no_grad():
+            logits = self._module(cfs)
+            if logits.ndim == 1 or logits.shape[1] == 1:
+                p1 = torch.sigmoid(logits.reshape(-1))
+                return torch.stack([1.0 - p1, p1], dim=1)
+            return torch.softmax(logits, dim=1)
+
+    def round_cfs_to_eval_torch(self, cfs):
+        """Snap each OHE block to a one-hot vertex via argmax, returning an on-device tensor.
+
+        Operates on a detached clone so the autograd graph of the live candidates is not affected.
+        Note: tie_random is not supported in this path; ties are broken by lowest index (argmax default).
+        """
+        assert torch is not None
+        result = cfs.detach().clone()
+        for start, end in self._ohe_blocks:
+            block = result[:, start:end]
+            winners = torch.argmax(block, dim=1, keepdim=True)
+            result[:, start:end] = torch.zeros_like(block).scatter_(1, winners, 1.0)
+        return result
+
+    def validity_mask_eval_torch(self, rounded, target_class: int):
+        """Return (valid_mask, probs_target) as on-device tensors; valid iff argmax(probs) == target_class."""
+        probs = self._predict_proba_torch_no_grad(rounded)
+        valid_mask = torch.argmax(probs, dim=1) == target_class
+        probs_target = probs[:, target_class]
+        return valid_mask, probs_target
+
     def predict_proba_eval(self, cfs_eval: np.ndarray) -> np.ndarray:
         """Run the torch module on evaluation-space candidates without gradient tracking (used for validity checks and backup selection)."""
         assert torch is not None
@@ -357,10 +396,10 @@ class DiceMethod(BaseCounterfactualMethod):
 
     def objective(self, cfs, probs, x_query: np.ndarray, target_class: int):
         """Full DiCE loss: validity (hinge) + proximity_weight * MAD-weighted L1 - diversity_weight * DPP-det + categorical_penalty * simplex regulariser."""
-        assert torch is not None and F is not None and self.feature_weights is not None
+        assert torch is not None and F is not None and self._feature_weights_t is not None
         target_loss = self.yloss(probs=probs, target_class=target_class)
         query = torch.tensor(x_query, dtype=torch.float32, device=cfs.device)
-        weights = torch.tensor(self.feature_weights, dtype=torch.float32, device=cfs.device)
+        weights = self._feature_weights_t
         proximity = torch.sum(torch.abs(cfs - query.unsqueeze(0)) * weights.unsqueeze(0), dim=1)
         d_cont = float(len(self.continuous_indices)) if self.continuous_indices is not None and len(self.continuous_indices) > 0 else 1.0
         proximity = torch.mean(proximity) / d_cont
