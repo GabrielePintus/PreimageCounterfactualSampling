@@ -1,4 +1,8 @@
-"""1-NN baseline counterfactual method."""
+"""Nearest-neighbour baseline counterfactual method.
+
+Returns the closest opposite-class training point as a counterfactual.
+Used as a lower-bound baseline for distance metrics.
+"""
 
 from __future__ import annotations
 

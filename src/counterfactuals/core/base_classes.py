@@ -84,3 +84,12 @@ class BaseCounterfactualMethod(ABC):
     ) -> list[CounterfactualResult]:
         """Generate one counterfactual per row in ``x`` with shared settings."""
         return [self.generate(x=row, target_class=target_class) for row in np.asarray(x)]
+
+    def resolve_target_class(self, x: np.ndarray, target_class: Optional[int]) -> int:
+        """Return target_class if given; otherwise flip the predicted class (binary only)."""
+        if target_class is not None:
+            return int(target_class)
+        pred = int(self.model.predict(x.reshape(1, -1))[0])
+        if self.model.predict_proba(x.reshape(1, -1)).shape[1] != 2:
+            raise ValueError("target_class is required for non-binary tasks")
+        return 1 - pred

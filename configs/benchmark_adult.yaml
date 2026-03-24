@@ -5,23 +5,23 @@ dataset:
   params:
     data_dir: data/
 
-preprocessing:
-  name: pca
-  params:
-    n_components: 0.99
-    svd_solver: full
-    whiten: false
-    random_state: 42
+# preprocessing:
+#   name: pca
+#   params:
+#     n_components: 0.99
+#     svd_solver: full
+#     whiten: false
+#     random_state: 42
 
 
 model:
   name: tabular_classifier_ckpt
   params:
     checkpoint: checkpoints/adult_classifier/best.ckpt
-    device: cpu
+    device: cuda
 
 sampling:
-  n_queries: 1000         # number of test queries (same set used by all methods)
+  n_queries: 200
 
 timeout_per_sample: 60   # seconds per (method, query); set to 0 to disable
 
@@ -70,58 +70,40 @@ methods:
   #     proximity_weight: [0.5, 1.0, 2.0]
   #     yloss_type: [hinge_loss, log_loss]
 
-  # --- FACE (kNN density, Eq. 3) ---
-  # Grid: n_neighbors x epsilon x k_per_class x tp
+  # --- FACE ---
   # - name: face
   #   run_name: face_knn
   #   params:
   #     density_estimator:
-  #       name: knn
-  #       params:
-  #         n_neighbors: [10, 25]
-  #         epsilon: [0.5, 0.75, 1.0]
-  #     td: 0.0
-  #     tp: [0.5, 0.55, 0.6]
-  #     subsample_method: kmedoids
-  #     k_per_class: [2000, 10000]
-
-  # --- FACE (KDE density, Eq. 2) ---
-  # Grid: epsilon x bandwidth x k_per_class x tp
-  # - name: face
-  #   run_name: face_kde
-  #   params:
-  #     density_estimator:
   #       name: kde
-  #       params:
-  #         epsilon: [0.5, 0.75, 1.0]
-  #         bandwidth: [0.3, 0.5, 1.0]
-  #     td: 0.0
-  #     tp: [0.5, 0.55, 0.6]
+  #     epsilon: 2.0
   #     subsample_method: kmedoids
-  #     k_per_class: [2000, 10000]
+  #     k_per_class: 1000
 
-  - name: face
-    run_name: face_knn
-    params:
-      density_estimator:
-        name: kde
-      epsilon: 3.0        # prunes long-range kNN edges
-      # td: 0.0           # no density threshold
-      # tp: 0.5
-      subsample_method: kmeans
-      k_per_class: 1000
-
-  # # --- CPP ---
-  # # Grid: k_per_class x eps_alpha x norm x atlas_subsample_method
-  # - name: cpp
-  #   run_name: cpp
+  # # --- Nearest Neighbor ---
+  # - name: nearest_neighbor
+  #   run_name: nn_full
   #   params:
-  #     checkpoint: checkpoints/adult_classifier/best.ckpt
-  #     device: cpu
-  #     query_method: sorted
-  #     atlas_subsample_method: [kmedoids, kmeans]
-  #     max_samples_per_class: null
-  #     batch_size: 32
-  #     k_per_class: [50, 100, 200]
-  #     eps_alpha: [0.25, 0.35, 0.45]
-  #     norm: [1, 2]
+  #     norm: 2
+  #     # subsample_method: kmedoids
+  #     # k_per_class: 1000
+
+  # # Grid: proximity_weight x yloss_type (fix diversity_weight=0.0, total_cfs=1)
+  # - name: dice
+  #   run_name: dice
+  #   params:
+  #     total_cfs: 1
+  #     diversity_weight: 0.0
+  #     min_iter: 50
+
+  # --- Certified Preimage Counterfactuals (CPP) ---
+  - name: cpp
+    run_name: cpp_smoke
+    params:
+      checkpoint: checkpoints/adult_classifier/best.ckpt
+      device: cuda
+      norm: 1
+      eps_alpha: [0.15, 0.25, 0.35, 0.45]
+      batch_size: 256
+      subsample_method: kmedoids
+      k_per_class: [50, 100, 200]

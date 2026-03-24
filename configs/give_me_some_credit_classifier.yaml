@@ -1,0 +1,63 @@
+trainer:
+  max_epochs: 50
+  accelerator: auto
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: checkpoints/give_me_some_credit_classifier/
+      filename: "GiveMeSomeCredit-Classifier-{epoch:03d}-{val/loss:.4f}"
+      monitor: val/loss
+      mode: min
+      save_top_k: 1
+      save_last: true
+      auto_insert_metric_name: false
+      every_n_epochs: 1
+      save_on_train_epoch_end: true
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: epoch
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: "CertifiedCounterfactuals"
+      name: "GiveMeSomeCredit-Classifier"
+      log_model: true
+
+model:
+  class_path: training.lit_classifier.LitClassifier
+  init_args:
+    model:
+      class_path: models.classifiers.TabularClassifier
+      init_args:
+        # All 10 features are numerical (no categorical columns).
+        # Missing values in MonthlyIncome and NumberOfDependents are imputed with median.
+        input_types:
+          - numerical    # RevolvingUtilizationOfUnsecuredLines
+          - numerical    # age
+          - numerical    # NumberOfTime30-59DaysPastDueNotWorse
+          - numerical    # DebtRatio
+          - numerical    # MonthlyIncome
+          - numerical    # NumberOfOpenCreditLinesAndLoans
+          - numerical    # NumberOfTimes90DaysLate
+          - numerical    # NumberRealEstateLoansOrLines
+          - numerical    # NumberOfTime60-89DaysPastDueNotWorse
+          - numerical    # NumberOfDependents
+        cardinalities: []
+        hidden_dims: [64, 32]
+        num_classes: 2
+        dropout: 0.1
+
+    initial_lr: 1e-3
+    final_lr: 1e-6
+    weight_decay: 1e-4
+    warmup_steps: 200
+
+data:
+  class_path: training.datamodules.give_me_some_credit.GiveMeSomeCreditDataModule
+  init_args:
+    data_dir: data/
+    batch_size: 128
+    val_fraction: 0.1
+    test_fraction: 0.1
+    seed: 42
+    num_workers: 4

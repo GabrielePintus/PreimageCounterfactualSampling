@@ -31,11 +31,6 @@ variants:
     params:
       delta: 0.0
 
-  - name: knn_25
-    method: knn
-    params:
-      k: 25
-      delta: 0.0
 
 output:
   per_query_path: results/cpp_query_benchmark_adult.parquet

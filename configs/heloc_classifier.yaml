@@ -1,0 +1,74 @@
+trainer:
+  max_epochs: 50
+  accelerator: auto
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: checkpoints/heloc_classifier/
+      filename: "HELOC-Classifier-{epoch:03d}-{val/loss:.4f}"
+      monitor: val/loss
+      mode: min
+      save_top_k: 1
+      save_last: true
+      auto_insert_metric_name: false
+      every_n_epochs: 1
+      save_on_train_epoch_end: true
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: epoch
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: "CertifiedCounterfactuals"
+      name: "HELOC-Classifier"
+      log_model: true
+
+model:
+  class_path: training.lit_classifier.LitClassifier
+  init_args:
+    model:
+      class_path: models.classifiers.TabularClassifier
+      init_args:
+        # All 23 features are numerical (no categorical columns).
+        input_types:
+          - numerical    # estimate_of_risk
+          - numerical    # months_since_first_trade
+          - numerical    # months_since_last_trade
+          - numerical    # average_duration_of_resolution
+          - numerical    # number_of_satisfactory_trades
+          - numerical    # nr_trades_insolvent_for_over_60_days
+          - numerical    # nr_trades_insolvent_for_over_90_days
+          - numerical    # percentage_of_legal_trades
+          - numerical    # months_since_last_illegal_trade
+          - numerical    # maximum_illegal_trades_over_last_year
+          - numerical    # maximum_illegal_trades
+          - numerical    # nr_total_trades
+          - numerical    # nr_trades_initiated_in_last_year
+          - numerical    # percentage_of_installment_trades
+          - numerical    # months_since_last_inquiry_not_recent
+          - numerical    # nr_inquiries_in_last_6_months
+          - numerical    # nr_inquiries_in_last_6_months_not_recent
+          - numerical    # net_fraction_of_revolving_burden
+          - numerical    # net_fraction_of_installment_burden
+          - numerical    # nr_revolving_trades_with_balance
+          - numerical    # nr_installment_trades_with_balance
+          - numerical    # nr_banks_with_high_ratio
+          - numerical    # percentage_trades_with_balance
+        cardinalities: []
+        hidden_dims: [64, 32]
+        num_classes: 2
+        dropout: 0.1
+
+    initial_lr: 1e-3
+    final_lr: 1e-6
+    weight_decay: 1e-4
+    warmup_steps: 10
+
+data:
+  class_path: training.datamodules.heloc.HELOCDataModule
+  init_args:
+    batch_size: 64
+    val_fraction: 0.1
+    test_fraction: 0.1
+    seed: 42
+    num_workers: 4

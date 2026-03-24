@@ -58,7 +58,7 @@ class WachterMethod(BaseCounterfactualMethod):
         if not self._is_fitted or self._feature_scale is None:
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
         x_query = np.asarray(x, dtype=np.float32).reshape(-1).astype(np.float64)
-        target_class = self._resolve_target_class(x=x_query, target_class=target_class)
+        target_class = self.resolve_target_class(x=x_query, target_class=target_class)
         scale = self._feature_scale
 
         best_x: Optional[np.ndarray] = None
@@ -112,10 +112,3 @@ class WachterMethod(BaseCounterfactualMethod):
             metadata={"target_class": target_class, "lambda": used_lambda},
         )
 
-    def _resolve_target_class(self, x: np.ndarray, target_class: Optional[int]) -> int:
-        if target_class is not None:
-            return int(target_class)
-        pred = int(self.model.predict(x)[0])
-        if self.model.predict_proba(x).shape[1] != 2:
-            raise ValueError("target_class is required for non-binary tasks")
-        return 1 - pred

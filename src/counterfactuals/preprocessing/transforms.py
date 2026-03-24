@@ -113,6 +113,42 @@ def snap_ohe_blocks(x: np.ndarray, blocks: Sequence[OHEBlockSpec]) -> np.ndarray
     return arr_2d[0] if arr.ndim == 1 else arr_2d
 
 
+def compas_ohe_blocks() -> list[OHEBlockSpec]:
+    """Infer COMPAS one-hot block boundaries from datamodule constants."""
+    from training.datamodules.compas import CARDINALITIES, INPUT_TYPES
+
+    blocks: list[OHEBlockSpec] = []
+    position = 0
+    cardinality_idx = 0
+    for feature_type in INPUT_TYPES:
+        if feature_type == "numerical":
+            position += 1
+            continue
+        cardinality = CARDINALITIES[cardinality_idx]
+        blocks.append(OHEBlockSpec(start=position, end=position + cardinality))
+        position += cardinality
+        cardinality_idx += 1
+    return blocks
+
+
+def german_credit_ohe_blocks() -> list[OHEBlockSpec]:
+    """Infer German Credit one-hot block boundaries from datamodule constants."""
+    from training.datamodules.german_credit import CARDINALITIES, INPUT_TYPES
+
+    blocks: list[OHEBlockSpec] = []
+    position = 0
+    cardinality_idx = 0
+    for feature_type in INPUT_TYPES:
+        if feature_type == "numerical":
+            position += 1
+            continue
+        cardinality = CARDINALITIES[cardinality_idx]
+        blocks.append(OHEBlockSpec(start=position, end=position + cardinality))
+        position += cardinality
+        cardinality_idx += 1
+    return blocks
+
+
 def adult_ohe_blocks() -> list[OHEBlockSpec]:
     """Infer Adult one-hot block boundaries from datamodule constants."""
     from training.datamodules.adult import CARDINALITIES, INPUT_TYPES

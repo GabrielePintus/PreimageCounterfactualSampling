@@ -45,6 +45,8 @@ from counterfactuals.preprocessing import (
     InverseTransformModel,
     PCATransform,
     adult_ohe_blocks,
+    compas_ohe_blocks,
+    german_credit_ohe_blocks,
     snap_ohe_blocks,
 )
 from counterfactuals.utils.config import read_yaml
@@ -212,11 +214,31 @@ def _compute_query_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Dataset constants helper
+# ---------------------------------------------------------------------------
+
+def _load_dataset_constants(dataset_name: str):
+    """Return (INPUT_TYPES, CARDINALITIES, OHE_FEATURE_TYPES) for the given dataset."""
+    if dataset_name == "compas":
+        from training.datamodules.compas import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
+    elif dataset_name == "german_credit":
+        from training.datamodules.german_credit import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
+    elif dataset_name == "heloc":
+        from training.datamodules.heloc import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
+    elif dataset_name == "give_me_some_credit":
+        from training.datamodules.give_me_some_credit import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
+    else:
+        from training.datamodules.adult import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
+    return INPUT_TYPES, CARDINALITIES, OHE_FEATURE_TYPES
+
+
+# ---------------------------------------------------------------------------
 # CertifiedAtlas builder
 # ---------------------------------------------------------------------------
 
 def _build_certified_atlas_method(
     params: Dict[str, Any],
+    model_params: Dict[str, Any],
     x_train: np.ndarray,
     y_train: np.ndarray,
     x_queries: np.ndarray,
@@ -231,10 +253,9 @@ def _build_certified_atlas_method(
     ``decode()`` method to map embedding-space CFs back to raw feature space.
     """
     import torch
-    from torch.utils.data import TensorDataset
 
     from models.classifiers import TabularClassifier
-    from preimage_sampling import CertifiedAtlas, NearestOppositeClassClearanceStrategy
+    from preimage_sampling import NearestOppositeClassClearanceStrategy
     from training.datamodules.adult import CARDINALITIES, INPUT_TYPES
     from training.lit_classifier import LitClassifier
 
@@ -255,109 +276,62 @@ def _build_certified_atlas_method(
     _norm_raw = params.get("norm", 2)
     norm = np.inf if str(_norm_raw).lower() in ("inf", "infinity") else int(_norm_raw)
     query_method = str(params.get("query_method", "sorted")).lower()
-    if query_method not in {"sorted", "bvh", "knn"}:
+    if query_method not in {"sorted", "bvh"}:
         raise ValueError(
-            f"my_method.query_method must be one of {{'sorted', 'bvh', 'knn'}}, got {query_method!r}"
+            f"my_method.query_method must be one of {{'sorted', 'bvh'}}, got {query_method!r}"
         )
-    cvxpy_solver_policy = str(params.get("cvxpy_solver_policy", "auto")).lower()
-    if cvxpy_solver_policy not in {"auto", "legacy"}:
-        raise ValueError(
-            f"my_method.cvxpy_solver_policy must be one of {{'auto', 'legacy'}}, got {cvxpy_solver_policy!r}"
-        )
-
     batch_size = int(params.get("batch_size", 256))
-    _msc = params.get("max_samples_per_class", None)
-    max_samples_per_class = int(_msc) if _msc is not None else None
-
     atlas_subsample_method = str(params.get("atlas_subsample_method", "kmedoids")).lower()
     if atlas_subsample_method not in {"kmedoids", "fps", "kmeans"}:
         raise ValueError(
             f"my_method.atlas_subsample_method must be one of {{'kmedoids', 'fps', 'kmeans'}}, "
             f"got {atlas_subsample_method!r}"
         )
-
     solver_maxiter = int(params.get("solver_maxiter", 500))
-    solver_tol = float(params.get("solver_tol", 1e-9))
+    # Architecture params come from the shared model config, not method params.
+    dataset_module = str(model_params.get("dataset_module", "adult"))
+    hidden_dims = list(model_params.get("hidden_dims", [32, 8]))
+    dropout = float(model_params.get("dropout", 0.2))
 
     # Load backbone + Lightning checkpoint.
+    INPUT_TYPES, CARDINALITIES, _ = _load_dataset_constants(dataset_module)
     backbone = TabularClassifier(
         input_types=INPUT_TYPES,
         cardinalities=CARDINALITIES,
-        hidden_dims=[32, 8],
+        hidden_dims=hidden_dims,
         num_classes=2,
-        dropout=0.2,
+        dropout=dropout,
     )
     lit = _load_lit_checkpoint_resilient(LitClassifier, ckpt, backbone, map_location=device)
     model = lit.model.eval().to(device)
 
-    # Strip Dropout layers before LiRPA certification (identity in eval mode).
-    # Numerical features are already StandardScaler-normalised by the datamodule;
-    # the network has no BatchNorm, so the QP operates directly in the input space.
-    net_for_atlas = torch.nn.Sequential(
-        *[m for m in model.net if not isinstance(m, torch.nn.Dropout)]
-    )
-    atlas_model = TorchModelWrapper(model=net_for_atlas, device=device)
+    # Wrap the full model (Dropout included — CertifiedAtlasMethod._fit strips it for LiRPA).
+    atlas_model = TorchModelWrapper(model=model.net, device=device)
 
     # Input space = embedding space; data is already standardized by the datamodule.
     z_train   = x_train
     z_queries = x_queries
-
-    # ---------------------------------------------------------------------------
-    # Prototype selection for atlas construction.
-    # ---------------------------------------------------------------------------
-    # Builds a per-class index array of size min(k, |class|) using the chosen
-    # strategy, then assembles the TensorDataset passed to CertifiedAtlas.build().
-
-    from counterfactuals.utils.clustering import select_prototype_indices as _select_prototype_indices
-
-    def _select_prototype_indices_local(X: np.ndarray, k: int) -> np.ndarray:
-        return _select_prototype_indices(X, k, method=atlas_subsample_method, random_state=seed)
-
-    z_parts, y_parts = [], []
-    for cls in np.unique(y_train):
-        cls_idx = np.where(y_train == cls)[0]
-        if k_per_class is not None:
-            proto_idx = _select_prototype_indices_local(z_train[cls_idx], k_per_class)
-        else:
-            proto_idx = np.arange(len(cls_idx))
-        z_parts.append(torch.from_numpy(z_train[cls_idx[proto_idx]]).float())
-        y_parts.append(torch.full((len(proto_idx),), int(cls), dtype=torch.long))
-        print(
-            f"  [cpp] class {int(cls)}: {len(cls_idx)} -> {len(proto_idx)} prototypes "
-            f"({atlas_subsample_method})"
-        )
-
-    prototype_ds = TensorDataset(torch.cat(z_parts), torch.cat(y_parts))
-
-    # Build atlas in input space (standardized numerical + raw OHE categorical).
-    eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
-    atlas = CertifiedAtlas(
-        net_for_atlas,
-        prototype_ds,
-        device=device,
-        default_query_method=query_method,
-        cvxpy_solver_policy=cvxpy_solver_policy,
-        solver_maxiter=solver_maxiter,
-        solver_tol=solver_tol,
-    )
-    atlas.build(
-        eps_strategy=eps_strategy,
-        norm=norm,
-        batch_size=batch_size,
-        max_samples_per_class=max_samples_per_class,
-    )
 
     # OHE simplex constraints: sum(block)==1 is valid in raw OHE space.
     cat_slices = [
         (s, e)
         for t, (s, e) in zip(INPUT_TYPES, model._slices)
         if t == "categorical"
-    ]
-    atlas.ohe_slices = cat_slices if cat_slices else None
+    ] or None
 
-    print(atlas.summary())
-
-    atlas_method = CertifiedAtlasMethod(model=atlas_model, atlas=atlas, random_seed=seed)
+    eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
+    atlas_method = CertifiedAtlasMethod(
+        model=atlas_model,
+        norm=norm,
+        eps_strategy=eps_strategy,
+        batch_size=batch_size,
+        ohe_slices=cat_slices,
+        default_query_method=query_method,
+        solver_maxiter=solver_maxiter,
+        k_per_class=k_per_class,
+        subsample_method=atlas_subsample_method,
+        random_seed=seed,
+    )
     atlas_method.fit(x_train=z_train, y_train=y_train)
 
     return atlas_method, atlas_model, model, z_train, z_queries, None
@@ -367,7 +341,13 @@ def _build_certified_atlas_method(
 # PyTorch checkpoint model loader
 # ---------------------------------------------------------------------------
 
-def _build_torch_model_from_checkpoint(checkpoint: str, device: str = "cpu") -> 'TorchModelWrapper':
+def _build_torch_model_from_checkpoint(
+    checkpoint: str,
+    device: str = "cpu",
+    dataset_module: str = "adult",
+    hidden_dims: list = [32, 8],
+    dropout: float = 0.2,
+) -> 'TorchModelWrapper':
     """Load TabularClassifier from a Lightning checkpoint and return a TorchModelWrapper.
 
     Dropout layers are stripped so the model is deterministic at inference time.
@@ -376,9 +356,10 @@ def _build_torch_model_from_checkpoint(checkpoint: str, device: str = "cpu") -> 
     """
     import torch
     from models.classifiers import TabularClassifier
-    from training.datamodules.adult import CARDINALITIES, INPUT_TYPES
     from training.lit_classifier import LitClassifier
     from counterfactuals.models.torch_model import TorchModelWrapper
+
+    INPUT_TYPES, CARDINALITIES, _ = _load_dataset_constants(dataset_module)
 
     requested_device = device
     device = _normalize_torch_device(device)
@@ -388,9 +369,9 @@ def _build_torch_model_from_checkpoint(checkpoint: str, device: str = "cpu") -> 
     backbone = TabularClassifier(
         input_types=INPUT_TYPES,
         cardinalities=CARDINALITIES,
-        hidden_dims=[32, 8],
+        hidden_dims=hidden_dims,
         num_classes=2,
-        dropout=0.2,
+        dropout=dropout,
     )
     lit = _load_lit_checkpoint_resilient(
         LitClassifier, checkpoint, backbone, map_location=device
@@ -538,8 +519,8 @@ def main() -> None:
     # Try to load feature type annotations from the dataset's datamodule.
     # Falls back to treating all features as numerical if not available.
     try:
-        from training.datamodules.adult import OHE_FEATURE_TYPES as _input_types
-    except ImportError:
+        _, _, _input_types = _load_dataset_constants(ds_cfg["name"])
+    except Exception:
         _input_types = ["numerical"] * n_features
 
     mad_weights = np.ones(n_features, dtype=np.float64)
@@ -580,19 +561,32 @@ def main() -> None:
     )
 
     ohe_blocks = None
-    if ds_cfg["name"] == "adult":
-        try:
+    try:
+        if ds_cfg["name"] == "adult":
             ohe_blocks = adult_ohe_blocks()
-        except Exception as exc:
-            print(f"[WARNING] Could not load Adult OHE block metadata for inverse snap: {exc}")
+        elif ds_cfg["name"] == "compas":
+            ohe_blocks = compas_ohe_blocks()
+        elif ds_cfg["name"] == "german_credit":
+            ohe_blocks = german_credit_ohe_blocks()
+    except Exception as exc:
+        print(f"[WARNING] Could not load OHE block metadata for inverse snap: {exc}")
 
     # --- Model ---
     model_cfg = cfg["model"]
     if model_cfg["name"] == "tabular_classifier_ckpt":
-        ckpt = model_cfg.get("params", {}).get("checkpoint")
-        device = model_cfg.get("params", {}).get("device", "cpu")
+        _model_params = model_cfg.get("params", {})
+        ckpt = _model_params.get("checkpoint")
+        device = _model_params.get("device", "cpu")
+        _ds_module = _model_params.get("dataset_module", ds_cfg["name"])
+        _hidden_dims = list(_model_params.get("hidden_dims", [32, 8]))
+        _dropout = float(_model_params.get("dropout", 0.2))
         print(f"[INFO] Loading TabularClassifier from checkpoint: {ckpt}")
-        model = _build_torch_model_from_checkpoint(ckpt, device=device)
+        model = _build_torch_model_from_checkpoint(
+            ckpt, device=device,
+            dataset_module=_ds_module,
+            hidden_dims=_hidden_dims,
+            dropout=_dropout,
+        )
         acc = float(np.mean(model.predict(x_train) == y_train))
         print(f"[INFO] Train accuracy: {acc:.3f}")
     else:
@@ -640,6 +634,7 @@ def main() -> None:
                 _t_build = time.perf_counter()
                 method, active_model, embed_model, _, active_queries, _ = _build_certified_atlas_method(
                     params=method_params,
+                    model_params=model_cfg.get("params", {}),
                     x_train=x_train,
                     y_train=y_train,
                     x_queries=x_queries,

@@ -7,6 +7,8 @@ from .transforms import (
     PCATransform,
     RepresentationTransform,
     adult_ohe_blocks,
+    compas_ohe_blocks,
+    german_credit_ohe_blocks,
     snap_ohe_blocks,
 )
 
@@ -18,4 +20,6 @@ __all__ = [
     "OHEBlockSpec",
     "snap_ohe_blocks",
     "adult_ohe_blocks",
+    "compas_ohe_blocks",
+    "german_credit_ohe_blocks",
 ]

@@ -25,6 +25,10 @@ import training.lit_autoencoder     # noqa: F401
 import training.datamodules.mnist   # noqa: F401
 import training.datamodules.spiral  # noqa: F401
 import training.datamodules.adult   # noqa: F401
+import training.datamodules.compas  # noqa: F401
+import training.datamodules.german_credit  # noqa: F401
+import training.datamodules.heloc                # noqa: F401
+import training.datamodules.give_me_some_credit  # noqa: F401
 import models.classifiers           # noqa: F401
 import models.ae                    # noqa: F401
 import models.ae_channels           # noqa: F401

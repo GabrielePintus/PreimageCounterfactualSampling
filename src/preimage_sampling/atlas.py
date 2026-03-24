@@ -9,12 +9,15 @@ This module provides a simple, user-friendly interface that combines:
 
 Example usage:
     >>> from preimage_sampling import CertifiedAtlas
-    >>> atlas = CertifiedAtlas(model, dataset, device)
-    >>> atlas.build(eps=0.1, norm=2)
+    >>> atlas = CertifiedAtlas(model, dataset, device, eps=0.1, norm=2)
+    >>> atlas.build()
     >>> cf = atlas.find_counterfactual(x_query, target_class=3)
 """
 
+import time
 import numpy as np
+
+_SOLVER_TOL = 1e-9  # QP convergence tolerance (fixed)
 import torch
 import torch.nn as nn
 from scipy.optimize import minimize
@@ -93,8 +96,6 @@ class CertifiedAtlas:
         Each entry contains an 'eps' key with per-sample epsilon values.
     bvh_indices : dict or None
         BVH spatial indices for each class (after calling build()).
-    eps : float or None
-        Perturbation radius if a constant strategy was used; None otherwise.
     eps_strategy : EpsStrategy or None
         The strategy used to compute per-sample epsilon (after calling build()).
     norm : int or None
@@ -107,60 +108,34 @@ class CertifiedAtlas:
         dataset,
         device: Union[torch.device, str],
         cnn: bool = False,
+        # Build configuration
+        norm: int = 2,
+        eps_strategy: Optional[EpsStrategy] = None,
+        batch_size: Optional[int] = None,
+        ohe_slices: Optional[List[Tuple[int, int]]] = None,
+        # Query configuration
         default_query_method: str = "sorted",
-        cvxpy_solver_policy: str = "auto",
         solver_maxiter: int = 500,
-        solver_tol: float = 1e-9,
     ):
-        """
-        Initialize the CertifiedAtlas.
-
-        Parameters
-        ----------
-        model : nn.Module
-            The neural network classifier.
-        dataset : Dataset
-            Dataset containing (X, y) pairs.
-        device : torch.device or str
-            Device for computation.
-        cnn : bool, optional
-            Whether the model is a CNN (default: False).
-        default_query_method : str, optional
-            Default search method used by ``find_counterfactual`` when
-            ``method`` is not explicitly provided. One of
-            ``{'sorted', 'bvh', 'knn'}`` (default: "sorted").
-        cvxpy_solver_policy : str, optional
-            Solver ordering policy for CVXPY projections.
-            - ``"auto"``: norm-aware ordering (L2: CLARABEL→OSQP→SCS,
-              L1: OSQP→CLARABEL→SCS)
-            - ``"legacy"``: OSQP→CLARABEL→SCS for all norms
-            Default: "auto".
-        solver_maxiter : int, optional
-            Maximum iterations for the QP solver (default: 500).
-        solver_tol : float, optional
-            Tolerance for the QP solver (default: 1e-9).
-        """
         self.model = model
         self.device = torch.device(device) if isinstance(device, str) else device
         self.cnn = cnn
 
-        # Solver parameters (can be overridden in find_counterfactual)
-        self.solver_maxiter = solver_maxiter
-        self.solver_tol = solver_tol
+        # Build config — stored here, consumed by build()
+        self.norm = norm
+        self.eps_strategy = eps_strategy
+        self.batch_size = batch_size
+        self.ohe_slices = ohe_slices
 
-        allowed_methods = {"sorted", "bvh", "knn"}
+        self.solver_maxiter = solver_maxiter
+
+        allowed_methods = {"sorted", "bvh"}
         if default_query_method not in allowed_methods:
             raise ValueError(
                 f"default_query_method must be one of {allowed_methods}, got {default_query_method!r}"
             )
         self.default_query_method = default_query_method
 
-        allowed_solver_policies = {"auto", "legacy"}
-        if cvxpy_solver_policy not in allowed_solver_policies:
-            raise ValueError(
-                f"cvxpy_solver_policy must be one of {allowed_solver_policies}, got {cvxpy_solver_policy!r}"
-            )
-        self.cvxpy_solver_policy = cvxpy_solver_policy
 
         # Initialize preimage approximation handler
         self._preimage = PreimageApproximation(model, dataset, self.device, cnn=cnn)
@@ -169,73 +144,19 @@ class CertifiedAtlas:
         # These are populated by build()
         self.bounds: Optional[Dict] = None
         self.bvh_indices: Optional[Dict[int, BVHIndex]] = None
-        self.eps: Optional[float] = None          # scalar iff ConstantEpsStrategy
-        self.eps_strategy: Optional[EpsStrategy] = None
-        self.norm: Optional[int] = None
 
         # Optional: Shapely polygon unions (only for 2D visualization)
         self._class_unions: Optional[Dict] = None
 
-        # OHE categorical block slices: list of (start, end) index pairs.
-        # When set (e.g. for TabularClassifier), the QP enforces sum(x[s:e])==1 per block.
-        self.ohe_slices: Optional[List[Tuple[int, int]]] = None
-
-    def build(
-        self,
-        eps: Optional[float] = None,
-        norm: int = 2,
-        eps_strategy: Optional[EpsStrategy] = None,
-        max_samples_per_class: Optional[int] = None,
-        batch_size: Optional[int] = None,
-        build_unions: bool = False,
-        verbose: bool = True,
-        dtype=None
-    ) -> 'CertifiedAtlas':
-        """
-        Build the certified atlas by computing LiRPA bounds and spatial indices.
-
-        This is the "offline" phase that should be run once before generating
-        counterfactuals.
-
-        Parameters
-        ----------
-        eps : float, optional
-            Constant perturbation radius for all samples.  Mutually exclusive
-            with ``eps_strategy``.  Kept for backward compatibility.
-        norm : int, optional
-            Lp norm for perturbation: 1, 2, or np.inf (default: 2).
-        eps_strategy : EpsStrategy, optional
-            A pluggable strategy that returns a per-sample epsilon array.
-            Mutually exclusive with ``eps``.  When omitted and ``eps`` is also
-            omitted, defaults to ``ConstantEpsStrategy(0.1)``.
-        max_samples_per_class : int, optional
-            Maximum samples per class. If None, use all available.
-        batch_size : int, optional
-            Process samples in batches (for GPU memory). If None, process all at once.
-            Ignored when the resolved strategy produces varying epsilon values
-            (samples are then processed individually).
-        build_unions : bool, optional
-            Build Shapely polygon unions for visualization (default: False).
-            Only works for 2D data.
-        verbose : bool, optional
-            Print progress information (default: True).
-
-        Returns
-        -------
-        self
-            Returns self for method chaining.
-        """
-        # --- Resolve eps strategy ---
-        if eps is not None and eps_strategy is not None:
-            raise ValueError("Specify eps or eps_strategy, not both.")
-        if eps is not None:
-            eps_strategy = ConstantEpsStrategy(eps)
-        elif eps_strategy is None:
+    def build(self, build_unions: bool = False, verbose: bool = True) -> 'CertifiedAtlas':
+        """Compute LiRPA bounds and build BVH spatial indices from the dataset."""
+        # Resolve eps strategy
+        eps_strategy = self.eps_strategy
+        if eps_strategy is None:
             eps_strategy = ConstantEpsStrategy(0.1)
-
         self.eps_strategy = eps_strategy
-        self.eps = eps  # scalar for ConstantEpsStrategy, None otherwise
-        self.norm = norm
+
+        norm = self.norm
 
         # Compute per-sample epsilon for the full dataset
         X_all = self._preimage.dataset.tensors[0].numpy()
@@ -257,9 +178,8 @@ class CertifiedAtlas:
         self.bounds = self._preimage.compute_all_bounds(
             eps=0.1,            # fallback scalar (unused when eps_array is provided)
             norm=norm,
-            max_samples_per_class=max_samples_per_class,
-            batch_size=batch_size,
-            dtype=dtype if dtype is not None else torch.float32,
+            batch_size=self.batch_size,
+            dtype=torch.float32,
             eps_array=eps_array,
         )
 
@@ -407,19 +327,11 @@ class CertifiedAtlas:
 
         problem = cp.Problem(objective, constraints)
 
-        if self.cvxpy_solver_policy == "legacy":
-            solvers = ('OSQP', 'CLARABEL', 'SCS')
+        # Norm-aware solver ordering: CLARABEL first for L2 (SOCP), OSQP first for L1 (QP-like).
+        if self.norm == 2:
+            solvers = ('CLARABEL', 'OSQP', 'SCS')
         else:
-            # Norm-aware solver policy:
-            # - L2 uses SOCP constraints -> CLARABEL is typically strongest first choice.
-            # - L1 is linear-constrained/QP-like -> OSQP is usually fastest first try.
-            # - SCS remains the permissive fallback for both.
-            if self.norm == 2:
-                solvers = ('CLARABEL', 'OSQP', 'SCS')
-            elif self.norm == 1:
-                solvers = ('OSQP', 'CLARABEL', 'SCS')
-            else:
-                solvers = ('OSQP', 'CLARABEL', 'SCS')
+            solvers = ('OSQP', 'CLARABEL', 'SCS')
         solved = False
         for i, _solver in enumerate(solvers):
             last = (i == len(solvers) - 1)
@@ -635,10 +547,10 @@ class CertifiedAtlas:
         maxiter : int, optional
             Maximum solver iterations. If None, uses self.solver_maxiter.
         tol : float, optional
-            Solver tolerance. If None, uses self.solver_tol.
+            Solver tolerance. Defaults to _SOLVER_TOL (1e-9).
         """
         maxiter = maxiter if maxiter is not None else self.solver_maxiter
-        tol = tol if tol is not None else self.solver_tol
+        tol = _SOLVER_TOL
         if robust_norm is None:
             robust_norm = self.norm
 
@@ -668,209 +580,102 @@ class CertifiedAtlas:
 
         return x_proj, dist
 
+    def _make_project_fn(self, x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
+        """Return a timed projection closure and a mutable [time_s] accumulator."""
+        projection_time_s = [0.0]
+
+        def project_fn(idx: int) -> Tuple[Optional[np.ndarray], float]:
+            t0 = time.perf_counter()
+            out = self._project_onto_polytope(
+                x_query, bd['lA'][idx], bd['lbias'][idx], bd['X'][idx],
+                eps_i=float(bd['eps'][idx]),
+                delta=delta, robust_norm=robust_norm,
+                maxiter=solver_maxiter, fixed_dims=fixed_dims,
+            )
+            projection_time_s[0] += time.perf_counter() - t0
+            return out
+
+        return project_fn, projection_time_s
+
+    def _search_bvh(self, x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims):
+        """Branch-and-bound BVH search. Returns (x_cf, dist, anchor_idx, n_qp, profiling_dict)."""
+        project_fn, projection_time_s = self._make_project_fn(
+            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims)
+        bvh_stats: Dict[str, float] = {}
+        bvh = self.bvh_indices[target_class]
+        t0 = time.perf_counter()
+        x_cf, dist, anchor_idx, n_qp = bvh.query_nearest(x_query, project_fn, stats_out=bvh_stats)
+        query_loop_time_s = time.perf_counter() - t0
+        profiling = {
+            "query_loop_time_ms": 1e3 * query_loop_time_s,
+            "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_time_s[0]),
+            "projection_time_ms": 1e3 * projection_time_s[0],
+            "n_nodes_popped": bvh_stats.get("n_nodes_popped", np.nan),
+            "n_nodes_pruned": bvh_stats.get("n_nodes_pruned", np.nan),
+            "n_leaves_visited": bvh_stats.get("n_leaves_visited", np.nan),
+            "max_queue_size": bvh_stats.get("max_queue_size", np.nan),
+            "n_candidates_considered": bvh_stats.get("n_candidates_considered", np.nan),
+        }
+        return x_cf, dist, anchor_idx, n_qp, profiling
+
+    def _search_sorted(self, x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims):
+        """Sorted lower-bound scan. Returns (x_cf, dist, anchor_idx, n_qp, profiling_dict)."""
+        project_fn, projection_time_s = self._make_project_fn(
+            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims)
+        sorted_stats: Dict[str, float] = {}
+        bvh = self.bvh_indices[target_class]
+        t0 = time.perf_counter()
+        x_cf, dist, anchor_idx, n_qp = bvh.query_sorted_lower_bounds(
+            x_query, eps_array=bd['eps'], project_fn=project_fn,
+            atlas_norm=self.norm if self.norm is not None else 2,
+            stats_out=sorted_stats,
+        )
+        query_loop_time_s = time.perf_counter() - t0
+        profiling = {
+            "query_loop_time_ms": 1e3 * query_loop_time_s,
+            "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_time_s[0]),
+            "projection_time_ms": 1e3 * projection_time_s[0],
+            "n_candidates_considered": sorted_stats.get("n_candidates_considered", np.nan),
+            "n_candidates_total": sorted_stats.get("n_candidates_total", np.nan),
+            "n_candidates_pruned_by_bound": sorted_stats.get("n_candidates_pruned_by_bound", np.nan),
+            "best_lower_bound_at_termination": sorted_stats.get("best_lower_bound_at_termination", np.nan),
+        }
+        return x_cf, dist, anchor_idx, n_qp, profiling
+
     def find_counterfactual(
         self,
         x_query: np.ndarray,
         target_class: int,
         method: Optional[str] = None,
-        k: int = 10,
         delta: float = 0.0,
         robust_norm: Optional[int] = None,
         solver_maxiter: Optional[int] = None,
-        solver_tol: Optional[float] = None,
         fixed_dims: Optional[np.ndarray] = None
     ) -> CounterfactualResult:
-        """
-        Find the closest counterfactual for a query point.
+        """Find the closest counterfactual for a query point."""
 
-        Parameters
-        ----------
-        x_query : np.ndarray
-            The query point, shape (d,).
-        target_class : int
-            The target class for the counterfactual.
-        method : str, optional
-            Search method: 'sorted' (vectorised center-distance lower-bound scan),
-            'bvh' (branch-and-bound BVH), or 'knn' (k-nearest neighbors).
-            Default: atlas ``default_query_method`` ("sorted" by default).
-        k : int, optional
-            For 'knn' method: number of nearest neighbors to try.
-            Default: 10.
-        delta : float, optional
-            Robustness radius. When delta > 0, the certified polytopes are eroded
-            inward so that the returned counterfactual is guaranteed robust to
-            perturbations of radius delta. Default: 0.0 (no robustness margin).
-        robust_norm : int or float, optional
-            Lp norm for the robustness ball (e.g. 1, 2, np.inf). Can differ from
-            the LiRPA certification norm (self.norm). Default: None (uses self.norm).
-        solver_maxiter : int, optional
-            Maximum iterations for QP solver. If None, uses instance default.
-        solver_tol : float, optional
-            Tolerance for QP solver. If None, uses instance default.
-        fixed_dims : np.ndarray of int, optional
-            Indices of embedding dimensions that must remain equal to the query
-            value. Use ``get_fixed_dims()`` to convert feature names to indices.
-
-        Returns
-        -------
-        CounterfactualResult
-            Result containing the counterfactual point and metadata.
-
-        Raises
-        ------
-        ValueError
-            If atlas hasn't been built yet.
-        """
         if self.bounds is None:
             raise ValueError("Atlas not built. Call build() first.")
-
-        import time
 
         x_query = np.asarray(x_query).flatten()
         bd = self.bounds[target_class]
         resolved_method = method or self.default_query_method
         profiling: Dict[str, float] = {
             "method": resolved_method,
-            "k": float(k),
             "delta": float(delta),
         }
         t_total_start = time.perf_counter()
-        projection_time_s = 0.0
 
         if resolved_method == 'bvh':
-            # Branch-and-bound search using BVH
-            bvh_stats: Dict[str, float] = {}
-
-            def project_fn(idx: int) -> Tuple[Optional[np.ndarray], float]:
-                nonlocal projection_time_s
-                t0 = time.perf_counter()
-                out = self._project_onto_polytope(
-                    x_query,
-                    bd['lA'][idx],
-                    bd['lbias'][idx],
-                    bd['X'][idx],
-                    eps_i=float(bd['eps'][idx]),
-                    delta=delta,
-                    robust_norm=robust_norm,
-                    maxiter=solver_maxiter,
-                    tol=solver_tol,
-                    fixed_dims=fixed_dims
-                )
-                projection_time_s += (time.perf_counter() - t0)
-                return out
-
-            bvh = self.bvh_indices[target_class]
-            t_search_start = time.perf_counter()
-            x_cf, dist, anchor_idx, n_qp = bvh.query_nearest(
-                x_query,
-                project_fn,
-                stats_out=bvh_stats,
-            )
-            query_loop_time_s = time.perf_counter() - t_search_start
-            search_time_exclusive_s = max(0.0, query_loop_time_s - projection_time_s)
-
-            profiling.update({
-                "query_loop_time_ms": 1e3 * query_loop_time_s,
-                "search_time_ms": 1e3 * search_time_exclusive_s,
-                "projection_time_ms": 1e3 * projection_time_s,
-                "n_nodes_popped": bvh_stats.get("n_nodes_popped", np.nan),
-                "n_nodes_pruned": bvh_stats.get("n_nodes_pruned", np.nan),
-                "n_leaves_visited": bvh_stats.get("n_leaves_visited", np.nan),
-                "max_queue_size": bvh_stats.get("max_queue_size", np.nan),
-                "n_candidates_considered": bvh_stats.get("n_candidates_considered", np.nan),
-            })
-
+            x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_bvh(
+                x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims)
         elif resolved_method == 'sorted':
-            # Vectorised center-distance lower-bound scan with early stopping.
-            # Tighter lower bounds than BVH for L2 atlas norm → fewer QP solves.
-            t_search_start = time.perf_counter()
-
-            sorted_stats: Dict[str, float] = {}
-
-            def project_fn(idx: int) -> Tuple[Optional[np.ndarray], float]:
-                nonlocal projection_time_s
-                t0 = time.perf_counter()
-                out = self._project_onto_polytope(
-                    x_query,
-                    bd['lA'][idx],
-                    bd['lbias'][idx],
-                    bd['X'][idx],
-                    eps_i=float(bd['eps'][idx]),
-                    delta=delta,
-                    robust_norm=robust_norm,
-                    maxiter=solver_maxiter,
-                    tol=solver_tol,
-                    fixed_dims=fixed_dims
-                )
-                projection_time_s += (time.perf_counter() - t0)
-                return out
-
-            bvh = self.bvh_indices[target_class]
-            atlas_norm = self.norm if self.norm is not None else 2
-            x_cf, dist, anchor_idx, n_qp = bvh.query_sorted_lower_bounds(
-                x_query,
-                eps_array=bd['eps'],
-                project_fn=project_fn,
-                atlas_norm=atlas_norm,
-                stats_out=sorted_stats,
-            )
-            query_loop_time_s = time.perf_counter() - t_search_start
-            search_time_exclusive_s = max(0.0, query_loop_time_s - projection_time_s)
-            profiling.update({
-                "query_loop_time_ms": 1e3 * query_loop_time_s,
-                "search_time_ms": 1e3 * search_time_exclusive_s,
-                "projection_time_ms": 1e3 * projection_time_s,
-                "n_candidates_considered": sorted_stats.get("n_candidates_considered", np.nan),
-                "n_candidates_total": sorted_stats.get("n_candidates_total", np.nan),
-                "n_candidates_pruned_by_bound": sorted_stats.get("n_candidates_pruned_by_bound", np.nan),
-                "best_lower_bound_at_termination": sorted_stats.get("best_lower_bound_at_termination", np.nan),
-            })
-
-        elif resolved_method == 'knn':
-            # K-nearest neighbors heuristic
-            t_search_start = time.perf_counter()
-            anchors = bd['X']
-            dists_to_anchors = np.linalg.norm(anchors - x_query, axis=1)
-            nearest_indices = np.argsort(dists_to_anchors)[:k]
-            search_time_s = time.perf_counter() - t_search_start
-
-            x_cf = None
-            dist = np.inf
-            anchor_idx = None
-            n_qp = 0
-
-            for idx in nearest_indices:
-                t0 = time.perf_counter()
-                proj, d = self._project_onto_polytope(
-                    x_query,
-                    bd['lA'][idx],
-                    bd['lbias'][idx],
-                    bd['X'][idx],
-                    eps_i=float(bd['eps'][idx]),
-                    delta=delta,
-                    robust_norm=robust_norm,
-                    maxiter=solver_maxiter,
-                    tol=solver_tol,
-                    fixed_dims=fixed_dims
-                )
-                projection_time_s += (time.perf_counter() - t0)
-                n_qp += 1
-
-                if d < dist:
-                    x_cf = proj
-                    dist = d
-                    anchor_idx = idx
-
-            profiling.update({
-                "query_loop_time_ms": 1e3 * (search_time_s + projection_time_s),
-                "search_time_ms": 1e3 * search_time_s,
-                "projection_time_ms": 1e3 * projection_time_s,
-                "n_candidates_considered": float(len(nearest_indices)),
-                "n_candidates_total": float(len(anchors)),
-            })
-
+            x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_sorted(
+                x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims)
         else:
-            raise ValueError(f"Unknown method: {resolved_method}. Use 'sorted', 'bvh', or 'knn'.")
+            raise ValueError(f"Unknown method: {resolved_method}. Use 'sorted' or 'bvh'.")
+
+        profiling.update(search_profiling)
 
         total_time_s = time.perf_counter() - t_total_start
         profiling.update({
@@ -895,49 +700,19 @@ class CertifiedAtlas:
         X_query: np.ndarray,
         target_class: int,
         method: Optional[str] = None,
-        k: int = 10,
         delta: float = 0.0,
         robust_norm: Optional[int] = None,
         solver_maxiter: Optional[int] = None,
-        solver_tol: Optional[float] = None,
         fixed_dims: Optional[np.ndarray] = None
     ) -> List[CounterfactualResult]:
-        """
-        Find counterfactuals for a batch of query points.
-
-        Parameters
-        ----------
-        X_query : np.ndarray
-            Array of query points, shape (n_queries, d).
-        target_class : int
-            The target class for all counterfactuals.
-        method : str, optional
-            Search method: 'sorted', 'bvh' or 'knn'.
-            Default: atlas ``default_query_method`` ("sorted" by default).
-        k : int, optional
-            For 'knn' method: number of nearest neighbors. Default: 10.
-        delta : float, optional
-            Robustness radius for polytope erosion. Default: 0.0.
-        robust_norm : int or float, optional
-            Lp norm for the robustness ball. Default: None (uses self.norm).
-        solver_maxiter : int, optional
-            Maximum iterations for QP solver. If None, uses instance default.
-        solver_tol : float, optional
-            Tolerance for QP solver. If None, uses instance default.
-
-        Returns
-        -------
-        list[CounterfactualResult]
-            List of results, one per query point.
-        """
+        """Find counterfactuals for a batch of query points."""
         results = []
         for x in X_query:
             results.append(self.find_counterfactual(
-                x, target_class, method, k,
+                x, target_class, method,
                 delta=delta,
                 robust_norm=robust_norm,
                 solver_maxiter=solver_maxiter,
-                solver_tol=solver_tol,
                 fixed_dims=fixed_dims
             ))
         return results
@@ -1037,14 +812,11 @@ class CertifiedAtlas:
         if self.bounds is None:
             return "CertifiedAtlas (not built)"
 
-        if self.eps is not None:
-            eps_desc = f"eps={self.eps} (constant)"
-        else:
-            all_eps = np.concatenate([self.bounds[l]['eps'] for l in range(self.n_classes)])
-            eps_desc = (
-                f"eps in [{all_eps.min():.4g}, {all_eps.max():.4g}]"
-                f" ({type(self.eps_strategy).__name__})"
-            )
+        all_eps = np.concatenate([self.bounds[l]['eps'] for l in range(self.n_classes)])
+        eps_desc = (
+            f"eps in [{all_eps.min():.4g}, {all_eps.max():.4g}]"
+            f" ({type(self.eps_strategy).__name__})"
+        )
 
         lines = [
             f"CertifiedAtlas Summary",

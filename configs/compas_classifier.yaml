@@ -1,0 +1,60 @@
+trainer:
+  max_epochs: 100
+  accelerator: auto
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: checkpoints/compas_classifier/
+      filename: "Compas-Classifier-{epoch:03d}-{val/loss:.4f}"
+      monitor: val/loss
+      mode: min
+      save_top_k: 1
+      save_last: true
+      auto_insert_metric_name: false
+      every_n_epochs: 1
+      save_on_train_epoch_end: true
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: epoch
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: "CertifiedCounterfactuals"
+      name: "Compas-Classifier"
+      log_model: true
+
+model:
+  class_path: training.lit_classifier.LitClassifier
+  init_args:
+    model:
+      class_path: models.classifiers.TabularClassifier
+      init_args:
+        # Column order: age, priors_count, c_days_from_compas, days_b_screening_arrest,
+        #               sex, race, c_charge_degree
+        input_types:
+          - numerical    # age
+          - numerical    # priors_count
+          - numerical    # c_days_from_compas
+          - numerical    # days_b_screening_arrest
+          - categorical  # sex
+          - categorical  # race
+          - categorical  # c_charge_degree
+        cardinalities: [2, 6, 2]  # sex (2), race (6), c_charge_degree (2)
+        hidden_dims: [64, 32]
+        num_classes: 2
+        dropout: 0.1
+
+    initial_lr: 1e-3
+    final_lr: 1e-6
+    weight_decay: 1e-4
+    warmup_steps: 200
+
+data:
+  class_path: training.datamodules.compas.CompasDataModule
+  init_args:
+    data_dir: data/
+    batch_size: 64
+    val_fraction: 0.1
+    test_fraction: 0.1
+    seed: 42
+    num_workers: 4

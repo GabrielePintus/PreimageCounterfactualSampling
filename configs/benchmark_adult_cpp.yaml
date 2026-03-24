@@ -1,0 +1,33 @@
+seed: 42
+
+dataset:
+  name: adult
+  params:
+    data_dir: data/
+
+model:
+  name: tabular_classifier_ckpt
+  params:
+    checkpoint: checkpoints/adult_classifier/best.ckpt
+    device: cuda
+
+sampling:
+  # n_queries: 500
+  n_queries: 20         # number of test queries (same set used by all methods)
+
+timeout_per_sample: 120   # seconds per (method, query)
+
+output:
+  path: results/benchmark_adult_cpp.parquet
+
+methods:
+  # --- Certified Preimage Counterfactuals (CPP) ---
+  - name: cpp
+    run_name: cpp
+    params:
+      checkpoint: checkpoints/adult_classifier/best.ckpt
+      device: cuda
+      norm: [1, 2]
+      batch_size: 256
+      eps_alpha: [0.15, 0.25, 0.35, 0.45]
+      k_per_class: [50, 100, 200, 500]

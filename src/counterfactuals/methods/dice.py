@@ -1,15 +1,12 @@
 """Gradient-based DiCE implementation for differentiable torch models.
 
-This implementation follows the original DiCE paper and the official
-``dice_ml`` PyTorch backend closely for binary tabular models:
-- use the original y-loss / proximity / diversity objective,
-- add the categorical simplex regularizer used for one-hot blocks,
-- round categorical blocks back to valid one-hot vectors,
-- apply post-hoc sparsity only to continuous features.
+Mothilal et al. (2020): "Explaining Machine Learning Classifiers through
+Diverse Counterfactual Explanations". FAccT 2020.
 
-The Adult benchmark in this repository uses a checkpointed torch model with
-StandardScaler-preprocessed numerical features and binary OHE features,
-so no additional [0, 1] normalization is needed.
+This implementation follows the original paper closely:
+- hinge y-loss / proximity (inverse-MAD weighted) / DPP diversity objective,
+- categorical simplex regularizer for one-hot blocks,
+- post-hoc sparsity applied to continuous features only.
 """
 
 from __future__ import annotations
@@ -18,11 +15,9 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from counterfactuals.core.base_classes import CounterfactualResult
+from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface
 from counterfactuals.preprocessing.transforms import IdentityTransform, InverseTransformModel, OHEBlockSpec
-
-from counterfactuals.core.base_classes import BaseCounterfactualMethod
 
 try:
     import torch
@@ -95,13 +90,13 @@ class DiceMethod(BaseCounterfactualMethod):
         if self.posthoc_sparsity_algorithm not in {"linear", "binary"}:
             raise ValueError("posthoc_sparsity_algorithm must be 'linear' or 'binary'")
 
-        self._module = None
-        self._device = None
-        self._ohe_blocks: tuple[tuple[int, int], ...] = ()
+        self.module = None
+        self.device = None
+        self.ohe_blocks: tuple[tuple[int, int], ...] = ()
         self.feature_weights: Optional[np.ndarray] = None
-        self._feature_weights_t = None  # on-device tensor version, built in _fit
+        self.feature_weights_t = None  # on-device tensor version, built in _fit
         self.continuous_indices: Optional[np.ndarray] = None
-        self._continuous_steps: Optional[np.ndarray] = None
+        self.continuous_steps: Optional[np.ndarray] = None
         self.sparsity_thresholds: Optional[np.ndarray] = None
 
     def _fit(self) -> None:
@@ -109,20 +104,20 @@ class DiceMethod(BaseCounterfactualMethod):
         if self._x_train.ndim != 2:
             raise ValueError("x_train must be a 2D array")
 
-        self._module, self._device, self._ohe_blocks = self._unwrap_model(model=self.model, n_features=self._x_train.shape[1])
+        self.module, self.device, self.ohe_blocks = self._unwrap_model(model=self.model, n_features=self._x_train.shape[1])
 
         # Identify which feature indices are continuous (complement of OHE blocks)
         cat_mask = np.zeros(self._x_train.shape[1], dtype=bool)
-        for start, end in self._ohe_blocks:
+        for start, end in self.ohe_blocks:
             cat_mask[start:end] = True
         self.continuous_indices = np.flatnonzero(~cat_mask).astype(np.int64)
 
         # Precompute training-data statistics used during generation
         # inverse-MAD per feature, used in proximity and diversity terms
         self.feature_weights = self.compute_feature_weights(x_train=self._x_train)
-        self._feature_weights_t = torch.tensor(self.feature_weights, dtype=torch.float32, device=self._device)
+        self.feature_weights_t = torch.tensor(self.feature_weights, dtype=torch.float32, device=self.device)
         # P10 step size per continuous feature, used in post-hoc sparsity search
-        self._continuous_steps = self.compute_continuous_steps(x_train=self._x_train)
+        self.continuous_steps = self.compute_continuous_steps(x_train=self._x_train)
         # min(MAD, P10) per feature, threshold for snapping to query value
         self.sparsity_thresholds = self.compute_sparsity_thresholds(x_train=self._x_train)
 
@@ -138,14 +133,14 @@ class DiceMethod(BaseCounterfactualMethod):
             torch.tensor(
                 self.initialize_candidates(x_query.shape[0]),
                 dtype=torch.float32,
-                device=self._device,
+                device=self.device,
             )
         )
         optimizer = self.build_optimizer([candidates])
 
         prev_loss = 0.0
         converge_count = 0
-        best_backup_eval = None  # torch.Tensor on self._device, set when all candidates are valid
+        best_backup_eval = None  # torch.Tensor on self.device, set when all candidates are valid
         final_loss = np.inf
         n_iter = self.max_iter
 
@@ -341,7 +336,7 @@ class DiceMethod(BaseCounterfactualMethod):
     def _predict_proba(self, cfs):
         """Run the torch module on candidates to get class probabilities (differentiable, used in the optimisation loop)."""
         assert torch is not None
-        logits = self._module(cfs)
+        logits = self.module(cfs)
         if logits.ndim == 1 or logits.shape[1] == 1:
             p1 = torch.sigmoid(logits.reshape(-1))
             return torch.stack([1.0 - p1, p1], dim=1)
@@ -351,7 +346,7 @@ class DiceMethod(BaseCounterfactualMethod):
         """Run the torch module on an on-device tensor without gradient tracking (used for in-loop validity checks)."""
         assert torch is not None
         with torch.no_grad():
-            logits = self._module(cfs)
+            logits = self.module(cfs)
             if logits.ndim == 1 or logits.shape[1] == 1:
                 p1 = torch.sigmoid(logits.reshape(-1))
                 return torch.stack([1.0 - p1, p1], dim=1)
@@ -365,7 +360,7 @@ class DiceMethod(BaseCounterfactualMethod):
         """
         assert torch is not None
         result = cfs.detach().clone()
-        for start, end in self._ohe_blocks:
+        for start, end in self.ohe_blocks:
             block = result[:, start:end]
             winners = torch.argmax(block, dim=1, keepdim=True)
             result[:, start:end] = torch.zeros_like(block).scatter_(1, winners, 1.0)
@@ -385,8 +380,8 @@ class DiceMethod(BaseCounterfactualMethod):
         if arr.ndim == 1:
             arr = arr[None, :]
         with torch.no_grad():
-            tensor = torch.tensor(arr, dtype=torch.float32, device=self._device)
-            logits = self._module(tensor)
+            tensor = torch.tensor(arr, dtype=torch.float32, device=self.device)
+            logits = self.module(tensor)
             if logits.ndim == 1 or logits.shape[1] == 1:
                 p1 = torch.sigmoid(logits.reshape(-1))
                 probs = torch.stack([1.0 - p1, p1], dim=1)
@@ -396,10 +391,10 @@ class DiceMethod(BaseCounterfactualMethod):
 
     def objective(self, cfs, probs, x_query: np.ndarray, target_class: int):
         """Full DiCE loss: validity (hinge) + proximity_weight * MAD-weighted L1 - diversity_weight * DPP-det + categorical_penalty * simplex regulariser."""
-        assert torch is not None and F is not None and self._feature_weights_t is not None
+        assert torch is not None and F is not None and self.feature_weights_t is not None
         target_loss = self.yloss(probs=probs, target_class=target_class)
         query = torch.tensor(x_query, dtype=torch.float32, device=cfs.device)
-        weights = self._feature_weights_t
+        weights = self.feature_weights_t
         proximity = torch.sum(torch.abs(cfs - query.unsqueeze(0)) * weights.unsqueeze(0), dim=1)
         d_cont = float(len(self.continuous_indices)) if self.continuous_indices is not None and len(self.continuous_indices) > 0 else 1.0
         proximity = torch.mean(proximity) / d_cont
@@ -436,10 +431,10 @@ class DiceMethod(BaseCounterfactualMethod):
     def categorical_regularizer(self, cfs_norm):
         """Penalise deviation from the OHE simplex: sum((sum(block) - 1)^2) over all OHE blocks."""
         assert torch is not None
-        if not self._ohe_blocks:
+        if not self.ohe_blocks:
             return torch.tensor(0.0, device=cfs_norm.device)
         penalty = torch.tensor(0.0, device=cfs_norm.device)
-        for start, end in self._ohe_blocks:
+        for start, end in self.ohe_blocks:
             penalty = penalty + torch.sum((torch.sum(cfs_norm[:, start:end], dim=1) - 1.0) ** 2)
         return penalty
 
@@ -452,7 +447,7 @@ class DiceMethod(BaseCounterfactualMethod):
 
         # Snap each one-hot block to a valid vertex, matching the official DiCE
         # output step after continuous optimisation.
-        for start, end in self._ohe_blocks:
+        for start, end in self.ohe_blocks:
             block = cfs_eval[:, start:end]
             if self.tie_random:
                 ties = block == block.max(axis=1, keepdims=True)
@@ -592,8 +587,8 @@ class DiceMethod(BaseCounterfactualMethod):
 
     def _continuous_decimal_precision(self, feat_idx: int) -> int:
         """Infer the number of decimal places needed for a feature from its minimum observed step size."""
-        assert self._continuous_steps is not None
-        step = float(self._continuous_steps[feat_idx])
+        assert self.continuous_steps is not None
+        step = float(self.continuous_steps[feat_idx])
         if step <= 0.0:
             return 6
         return int(max(0, min(6, np.ceil(-np.log10(step + 1e-12)))))
@@ -610,11 +605,3 @@ class DiceMethod(BaseCounterfactualMethod):
         idx = int(np.argmin(weighted_l1))
         return valid_eval[idx]
 
-    def resolve_target_class(self, x: np.ndarray, target_class: Optional[int]) -> int:
-        """Return the given target class, or the opposite predicted class for binary models when target_class is None."""
-        if target_class is not None:
-            return int(target_class)
-        pred = int(self.model.predict(x[None, :])[0])
-        if self.model.predict_proba(x[None, :]).shape[1] != 2:
-            raise ValueError("target_class is required for non-binary tasks")
-        return 1 - pred

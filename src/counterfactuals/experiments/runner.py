@@ -9,7 +9,7 @@ import numpy as np
 
 from counterfactuals.core.interfaces import MetricInterface
 from counterfactuals.core.registry import Registry
-from counterfactuals.datasets.loaders import AdultDataset
+from counterfactuals.datasets.loaders import AdultDataset, CompasDataset, GermanCreditDataset, GiveMeSomeCreditDataset, HELOCDataset
 from counterfactuals.experiments.config import ExperimentConfig, parse_experiment_config
 from counterfactuals.methods.dice import DiceMethod
 from counterfactuals.methods.face import FACEMethod
@@ -55,6 +55,10 @@ def create_default_registries() -> Dict[str, Registry]:
     method_registry.register("cpp", CertifiedAtlasMethod)
 
     dataset_registry.register("adult", AdultDataset)
+    dataset_registry.register("compas", CompasDataset)
+    dataset_registry.register("german_credit", GermanCreditDataset)
+    dataset_registry.register("heloc", HELOCDataset)
+    dataset_registry.register("give_me_some_credit", GiveMeSomeCreditDataset)
 
     model_registry.register("sklearn_model", SklearnModelWrapper)
     model_registry.register("sklearn_mlp", build_sklearn_mlp)

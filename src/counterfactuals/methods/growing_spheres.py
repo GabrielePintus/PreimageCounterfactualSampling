@@ -1,4 +1,8 @@
-"""Growing Spheres baseline for model-agnostic counterfactual search."""
+"""Growing Spheres baseline for model-agnostic counterfactual search.
+
+Laugel et al. (2017): "Inverse Classification for Comparison-based
+Interpretability in Machine Learning". FUZZ-IEEE 2017.
+"""
 
 from __future__ import annotations
 
@@ -40,7 +44,7 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
 
         x_query = np.asarray(x, dtype=np.float32).reshape(-1)
-        target_class = self._resolve_target_class(x=x_query, target_class=target_class)
+        target_class = self.resolve_target_class(x=x_query, target_class=target_class)
 
         radius = self.radius_step
         best = None
@@ -130,10 +134,3 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
                 x_cf = trial
         return x_cf
 
-    def _resolve_target_class(self, x: np.ndarray, target_class: Optional[int]) -> int:
-        if target_class is not None:
-            return int(target_class)
-        pred = int(self.model.predict(x)[0])
-        if self.model.predict_proba(x).shape[1] != 2:
-            raise ValueError("target_class is required for non-binary tasks")
-        return 1 - pred
