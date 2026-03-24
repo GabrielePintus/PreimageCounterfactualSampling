@@ -60,7 +60,7 @@ model:
 data:
   class_path: training.datamodules.adult.AdultDataModule
   init_args:
-    data_dir: data/
+    filepath: data/Adult/raw.parquet
     batch_size: 256
     val_fraction: 0.1
     test_fraction: 0.1

@@ -149,6 +149,24 @@ def german_credit_ohe_blocks() -> list[OHEBlockSpec]:
     return blocks
 
 
+def lending_club_ohe_blocks() -> list[OHEBlockSpec]:
+    """Infer LendingClub one-hot block boundaries from datamodule constants."""
+    from training.datamodules.lending_club import CARDINALITIES, INPUT_TYPES
+
+    blocks: list[OHEBlockSpec] = []
+    position = 0
+    cardinality_idx = 0
+    for feature_type in INPUT_TYPES:
+        if feature_type == "numerical":
+            position += 1
+            continue
+        cardinality = CARDINALITIES[cardinality_idx]
+        blocks.append(OHEBlockSpec(start=position, end=position + cardinality))
+        position += cardinality
+        cardinality_idx += 1
+    return blocks
+
+
 def adult_ohe_blocks() -> list[OHEBlockSpec]:
     """Infer Adult one-hot block boundaries from datamodule constants."""
     from training.datamodules.adult import CARDINALITIES, INPUT_TYPES

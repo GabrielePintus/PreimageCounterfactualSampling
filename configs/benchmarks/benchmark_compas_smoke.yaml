@@ -1,0 +1,60 @@
+seed: 42
+
+dataset:
+  name: compas
+  params:
+    data_dir: data/
+
+model:
+  name: tabular_classifier_ckpt
+  params:
+    checkpoint: checkpoints/compas_classifier/best.ckpt
+    device: cuda
+    dataset_module: compas
+    hidden_dims: [64, 32]
+    dropout: 0.1
+
+sampling:
+  n_queries: 50
+
+timeout_per_sample: 60   # seconds per (method, query)
+
+output:
+  path: results/benchmark_compas_smoke.parquet
+
+methods:
+
+  # --- Nearest Neighbor ---
+  - name: nearest_neighbor
+    run_name: nn
+    params:
+      norm: 1
+
+  # --- DiCE ---
+  - name: dice
+    run_name: dice
+    params:
+      total_cfs: 1
+      diversity_weight: 0.0
+      proximity_weight: 1.0
+      min_iter: 50
+
+  # --- Growing Spheres ---
+  - name: growing_spheres
+    run_name: gs
+    params:
+      max_radius: 5.0
+      radius_step: 0.15
+      n_in_layer: 512
+
+  # --- Certified Preimage Counterfactuals (CPP) ---
+  - name: cpp
+    run_name: cpp
+    params:
+      checkpoint: checkpoints/compas_classifier/best.ckpt
+      device: cuda
+      norm: 1
+      eps_alpha: 0.25
+      batch_size: 256
+      subsample_method: kmeans
+      k_per_class: 200

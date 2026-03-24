@@ -8,15 +8,6 @@ from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.preprocessing import StandardScaler
 
-_CSV_NAME = "cs-training.csv"
-_DATA_SUBDIR = "Give Me Some Credit"
-_DOWNLOAD_INSTRUCTIONS = (
-    "Give Me Some Credit requires manual download:\n"
-    "  1. Visit https://www.kaggle.com/competitions/GiveMeSomeCredit/data\n"
-    "  2. Download cs-training.csv\n"
-    "  3. Place it at: {dest}"
-)
-
 _FEATURE_COLS = [
     "RevolvingUtilizationOfUnsecuredLines",
     "age",
@@ -62,7 +53,7 @@ class GiveMeSomeCreditDataModule(L.LightningDataModule):
 
     def __init__(
         self,
-        data_dir: str = "data/",
+        filepath: str = "data/Give Me Some Credit/raw.parquet",
         batch_size: int = 256,
         val_fraction: float = 0.1,
         test_fraction: float = 0.1,
@@ -73,16 +64,13 @@ class GiveMeSomeCreditDataModule(L.LightningDataModule):
         self.save_hyperparameters()
 
     def prepare_data(self) -> None:
-        """Check that cs-training.csv is present; raise with download instructions if not."""
-        dest = Path(self.hparams.data_dir) / _DATA_SUBDIR / _CSV_NAME
-        if not dest.exists():
-            raise FileNotFoundError(_DOWNLOAD_INSTRUCTIONS.format(dest=dest))
+        if not Path(self.hparams.filepath).exists():
+            raise FileNotFoundError(f"Parquet file not found: {self.hparams.filepath}")
 
     def setup(self, stage=None) -> None:
         import pandas as pd
 
-        csv_path = Path(self.hparams.data_dir) / _DATA_SUBDIR / _CSV_NAME
-        df = pd.read_csv(csv_path, index_col=0)
+        df = pd.read_parquet(self.hparams.filepath)
 
         y = df["SeriousDlqin2yrs"].values.astype(np.int64)
         X = df[_FEATURE_COLS].values.astype(np.float32)

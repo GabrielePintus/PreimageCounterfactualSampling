@@ -6,7 +6,6 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
-from sklearn.datasets import fetch_openml
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
@@ -58,8 +57,8 @@ class AdultDataModule(L.LightningDataModule):
 
     Parameters
     ----------
-    data_dir : str
-        Cache directory for sklearn OpenML download.
+    filepath : str
+        Path to the raw parquet file (data/Adult/raw.parquet).
     batch_size : int
         Batch size for all dataloaders.
     val_fraction : float
@@ -89,7 +88,7 @@ class AdultDataModule(L.LightningDataModule):
 
     def __init__(
         self,
-        data_dir: str = "data/",
+        filepath: str = "data/Adult/raw.parquet",
         batch_size: int = 256,
         val_fraction: float = 0.1,
         test_fraction: float = 0.1,
@@ -105,13 +104,13 @@ class AdultDataModule(L.LightningDataModule):
         self.save_hyperparameters()
 
     def prepare_data(self):
-        fetch_openml("adult", version=2, data_home=self.hparams.data_dir, as_frame=True)
+        if not Path(self.hparams.filepath).exists():
+            raise FileNotFoundError(f"Parquet file not found: {self.hparams.filepath}")
 
     def setup(self, stage=None):
-        bunch = fetch_openml(
-            "adult", version=2, data_home=self.hparams.data_dir, as_frame=True
-        )
-        df = bunch.frame[_ALL_COLS + ["class"]].dropna().reset_index(drop=True)
+        import pandas as pd
+
+        df = pd.read_parquet(self.hparams.filepath)
 
         # Target: <=50K → 0, >50K → 1
         y = (df["class"] == ">50K").astype(int).values.astype(np.int64)

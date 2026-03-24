@@ -68,7 +68,7 @@ model:
 data:
   class_path: training.datamodules.german_credit.GermanCreditDataModule
   init_args:
-    data_dir: data/
+    filepath: data/GermanCredit/raw.parquet
     batch_size: 32
     val_fraction: 0.1
     test_fraction: 0.1

@@ -2,7 +2,7 @@
 """CPP query-time benchmark suite with per-query profiling and ablations.
 
 Usage:
-    python scripts/cpp_query_benchmark.py --config configs/cpp_query_benchmark_adult.yaml
+    python scripts/cpp_query_benchmark.py --config configs/benchmarks/cpp_query_benchmark_adult.yaml
 """
 
 from __future__ import annotations

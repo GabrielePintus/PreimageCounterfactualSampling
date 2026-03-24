@@ -1,4 +1,4 @@
-"""LightningDataModule for the ProPublica COMPAS (recidivism) dataset."""
+"""LightningDataModule for the Kaggle LendingClub (2007–2011) dataset."""
 
 from pathlib import Path
 
@@ -8,46 +8,45 @@ from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-# Features used (standard ProPublica subset)
-_NUMERICAL_COLS = ["age", "priors_count", "c_days_from_compas", "days_b_screening_arrest"]
-_CATEGORICAL_COLS = ["sex", "race", "c_charge_degree"]
+_NUMERICAL_COLS = [
+    "loan_amnt", "int_rate", "annual_inc", "dti",
+    "delinq_2yrs", "open_acc", "pub_rec", "revol_util",
+]
+_CATEGORICAL_COLS = ["term", "grade", "home_ownership", "verification_status"]
 
-# Empirically verified from the filtered ProPublica dataset.
-# sex: Male/Female (2), race: African-American/Asian/Caucasian/Hispanic/Native American/Other (6),
-# c_charge_degree: F/M (2).
-CARDINALITIES = [2, 6, 2]
+# Empirically verified from standard Kaggle 2007-2011 filtered to Fully Paid/Charged Off.
+# term: 36/60 months (2), grade: A-G (7), home_ownership: MORTGAGE/OWN/RENT/OTHER (4),
+# verification_status: Not Verified/Source Verified/Verified (3).
+CARDINALITIES = [2, 7, 5, 3]  # term, grade, home_ownership (MORTGAGE/NONE/OTHER/OWN/RENT), verification_status
 
 INPUT_TYPES = (
     ["numerical"] * len(_NUMERICAL_COLS)
     + ["categorical"] * len(_CATEGORICAL_COLS)
 )
 
-N_FEATURES = len(_NUMERICAL_COLS) + sum(CARDINALITIES)  # 4 + 10 = 14
+N_FEATURES = len(_NUMERICAL_COLS) + sum(CARDINALITIES)  # 8 + 17 = 25
 
-# Per-OHE-dimension type annotation (length N_FEATURES = 14).
+# Per-OHE-dimension type annotation (length N_FEATURES = 25).
 OHE_FEATURE_TYPES: list = (
     ["numerical"] * len(_NUMERICAL_COLS)
     + ["categorical"] * sum(CARDINALITIES)
 )
 
 
-class CompasDataModule(L.LightningDataModule):
+class LendingClubDataModule(L.LightningDataModule):
     """
-    LightningDataModule for the ProPublica COMPAS recidivism dataset.
+    LightningDataModule for the Kaggle LendingClub (2007–2011) dataset.
 
-    Binary classification: two_year_recid (0 = no recidivism, 1 = recidivated within 2 years).
-
-    Standard ProPublica preprocessing filters are applied:
-    - |days_b_screening_arrest| <= 30
-    - is_recid != -1
-    - c_charge_degree != "O" (ordinary traffic)
-    - score_text != "N/A"
+    Binary classification: 0 = Fully Paid, 1 = Charged Off.
+    Rows with other loan_status values are dropped.
 
     Features:
-    - Numerical (4): age, priors_count, c_days_from_compas, days_b_screening_arrest
-    - Categorical (3 → 10 OHE dims): sex (2), race (6), c_charge_degree (2)
+    - Numerical (8): loan_amnt, int_rate, annual_inc, dti,
+                     delinq_2yrs, open_acc, pub_rec, revol_util
+    - Categorical (4 → 16 OHE dims): term (2), grade (7),
+                                      home_ownership (4), verification_status (3)
 
-    Total: N_FEATURES = 14.
+    Total: N_FEATURES = 24.
 
     Preprocessing:
     - OHE fitted on full cleaned dataset (stable column assignments across splits).
@@ -61,7 +60,7 @@ class CompasDataModule(L.LightningDataModule):
 
     def __init__(
         self,
-        filepath: str = "data/Compas/raw.parquet",
+        filepath: str = "data/LendingClub/raw.parquet",
         batch_size: int = 256,
         val_fraction: float = 0.1,
         test_fraction: float = 0.1,
@@ -80,19 +79,34 @@ class CompasDataModule(L.LightningDataModule):
 
         df = pd.read_parquet(self.hparams.filepath)
 
-        # Target
-        y = df["two_year_recid"].values.astype(np.int64)
+        # Keep only Fully Paid / Charged Off
+        df = df[df["loan_status"].isin(["Fully Paid", "Charged Off"])].reset_index(drop=True)
+
+        # Target: Fully Paid → 0, Charged Off → 1
+        y = (df["loan_status"] == "Charged Off").values.astype(np.int64)
+
+        # Clean string columns: strip "%" and whitespace
+        for col in ["int_rate", "revol_util"]:
+            if df[col].dtype == object:
+                df[col] = df[col].str.rstrip("%").astype(np.float32)
+        for col in _CATEGORICAL_COLS:
+            df[col] = df[col].astype(str).str.strip()
+
+        # Drop rows with NaN in any feature column
+        feature_cols = _NUMERICAL_COLS + _CATEGORICAL_COLS
+        df = df.dropna(subset=feature_cols).reset_index(drop=True)
+        y = (df["loan_status"] == "Charged Off").values.astype(np.int64)
 
         # Fit OHE on full cleaned dataset for stable column assignments.
         self.ohe = OneHotEncoder(sparse_output=False, handle_unknown="ignore", dtype=np.float32)
-        self.ohe.fit(df[_CATEGORICAL_COLS].astype(str).values)
-        X_cat = self.ohe.transform(df[_CATEGORICAL_COLS].astype(str).values)
+        self.ohe.fit(df[_CATEGORICAL_COLS].values)
+        X_cat = self.ohe.transform(df[_CATEGORICAL_COLS].values)
 
-        # Numerical features (raw, scaling applied after split)
+        # Numerical features (scaling applied after split)
         X_num = df[_NUMERICAL_COLS].values.astype(np.float32)
 
         # Full feature matrix: numericals first, then OHE categoricals
-        X = np.concatenate([X_num, X_cat], axis=1)  # (N, 14)
+        X = np.concatenate([X_num, X_cat], axis=1)  # (N, 24)
 
         # Shuffle and split
         rng = np.random.default_rng(self.hparams.seed)
@@ -105,7 +119,7 @@ class CompasDataModule(L.LightningDataModule):
         train_idx = idx[n_test + n_val:]
 
         # StandardScaler on numerical positions, fit on train only.
-        num_pos = list(range(len(_NUMERICAL_COLS)))  # [0, 1, 2, 3]
+        num_pos = list(range(len(_NUMERICAL_COLS)))
         self.scaler = StandardScaler()
         self.scaler.fit(X[train_idx][:, num_pos].astype(np.float64))
         X[:, num_pos] = self.scaler.transform(

@@ -4,16 +4,16 @@ LightningCLI entrypoint for training NN models.
 Usage
 -----
 Train MNIST classifier:
-    python train.py fit --config configs/mnist_classifier.yaml
+    python train.py fit --config configs/training/mnist_classifier.yaml
 
 Train convolutional VAE:
-    python train.py fit --config configs/mnist_ae.yaml
+    python train.py fit --config configs/training/mnist_ae.yaml
 
 Override parameters on the fly:
-    python train.py fit --config configs/mnist_classifier.yaml --trainer.max_epochs=100
+    python train.py fit --config configs/training/mnist_classifier.yaml --trainer.max_epochs=100
 
 Test (after training):
-    python train.py test --config configs/mnist_classifier.yaml \
+    python train.py test --config configs/training/mnist_classifier.yaml \
         --ckpt_path "data/Trained Models/mnist_classifier.ckpt"
 """
 
@@ -29,6 +29,7 @@ import training.datamodules.compas  # noqa: F401
 import training.datamodules.german_credit  # noqa: F401
 import training.datamodules.heloc                # noqa: F401
 import training.datamodules.give_me_some_credit  # noqa: F401
+import training.datamodules.lending_club         # noqa: F401
 import models.classifiers           # noqa: F401
 import models.ae                    # noqa: F401
 import models.ae_channels           # noqa: F401

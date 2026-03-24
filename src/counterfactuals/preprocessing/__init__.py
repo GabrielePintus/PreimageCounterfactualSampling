@@ -9,6 +9,7 @@ from .transforms import (
     adult_ohe_blocks,
     compas_ohe_blocks,
     german_credit_ohe_blocks,
+    lending_club_ohe_blocks,
     snap_ohe_blocks,
 )
 
@@ -22,4 +23,5 @@ __all__ = [
     "adult_ohe_blocks",
     "compas_ohe_blocks",
     "german_credit_ohe_blocks",
+    "lending_club_ohe_blocks",
 ]

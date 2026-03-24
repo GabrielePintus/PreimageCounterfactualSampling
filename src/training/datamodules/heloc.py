@@ -1,5 +1,7 @@
 """LightningDataModule for the FICO HELOC (Home Equity Line of Credit) dataset."""
 
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
@@ -60,6 +62,7 @@ class HELOCDataModule(L.LightningDataModule):
 
     def __init__(
         self,
+        filepath: str = "data/Heloc/raw.parquet",
         batch_size: int = 256,
         val_fraction: float = 0.1,
         test_fraction: float = 0.1,
@@ -70,15 +73,13 @@ class HELOCDataModule(L.LightningDataModule):
         self.save_hyperparameters()
 
     def prepare_data(self) -> None:
-        """Pre-fetch HELOC dataset to the HuggingFace cache."""
-        from datasets import load_dataset
-        load_dataset("mstz/heloc")
+        if not Path(self.hparams.filepath).exists():
+            raise FileNotFoundError(f"Parquet file not found: {self.hparams.filepath}")
 
     def setup(self, stage=None) -> None:
-        from datasets import load_dataset
+        import pandas as pd
 
-        dataset = load_dataset("mstz/heloc")["train"]
-        df = dataset.to_pandas()
+        df = pd.read_parquet(self.hparams.filepath)
 
         y = df["is_at_risk"].values.astype(np.int64)
         X = df[_FEATURE_COLS].values.astype(np.float32)

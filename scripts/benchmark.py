@@ -2,10 +2,10 @@
 """Benchmark all counterfactual methods on a single dataset.
 
 Usage:
-    python scripts/benchmark.py --config configs/benchmark_adult.yaml
-    python scripts/benchmark.py --config configs/benchmark_adult.yaml --output results/run2.parquet
-    python scripts/benchmark.py --config configs/benchmark_adult.yaml --seed 123 --n_queries 200
-    python scripts/benchmark.py --config configs/benchmark_adult.yaml --methods dice face nearest_neighbor
+    python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
+    python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --output results/run2.parquet
+    python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --seed 123 --n_queries 200
+    python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --methods dice face nearest_neighbor
 
 Output:
     A .bmk file (BenchmarkResult, pickle) and a .parquet file (flat, for notebooks).
@@ -227,6 +227,8 @@ def _load_dataset_constants(dataset_name: str):
         from training.datamodules.heloc import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
     elif dataset_name == "give_me_some_credit":
         from training.datamodules.give_me_some_credit import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
+    elif dataset_name == "lending_club":
+        from training.datamodules.lending_club import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
     else:
         from training.datamodules.adult import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
     return INPUT_TYPES, CARDINALITIES, OHE_FEATURE_TYPES

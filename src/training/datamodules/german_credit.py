@@ -8,12 +8,6 @@ from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-_UCI_URL = (
-    "https://archive.ics.uci.edu/ml/machine-learning-databases"
-    "/statlog/german/german.data"
-)
-_FILE_NAME = "german.data"
-
 _COLUMNS = [
     "status", "duration", "credit_history", "purpose", "credit_amount",
     "savings", "employment", "installment_rate", "personal_status",
@@ -83,7 +77,7 @@ class GermanCreditDataModule(L.LightningDataModule):
 
     def __init__(
         self,
-        data_dir: str = "data/",
+        filepath: str = "data/GermanCredit/raw.parquet",
         batch_size: int = 256,
         val_fraction: float = 0.1,
         test_fraction: float = 0.1,
@@ -94,21 +88,13 @@ class GermanCreditDataModule(L.LightningDataModule):
         self.save_hyperparameters()
 
     def prepare_data(self) -> None:
-        """Download german.data from UCI if not already present."""
-        import urllib.request
-
-        dest = Path(self.hparams.data_dir) / "GermanCredit" / _FILE_NAME
-        if not dest.exists():
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            print(f"[GermanCreditDataModule] Downloading {_FILE_NAME} ...")
-            urllib.request.urlretrieve(_UCI_URL, dest)
-            print(f"[GermanCreditDataModule] Saved to {dest}")
+        if not Path(self.hparams.filepath).exists():
+            raise FileNotFoundError(f"Parquet file not found: {self.hparams.filepath}")
 
     def setup(self, stage=None) -> None:
         import pandas as pd
 
-        file_path = Path(self.hparams.data_dir) / "GermanCredit" / _FILE_NAME
-        df = pd.read_csv(file_path, sep=" ", header=None, names=_COLUMNS)
+        df = pd.read_parquet(self.hparams.filepath)
 
         # Target: 1=good → 0, 2=bad → 1
         y = (df["target"] == 2).values.astype(np.int64)

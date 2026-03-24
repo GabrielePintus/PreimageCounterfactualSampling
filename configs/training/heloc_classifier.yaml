@@ -67,6 +67,7 @@ model:
 data:
   class_path: training.datamodules.heloc.HELOCDataModule
   init_args:
+    filepath: data/Heloc/raw.parquet
     batch_size: 64
     val_fraction: 0.1
     test_fraction: 0.1
