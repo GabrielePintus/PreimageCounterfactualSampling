@@ -29,6 +29,8 @@ methods:
     run_name: nn
     params:
       norm: 1
+      subsample_method: kmedoids
+      k_per_class: 200
 
   # --- DiCE ---
   - name: dice
