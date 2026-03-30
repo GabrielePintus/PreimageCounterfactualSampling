@@ -11,7 +11,7 @@ model:
     checkpoint: checkpoints/lending_club_classifier/best.ckpt
     device: cuda
     dataset_module: lending_club
-    hidden_dims: [64, 32]
+    hidden_dims: [128, 32]
     dropout: 0.1
 
 sampling:

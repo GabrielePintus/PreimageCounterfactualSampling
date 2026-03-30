@@ -15,6 +15,8 @@ Example usage:
 """
 
 import time
+import heapq
+from itertools import count, product
 import numpy as np
 
 _SOLVER_TOL = 1e-9  # QP convergence tolerance (fixed)
@@ -35,6 +37,10 @@ from .eps_strategies import EpsStrategy, ConstantEpsStrategy
 from .geometry.polytopes import ball_box_constraints, make_polygon
 from .geometry.operations import build_class_union, refine_unions_by_priority
 from .indexing.bvh import BVHIndex
+
+
+_EXACT_ENUM_PRODUCT_THRESHOLD = 4096
+ProfileValue = Union[float, str, int, bool]
 
 
 @dataclass
@@ -65,7 +71,7 @@ class CounterfactualResult:
     anchor_idx: Optional[int]
     n_qp_solved: int
     success: bool
-    profiling: Dict[str, float] = field(default_factory=dict)
+    profiling: Dict[str, ProfileValue] = field(default_factory=dict)
 
 
 class CertifiedAtlas:
@@ -292,6 +298,8 @@ class CertifiedAtlas:
         box_eps: float,
         ball_eps: float,
         fixed_dims: Optional[np.ndarray] = None,
+        ohe_slices: Optional[List[Tuple[int, int]]] = None,
+        fixed_ohe_assignments: Optional[Dict[int, int]] = None,
     ) -> np.ndarray:
         """
         Build a geometry-aware warm start for polytope projection.
@@ -302,6 +310,8 @@ class CertifiedAtlas:
         along that segment if the reference point is already halfspace-feasible.
         """
         ref = center.astype(np.float64, copy=True)
+        if ohe_slices is not None and fixed_ohe_assignments:
+            ref = self._apply_fixed_ohe_assignments(ref, ohe_slices, fixed_ohe_assignments)
         if fixed_dims is not None and len(fixed_dims) > 0:
             ref[fixed_dims] = x0[fixed_dims]
 
@@ -339,6 +349,8 @@ class CertifiedAtlas:
                 t_region = min(1.0, remaining / step_norm)
 
         candidate = ref + t_region * direction
+        if ohe_slices is not None and fixed_ohe_assignments:
+            candidate = self._apply_fixed_ohe_assignments(candidate, ohe_slices, fixed_ohe_assignments)
         if fixed_dims is not None and len(fixed_dims) > 0:
             candidate[fixed_dims] = x0[fixed_dims]
 
@@ -354,6 +366,8 @@ class CertifiedAtlas:
             if alpha < 1.0:
                 alpha *= 0.999  # stay slightly inside the active halfspace
             candidate = ref + alpha * step
+            if ohe_slices is not None and fixed_ohe_assignments:
+                candidate = self._apply_fixed_ohe_assignments(candidate, ohe_slices, fixed_ohe_assignments)
             if fixed_dims is not None and len(fixed_dims) > 0:
                 candidate[fixed_dims] = x0[fixed_dims]
             return candidate
@@ -362,6 +376,64 @@ class CertifiedAtlas:
             return candidate
 
         return ref
+
+    @staticmethod
+    def _ohe_product_size(ohe_slices: Optional[List[Tuple[int, int]]]) -> int:
+        if not ohe_slices:
+            return 1
+        size = 1
+        for s, e in ohe_slices:
+            size *= max(1, int(e - s))
+        return int(size)
+
+    @staticmethod
+    def _apply_fixed_ohe_assignments(
+        x: np.ndarray,
+        ohe_slices: List[Tuple[int, int]],
+        fixed_ohe_assignments: Dict[int, int],
+    ) -> np.ndarray:
+        out = np.asarray(x, dtype=np.float64).copy()
+        for block_idx, cat_idx in fixed_ohe_assignments.items():
+            s, e = ohe_slices[block_idx]
+            out[s:e] = 0.0
+            out[s + int(cat_idx)] = 1.0
+        return out
+
+    def _build_decode_profile(
+        self,
+        *,
+        mode: str,
+        exact_fallback_used: bool,
+        nodes_visited: int,
+        nodes_pruned: int,
+        solver_calls: int,
+        product_size: int,
+        heuristic_success: bool,
+    ) -> Dict[str, ProfileValue]:
+        return {
+            "decode_mode": mode,
+            "decode_exact_fallback_used": bool(exact_fallback_used),
+            "decode_nodes_visited": int(nodes_visited),
+            "decode_nodes_pruned": int(nodes_pruned),
+            "decode_solver_calls": int(solver_calls),
+            "decode_product_size": int(product_size),
+            "decode_heuristic_success": bool(heuristic_success),
+        }
+
+    def _is_certified_candidate(
+        self,
+        x_cand: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        ball_eps: float,
+        tol: float = 1e-6,
+    ) -> bool:
+        if np.any(A_full @ x_cand + b_full < -tol):
+            return False
+        if self.norm == np.inf:
+            return bool(np.max(np.abs(x_cand - center)) <= ball_eps + tol)
+        return bool(np.linalg.norm(x_cand - center, ord=self.norm) <= ball_eps + tol)
 
     def _project_cvxpy(
         self,
@@ -373,6 +445,7 @@ class CertifiedAtlas:
         ball_eps: float,
         fixed_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
+        fixed_ohe_assignments: Optional[Dict[int, int]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Project using CVXPY — handles L2 (SOCP) and L1 ball constraints natively.
@@ -380,7 +453,15 @@ class CertifiedAtlas:
         d = len(x0)
         z = cp.Variable(d)
         z.value = self._projection_initial_guess(
-            x0, A_full, b_full, center, box_eps, ball_eps, fixed_dims=fixed_dims
+            x0,
+            A_full,
+            b_full,
+            center,
+            box_eps,
+            ball_eps,
+            fixed_dims=fixed_dims,
+            ohe_slices=ohe_slices,
+            fixed_ohe_assignments=fixed_ohe_assignments,
         )
 
         objective = cp.Minimize(cp.sum_squares(z - x0))
@@ -404,9 +485,15 @@ class CertifiedAtlas:
 
         # OHE simplex constraints: each categorical block must sum to 1 and be >= 0
         if ohe_slices is not None:
-            for s, e in ohe_slices:
-                constraints.append(cp.sum(z[s:e]) == 1.0)
-                constraints.append(z[s:e] >= 0)
+            for block_idx, (s, e) in enumerate(ohe_slices):
+                fixed_cat = None if fixed_ohe_assignments is None else fixed_ohe_assignments.get(block_idx)
+                if fixed_cat is None:
+                    constraints.append(cp.sum(z[s:e]) == 1.0)
+                    constraints.append(z[s:e] >= 0)
+                else:
+                    target = np.zeros(e - s, dtype=np.float64)
+                    target[int(fixed_cat)] = 1.0
+                    constraints.append(z[s:e] == target)
 
         problem = cp.Problem(objective, constraints)
 
@@ -445,6 +532,7 @@ class CertifiedAtlas:
         tol: float,
         fixed_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
+        fixed_ohe_assignments: Optional[Dict[int, int]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         """
         Project using SLSQP — fast for L∞ (all-linear constraints).
@@ -472,19 +560,34 @@ class CertifiedAtlas:
 
         # OHE simplex constraints: clamp categorical dims to [0,1] and enforce sum==1
         if ohe_slices is not None:
-            for s, e in ohe_slices:
-                for i in range(s, e):
-                    lo, hi = bounds[i]
-                    bounds[i] = (max(lo, 0.0), min(hi, 1.0))
-                s_, e_ = int(s), int(e)
-                constraints.append({
-                    'type': 'eq',
-                    'fun': lambda x, s=s_, e=e_: np.sum(x[s:e]) - 1.0,
-                    'jac': lambda x, s=s_, e=e_: np.eye(len(x))[s:e].sum(axis=0),
-                })
+            for block_idx, (s, e) in enumerate(ohe_slices):
+                fixed_cat = None if fixed_ohe_assignments is None else fixed_ohe_assignments.get(block_idx)
+                if fixed_cat is None:
+                    for i in range(s, e):
+                        lo, hi = bounds[i]
+                        bounds[i] = (max(lo, 0.0), min(hi, 1.0))
+                    s_, e_ = int(s), int(e)
+                    constraints.append({
+                        'type': 'eq',
+                        'fun': lambda x, s=s_, e=e_: np.sum(x[s:e]) - 1.0,
+                        'jac': lambda x, s=s_, e=e_: np.eye(len(x))[s:e].sum(axis=0),
+                    })
+                else:
+                    fixed_cat = int(fixed_cat)
+                    for i in range(s, e):
+                        target = 1.0 if i == s + fixed_cat else 0.0
+                        bounds[i] = (target, target)
 
         x_init = self._projection_initial_guess(
-            x0, A_full, b_full, center, box_eps, box_eps, fixed_dims=fixed_dims
+            x0,
+            A_full,
+            b_full,
+            center,
+            box_eps,
+            box_eps,
+            fixed_dims=fixed_dims,
+            ohe_slices=ohe_slices,
+            fixed_ohe_assignments=fixed_ohe_assignments,
         )
 
         result = minimize(
@@ -513,7 +616,46 @@ class CertifiedAtlas:
         dist = np.linalg.norm(x_proj - x0)
         return x_proj, dist
 
-    def _polytope_aware_decode(
+    def _solve_projection_subproblem(
+        self,
+        x0: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        ball_eps: float,
+        maxiter: int,
+        tol: float,
+        fixed_dims: Optional[np.ndarray] = None,
+        ohe_slices: Optional[List[Tuple[int, int]]] = None,
+        fixed_ohe_assignments: Optional[Dict[int, int]] = None,
+    ) -> Tuple[Optional[np.ndarray], float]:
+        if self.norm in (1, 2) and CVXPY_AVAILABLE:
+            return self._project_cvxpy(
+                x0,
+                A_full,
+                b_full,
+                center,
+                box_eps,
+                ball_eps,
+                fixed_dims=fixed_dims,
+                ohe_slices=ohe_slices,
+                fixed_ohe_assignments=fixed_ohe_assignments,
+            )
+        return self._project_slsqp(
+            x0,
+            A_full,
+            b_full,
+            center,
+            box_eps,
+            maxiter,
+            tol,
+            fixed_dims=fixed_dims,
+            ohe_slices=ohe_slices,
+            fixed_ohe_assignments=fixed_ohe_assignments,
+        )
+
+    def _heuristic_polytope_decode(
         self,
         x_star: np.ndarray,
         x_query: np.ndarray,
@@ -524,18 +666,8 @@ class CertifiedAtlas:
         top_k: int = 3,
         tol: float = 1e-6,
     ) -> Tuple[Optional[np.ndarray], float]:
-        """
-        Snap the continuous QP solution to the nearest certified OHE vertex.
+        ohe_slices = self.ohe_slices or []
 
-        Generates up to 1 + top_k discrete candidates (argmax baseline +
-        variants where the most uncertain categorical blocks use their 2nd-best
-        category) and returns the closest one to x_query that satisfies the
-        eroded polytope certificate. Returns (None, inf) if none pass.
-        """
-        ohe_slices = self.ohe_slices  # list of (start, end) per categorical block
-        d = len(x_star)
-
-        # Build the argmax baseline
         x_base = x_star.copy()
         for s, e in ohe_slices:
             block = x_star[s:e]
@@ -545,7 +677,6 @@ class CertifiedAtlas:
 
         candidates = [x_base]
 
-        # Identify the top_k most uncertain blocks (smallest top1 - top2 margin)
         margins = []
         for s, e in ohe_slices:
             block = x_star[s:e]
@@ -553,34 +684,280 @@ class CertifiedAtlas:
                 continue
             sorted_vals = np.sort(block)[::-1]
             margins.append((sorted_vals[0] - sorted_vals[1], s, e))
-        margins.sort(key=lambda t: t[0])  # ascending: most uncertain first
+        margins.sort(key=lambda t: t[0])
 
         for _, s, e in margins[:top_k]:
             block = x_star[s:e]
-            order = np.argsort(block)[::-1]  # indices sorted by value descending
+            order = np.argsort(block)[::-1]
             if len(order) < 2:
                 continue
             x_alt = x_base.copy()
             snap_alt = np.zeros(e - s)
-            snap_alt[order[1]] = 1.0  # use 2nd-best category
+            snap_alt[int(order[1])] = 1.0
             x_alt[s:e] = snap_alt
             candidates.append(x_alt)
 
-        def _check(x_cand: np.ndarray) -> bool:
-            if np.any(A_full @ x_cand + b_full < -tol):
-                return False
-            if self.norm == np.inf:
-                return bool(np.max(np.abs(x_cand - center)) <= ball_eps + tol)
-            return bool(np.linalg.norm(x_cand - center, ord=self.norm) <= ball_eps + tol)
-
         best_x, best_dist = None, np.inf
         for cand in candidates:
-            if _check(cand):
+            if self._is_certified_candidate(cand, A_full, b_full, center, ball_eps, tol=tol):
                 d_cand = float(np.linalg.norm(cand - x_query))
                 if d_cand < best_dist:
                     best_x, best_dist = cand, d_cand
 
         return best_x, best_dist
+
+    def _polytope_aware_decode(
+        self,
+        x_star: np.ndarray,
+        x_query: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        ball_eps: float,
+        maxiter: int,
+        tol: float,
+        fixed_dims: Optional[np.ndarray],
+        incumbent_upper_bound: float = np.inf,
+        top_k: int = 3,
+    ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
+        """
+        Decode a relaxed OHE solution to a certified discrete vertex.
+
+        The fast path uses the existing heuristic snap. If that fails, an exact
+        per-polytope discrete search is launched: full enumeration for tiny
+        categorical products and branch-and-bound otherwise.
+        """
+        ohe_slices = self.ohe_slices or []
+        product_size = self._ohe_product_size(ohe_slices)
+
+        best_x, best_dist = self._heuristic_polytope_decode(
+            x_star,
+            x_query,
+            A_full,
+            b_full,
+            center,
+            ball_eps,
+            top_k=top_k,
+            tol=tol,
+        )
+        if best_x is not None:
+            profile = self._build_decode_profile(
+                mode="heuristic",
+                exact_fallback_used=False,
+                nodes_visited=0,
+                nodes_pruned=0,
+                solver_calls=0,
+                product_size=product_size,
+                heuristic_success=True,
+            )
+            return best_x, best_dist, profile
+
+        incumbent = float(incumbent_upper_bound)
+        if product_size <= _EXACT_ENUM_PRODUCT_THRESHOLD:
+            return self._exact_polytope_decode_enumeration(
+                x_star,
+                x_query,
+                A_full,
+                b_full,
+                center,
+                box_eps,
+                ball_eps,
+                maxiter=maxiter,
+                tol=tol,
+                fixed_dims=fixed_dims,
+                incumbent_upper_bound=incumbent,
+            )
+        return self._exact_polytope_decode_branch_and_bound(
+            x_star,
+            x_query,
+            A_full,
+            b_full,
+            center,
+            box_eps,
+            ball_eps,
+            maxiter=maxiter,
+            tol=tol,
+            fixed_dims=fixed_dims,
+            incumbent_upper_bound=incumbent,
+        )
+
+    def _exact_polytope_decode_enumeration(
+        self,
+        x_star: np.ndarray,
+        x_query: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        ball_eps: float,
+        maxiter: int,
+        tol: float,
+        fixed_dims: Optional[np.ndarray],
+        incumbent_upper_bound: float,
+    ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
+        ohe_slices = self.ohe_slices or []
+        product_size = self._ohe_product_size(ohe_slices)
+        profile = self._build_decode_profile(
+            mode="exact_enum",
+            exact_fallback_used=True,
+            nodes_visited=0,
+            nodes_pruned=0,
+            solver_calls=0,
+            product_size=product_size,
+            heuristic_success=False,
+        )
+
+        root_dist = float(np.linalg.norm(x_star - x_query))
+        if root_dist >= incumbent_upper_bound:
+            profile["decode_nodes_pruned"] = 1
+            return None, np.inf, profile
+
+        block_indices = list(range(len(ohe_slices)))
+        category_orders = []
+        for block_idx in block_indices:
+            s, e = ohe_slices[block_idx]
+            block = x_star[s:e]
+            category_orders.append([int(i) for i in np.argsort(block)[::-1]])
+
+        best_x = None
+        best_dist = float(incumbent_upper_bound)
+        for assignment in product(*category_orders):
+            fixed_ohe_assignments = {block_idx: int(cat) for block_idx, cat in zip(block_indices, assignment)}
+            profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
+            profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
+            x_leaf, dist_leaf = self._solve_projection_subproblem(
+                x_query,
+                A_full,
+                b_full,
+                center,
+                box_eps,
+                ball_eps,
+                maxiter=maxiter,
+                tol=tol,
+                fixed_dims=fixed_dims,
+                ohe_slices=ohe_slices,
+                fixed_ohe_assignments=fixed_ohe_assignments,
+            )
+            if x_leaf is None or dist_leaf >= best_dist:
+                profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
+                continue
+            best_x = x_leaf
+            best_dist = float(dist_leaf)
+
+        if best_x is None:
+            return None, np.inf, profile
+        return best_x, best_dist, profile
+
+    def _exact_polytope_decode_branch_and_bound(
+        self,
+        x_star: np.ndarray,
+        x_query: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        ball_eps: float,
+        maxiter: int,
+        tol: float,
+        fixed_dims: Optional[np.ndarray],
+        incumbent_upper_bound: float,
+    ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
+        ohe_slices = self.ohe_slices or []
+        product_size = self._ohe_product_size(ohe_slices)
+        profile = self._build_decode_profile(
+            mode="exact_bnb",
+            exact_fallback_used=True,
+            nodes_visited=0,
+            nodes_pruned=0,
+            solver_calls=0,
+            product_size=product_size,
+            heuristic_success=False,
+        )
+
+        block_indices = [i for i, (s, e) in enumerate(ohe_slices) if e - s > 1]
+        if not block_indices:
+            root_dist = float(np.linalg.norm(x_star - x_query))
+            if root_dist >= incumbent_upper_bound:
+                profile["decode_nodes_pruned"] = 1
+                return None, np.inf, profile
+            return x_star.copy(), root_dist, profile
+
+        root_dist = float(np.linalg.norm(x_star - x_query))
+        if root_dist >= incumbent_upper_bound:
+            profile["decode_nodes_pruned"] = 1
+            return None, np.inf, profile
+
+        pq: List[Tuple[float, int, Dict[int, int], np.ndarray]] = []
+        ticket = count()
+        heapq.heappush(pq, (root_dist, next(ticket), {}, x_star.copy()))
+
+        best_x = None
+        best_dist = float(incumbent_upper_bound)
+
+        while pq:
+            lower_bound, _, fixed_assignments, relaxed_point = heapq.heappop(pq)
+            if lower_bound >= best_dist:
+                profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
+                continue
+
+            if len(fixed_assignments) == len(block_indices):
+                best_x = relaxed_point
+                best_dist = float(lower_bound)
+                continue
+
+            branch_block = None
+            branch_margin = np.inf
+            for block_idx in block_indices:
+                if block_idx in fixed_assignments:
+                    continue
+                s, e = ohe_slices[block_idx]
+                block = relaxed_point[s:e]
+                if len(block) < 2:
+                    branch_block = block_idx
+                    branch_margin = -np.inf
+                    break
+                sorted_vals = np.sort(block)[::-1]
+                margin = float(sorted_vals[0] - sorted_vals[1])
+                if margin < branch_margin:
+                    branch_margin = margin
+                    branch_block = block_idx
+
+            if branch_block is None:
+                profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
+                continue
+
+            s, e = ohe_slices[branch_block]
+            category_order = [int(i) for i in np.argsort(relaxed_point[s:e])[::-1]]
+            for category in category_order:
+                child_assignments = dict(fixed_assignments)
+                child_assignments[branch_block] = category
+                profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
+                profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
+                child_x, child_dist = self._solve_projection_subproblem(
+                    x_query,
+                    A_full,
+                    b_full,
+                    center,
+                    box_eps,
+                    ball_eps,
+                    maxiter=maxiter,
+                    tol=tol,
+                    fixed_dims=fixed_dims,
+                    ohe_slices=ohe_slices,
+                    fixed_ohe_assignments=child_assignments,
+                )
+                if child_x is None or child_dist >= best_dist:
+                    profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
+                    continue
+                heapq.heappush(
+                    pq,
+                    (float(child_dist), next(ticket), child_assignments, child_x),
+                )
+
+        if best_x is None:
+            return None, np.inf, profile
+        return best_x, best_dist, profile
 
     def _project_onto_polytope(
         self,
@@ -593,8 +970,9 @@ class CertifiedAtlas:
         robust_norm: Optional[int] = None,
         maxiter: Optional[int] = None,
         tol: Optional[float] = None,
-        fixed_dims: Optional[np.ndarray] = None
-    ) -> Tuple[Optional[np.ndarray], float]:
+        fixed_dims: Optional[np.ndarray] = None,
+        incumbent_upper_bound: float = np.inf,
+    ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         """
         Project point x0 onto the (optionally eroded) polytope.
 
@@ -640,47 +1018,120 @@ class CertifiedAtlas:
             A, b, center, d, delta, robust_norm, eps_i
         )
         if A_full is None:
-            return None, np.inf
+            profile = self._build_decode_profile(
+                mode="heuristic",
+                exact_fallback_used=False,
+                nodes_visited=0,
+                nodes_pruned=0,
+                solver_calls=0,
+                product_size=self._ohe_product_size(self.ohe_slices),
+                heuristic_success=False,
+            )
+            return None, np.inf, profile
 
-        # Dispatch: CVXPY for L2/L1, or SLSQP for L∞
-        if self.norm in (1, 2) and CVXPY_AVAILABLE:
-            x_proj, dist = self._project_cvxpy(x0, A_full, b_full, center, box_eps, ball_eps,
-                                               fixed_dims=fixed_dims,
-                                               ohe_slices=self.ohe_slices)
+        x_proj, dist = self._solve_projection_subproblem(
+            x0,
+            A_full,
+            b_full,
+            center,
+            box_eps,
+            ball_eps,
+            maxiter=maxiter,
+            tol=tol,
+            fixed_dims=fixed_dims,
+            ohe_slices=self.ohe_slices,
+            fixed_ohe_assignments=None,
+        )
+
+        if x_proj is None:
+            profile = self._build_decode_profile(
+                mode="heuristic",
+                exact_fallback_used=False,
+                nodes_visited=0,
+                nodes_pruned=0,
+                solver_calls=0,
+                product_size=self._ohe_product_size(self.ohe_slices),
+                heuristic_success=False,
+            )
+            return None, np.inf, profile
+
+        if self.ohe_slices:
+            x_proj, dist, decode_profile = self._polytope_aware_decode(
+                x_proj,
+                x0,
+                A_full,
+                b_full,
+                center,
+                box_eps,
+                ball_eps,
+                maxiter=maxiter,
+                tol=tol,
+                fixed_dims=fixed_dims,
+                incumbent_upper_bound=incumbent_upper_bound,
+            )
         else:
-            x_proj, dist = self._project_slsqp(x0, A_full, b_full, center, box_eps, maxiter, tol,
-                                               fixed_dims=fixed_dims,
-                                               ohe_slices=self.ohe_slices)
-
-        # If OHE slices are set, snap the continuous solution to the nearest
-        # certified discrete vertex. Reject the polytope if none exists.
-        if x_proj is not None and self.ohe_slices:
-            x_proj, dist = self._polytope_aware_decode(
-                x_proj, x0, A_full, b_full, center, ball_eps
+            decode_profile = self._build_decode_profile(
+                mode="heuristic",
+                exact_fallback_used=False,
+                nodes_visited=0,
+                nodes_pruned=0,
+                solver_calls=0,
+                product_size=1,
+                heuristic_success=True,
             )
 
-        return x_proj, dist
+        return x_proj, dist, decode_profile
 
     def _make_project_fn(self, x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
-        """Return a timed projection closure and a mutable [time_s] accumulator."""
+        """Return a timed projection closure plus decode profiling accumulators."""
         projection_time_s = [0.0]
+        best_projection_dist = [np.inf]
+        profile_recorded = [False]
+        best_decode_profile = [self._build_decode_profile(
+            mode="heuristic",
+            exact_fallback_used=False,
+            nodes_visited=0,
+            nodes_pruned=0,
+            solver_calls=0,
+            product_size=self._ohe_product_size(self.ohe_slices),
+            heuristic_success=not bool(self.ohe_slices),
+        )]
 
-        def project_fn(idx: int) -> Tuple[Optional[np.ndarray], float]:
+        def project_fn(idx: int, incumbent_upper_bound: float) -> Tuple[Optional[np.ndarray], float]:
             t0 = time.perf_counter()
-            out = self._project_onto_polytope(
+            x_proj, dist, decode_profile = self._project_onto_polytope(
                 x_query, bd['lA'][idx], bd['lbias'][idx], bd['X'][idx],
                 eps_i=float(bd['eps'][idx]),
                 delta=delta, robust_norm=robust_norm,
                 maxiter=solver_maxiter, fixed_dims=fixed_dims,
+                incumbent_upper_bound=incumbent_upper_bound,
             )
             projection_time_s[0] += time.perf_counter() - t0
-            return out
+            improved_dist = dist < best_projection_dist[0]
+            if (
+                improved_dist
+                or not profile_recorded[0]
+                or (
+                    not np.isfinite(best_projection_dist[0])
+                    and bool(decode_profile.get("decode_exact_fallback_used", False))
+                    and (
+                        not bool(best_decode_profile[0].get("decode_exact_fallback_used", False))
+                        or int(decode_profile.get("decode_solver_calls", 0))
+                        > int(best_decode_profile[0].get("decode_solver_calls", 0))
+                    )
+                )
+            ):
+                best_decode_profile[0] = decode_profile
+                profile_recorded[0] = True
+            if improved_dist:
+                best_projection_dist[0] = dist
+            return x_proj, dist
 
-        return project_fn, projection_time_s
+        return project_fn, projection_time_s, best_decode_profile
 
     def _search_bvh(self, x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims):
         """Branch-and-bound BVH search. Returns (x_cf, dist, anchor_idx, n_qp, profiling_dict)."""
-        project_fn, projection_time_s = self._make_project_fn(
+        project_fn, projection_time_s, best_decode_profile = self._make_project_fn(
             x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims)
         bvh_stats: Dict[str, float] = {}
         bvh = self.bvh_indices[target_class]
@@ -697,11 +1148,12 @@ class CertifiedAtlas:
             "max_queue_size": bvh_stats.get("max_queue_size", np.nan),
             "n_candidates_considered": bvh_stats.get("n_candidates_considered", np.nan),
         }
+        profiling.update(best_decode_profile[0])
         return x_cf, dist, anchor_idx, n_qp, profiling
 
     def _search_sorted(self, x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims):
         """Sorted lower-bound scan. Returns (x_cf, dist, anchor_idx, n_qp, profiling_dict)."""
-        project_fn, projection_time_s = self._make_project_fn(
+        project_fn, projection_time_s, best_decode_profile = self._make_project_fn(
             x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims)
         sorted_stats: Dict[str, float] = {}
         bvh = self.bvh_indices[target_class]
@@ -721,6 +1173,7 @@ class CertifiedAtlas:
             "n_candidates_pruned_by_bound": sorted_stats.get("n_candidates_pruned_by_bound", np.nan),
             "best_lower_bound_at_termination": sorted_stats.get("best_lower_bound_at_termination", np.nan),
         }
+        profiling.update(best_decode_profile[0])
         return x_cf, dist, anchor_idx, n_qp, profiling
 
     def find_counterfactual(
@@ -741,7 +1194,7 @@ class CertifiedAtlas:
         x_query = np.asarray(x_query).flatten()
         bd = self.bounds[target_class]
         resolved_method = method or self.default_query_method
-        profiling: Dict[str, float] = {
+        profiling: Dict[str, ProfileValue] = {
             "method": resolved_method,
             "delta": float(delta),
         }

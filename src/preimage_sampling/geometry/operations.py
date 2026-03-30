@@ -1,9 +1,21 @@
 """Geometric operations on polytope collections."""
 
-from shapely.geometry import Polygon, MultiPolygon
-from shapely.ops import unary_union
+from __future__ import annotations
+
+try:
+    from shapely.geometry import Polygon, MultiPolygon
+    from shapely.ops import unary_union
+except ImportError:  # pragma: no cover - optional dependency for 2D visualization only
+    Polygon = None
+    MultiPolygon = None
+    unary_union = None
 
 from .polytopes import make_polygon
+
+
+def _require_shapely() -> None:
+    if Polygon is None or MultiPolygon is None or unary_union is None:
+        raise ImportError("shapely is required for polygon union utilities.")
 
 
 def build_class_union(
@@ -38,6 +50,7 @@ def build_class_union(
         The union of all valid polytopes for this class.
         Returns an empty Polygon if no valid polytopes exist.
     """
+    _require_shapely()
     import numpy as np
 
     bd = bounds[label]
@@ -82,6 +95,7 @@ def refine_unions_by_priority(
     dict[int, Polygon | MultiPolygon]
         Refined unions with overlaps removed according to priority.
     """
+    _require_shapely()
     if priority_order is None:
         priority_order = sorted(unions.keys())
 
@@ -120,6 +134,7 @@ def compute_overlap_matrix(unions: dict[int, Polygon | MultiPolygon]) -> dict:
         - 'overlap': 2D array of pairwise overlap areas
         - 'labels': list of class labels in order
     """
+    _require_shapely()
     labels = sorted(unions.keys())
     n = len(labels)
     overlap = [[0.0] * n for _ in range(n)]

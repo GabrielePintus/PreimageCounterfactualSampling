@@ -196,7 +196,7 @@ class BVHIndex:
     def query_nearest(
         self,
         x: np.ndarray,
-        project_fn: Callable[[int], Tuple[Optional[np.ndarray], float]],
+        project_fn: Callable[[int, float], Tuple[Optional[np.ndarray], float]],
         stats_out: Optional[Dict[str, float]] = None,
     ) -> Tuple[Optional[np.ndarray], float, Optional[int], int]:
         """
@@ -211,7 +211,8 @@ class BVHIndex:
         x : np.ndarray
             Query point, shape (d,).
         project_fn : callable
-            Function that takes a polytope index and returns (projected_point, distance).
+            Function that takes a polytope index and the current incumbent
+            distance and returns (projected_point, distance).
             Should return (None, inf) if projection fails.
 
         Returns
@@ -250,7 +251,7 @@ class BVHIndex:
             if node.is_leaf():
                 n_leaves_visited += 1
                 # Project onto this polytope
-                point, dist = project_fn(node.polytope_idx)
+                point, dist = project_fn(node.polytope_idx, best_dist)
                 n_projections += 1
 
                 if dist < best_dist:
@@ -306,7 +307,7 @@ class BVHIndex:
         self,
         x: np.ndarray,
         eps_array: np.ndarray,
-        project_fn: Callable[[int], Tuple[Optional[np.ndarray], float]],
+        project_fn: Callable[[int, float], Tuple[Optional[np.ndarray], float]],
         atlas_norm: int = 2,
         stats_out: Optional[Dict[str, float]] = None,
     ) -> Tuple[Optional[np.ndarray], float, Optional[int], int]:
@@ -333,7 +334,8 @@ class BVHIndex:
         eps_array : np.ndarray
             Per-polytope epsilon values, shape (n_polytopes,).
         project_fn : callable
-            Function that takes a polytope index and returns (projected_point, distance).
+            Function that takes a polytope index and the current incumbent
+            distance and returns (projected_point, distance).
         atlas_norm : int or float
             The Lp norm used for the certification ball. Default 2.
 
@@ -364,7 +366,7 @@ class BVHIndex:
                 n_pruned_by_bound = int(len(sorted_idx) - n_projections)
                 best_lower_bound_at_termination = float(lower_bounds[i])
                 break  # All remaining polytopes have lb >= best_dist — prune
-            point, dist = project_fn(int(i))
+            point, dist = project_fn(int(i), best_dist)
             n_projections += 1
             if dist < best_dist:
                 best_dist = dist

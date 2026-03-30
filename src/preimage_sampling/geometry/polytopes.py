@@ -1,7 +1,13 @@
 """Polytope construction and basic operations."""
 
+from __future__ import annotations
+
 import numpy as np
-from shapely.geometry import Polygon
+
+try:
+    from shapely.geometry import Polygon
+except ImportError:  # pragma: no cover - optional dependency for 2D visualization only
+    Polygon = None
 
 from .conversion import halfspace_to_vertices
 
@@ -73,6 +79,9 @@ def make_polygon(
         A shapely Polygon if the intersection is valid and non-degenerate,
         None otherwise.
     """
+    if Polygon is None:
+        raise ImportError("shapely is required for polygon construction utilities.")
+
     # Get box constraints for the epsilon ball
     A_box, b_box = ball_box_constraints(x0, eps)
 
