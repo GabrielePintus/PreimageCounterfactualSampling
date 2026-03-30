@@ -100,7 +100,7 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
     def compute_eps(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
         from scipy.spatial.distance import cdist
 
-        X = np.asarray(X, dtype=float)
+        X = np.asarray(X)
         y = np.asarray(y)
         N = len(X)
         eps = np.zeros(N)

@@ -8,6 +8,7 @@ Interactive notebooks for training evaluation and counterfactual generation demo
 - `2`: preimage approximation and sampling walkthrough.
 - `3.x`: spiral/MNIST sampling experiments.
 - `5.x`: Adult dataset counterfactual baselines and modular method comparisons.
+- `6.x`: benchmark analysis notebooks.
 
 ## Current Adult Counterfactual Series
 
@@ -22,3 +23,8 @@ Interactive notebooks for training evaluation and counterfactual generation demo
 - Run cells top-to-bottom in a fresh kernel.
 - Some notebooks expect checkpoints under `../checkpoints/`.
 - For k-medoids cells, install `scikit-learn-extra`.
+
+## Benchmark Analysis
+
+- `6.1 - Benchmark analysis.ipynb`: earlier single-file benchmark analysis notebook.
+- `6.2 - Multi-dataset benchmark analysis.ipynb`: new multi-dataset analysis notebook for the meeting results.

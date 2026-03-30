@@ -1,5 +1,6 @@
 """LightningModule wrapper for classification models."""
 
+import torch
 import torch.nn as nn
 import lightning as L
 from torch.optim import AdamW
@@ -36,11 +37,17 @@ class LitClassifier(L.LightningModule):
         weight_decay: float = 1e-4,
         warmup_steps: int = 500,
         final_lr: float = 1e-6,
+        class_weights: list[float] | None = None,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
         self.model = model
-        self.criterion = nn.CrossEntropyLoss()
+        weight_tensor = None
+        if class_weights is not None:
+            weight_tensor = torch.tensor(class_weights, dtype=torch.float32)
+            if weight_tensor.ndim != 1:
+                raise ValueError("class_weights must be a 1D sequence of per-class weights")
+        self.criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
     def forward(self, x):
         return self.model(x)

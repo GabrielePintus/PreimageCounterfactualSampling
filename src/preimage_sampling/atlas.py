@@ -283,6 +283,86 @@ class CertifiedAtlas:
 
         return A_full, b_full, box_eps, ball_eps
 
+    def _projection_initial_guess(
+        self,
+        x0: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        ball_eps: float,
+        fixed_dims: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Build a geometry-aware warm start for polytope projection.
+
+        The initializer starts from the anchor center, pins any fixed query
+        coordinates, moves toward the query along the corresponding segment
+        until it reaches the simple trust region (box / ball), and retracts
+        along that segment if the reference point is already halfspace-feasible.
+        """
+        ref = center.astype(np.float64, copy=True)
+        if fixed_dims is not None and len(fixed_dims) > 0:
+            ref[fixed_dims] = x0[fixed_dims]
+
+        direction = x0 - ref
+        ref_offset = ref - center
+
+        if self.norm == np.inf:
+            if np.max(np.abs(ref_offset)) > box_eps + 1e-12:
+                return ref
+            step_norm = float(np.max(np.abs(direction)))
+            t_region = 0.0 if step_norm <= 1e-15 else min(1.0, box_eps / step_norm)
+        elif self.norm == 2:
+            ref_norm = float(np.linalg.norm(ref_offset, ord=2))
+            remaining_sq = ball_eps ** 2 - ref_norm ** 2
+            step_norm = float(np.linalg.norm(direction, ord=2))
+            if remaining_sq <= 0.0 or step_norm <= 1e-15:
+                t_region = 0.0
+            else:
+                t_region = min(1.0, np.sqrt(max(0.0, remaining_sq)) / step_norm)
+        elif self.norm == 1:
+            ref_norm = float(np.linalg.norm(ref_offset, ord=1))
+            remaining = ball_eps - ref_norm
+            step_norm = float(np.linalg.norm(direction, ord=1))
+            if remaining <= 0.0 or step_norm <= 1e-15:
+                t_region = 0.0
+            else:
+                t_region = min(1.0, remaining / step_norm)
+        else:
+            ref_norm = float(np.linalg.norm(ref_offset, ord=self.norm))
+            remaining = ball_eps - ref_norm
+            step_norm = float(np.linalg.norm(direction, ord=self.norm))
+            if remaining <= 0.0 or step_norm <= 1e-15:
+                t_region = 0.0
+            else:
+                t_region = min(1.0, remaining / step_norm)
+
+        candidate = ref + t_region * direction
+        if fixed_dims is not None and len(fixed_dims) > 0:
+            candidate[fixed_dims] = x0[fixed_dims]
+
+        margins_ref = A_full @ ref + b_full
+        if np.min(margins_ref) >= -1e-9:
+            step = candidate - ref
+            slopes = A_full @ step
+            harmful = slopes < 0.0
+            alpha = 1.0
+            if np.any(harmful):
+                alpha = min(1.0, float(np.min(margins_ref[harmful] / (-slopes[harmful]))))
+            alpha = max(0.0, alpha)
+            if alpha < 1.0:
+                alpha *= 0.999  # stay slightly inside the active halfspace
+            candidate = ref + alpha * step
+            if fixed_dims is not None and len(fixed_dims) > 0:
+                candidate[fixed_dims] = x0[fixed_dims]
+            return candidate
+
+        if np.min(A_full @ candidate + b_full) >= -1e-9:
+            return candidate
+
+        return ref
+
     def _project_cvxpy(
         self,
         x0: np.ndarray,
@@ -299,6 +379,9 @@ class CertifiedAtlas:
         """
         d = len(x0)
         z = cp.Variable(d)
+        z.value = self._projection_initial_guess(
+            x0, A_full, b_full, center, box_eps, ball_eps, fixed_dims=fixed_dims
+        )
 
         objective = cp.Minimize(cp.sum_squares(z - x0))
 
@@ -336,7 +419,7 @@ class CertifiedAtlas:
         for i, _solver in enumerate(solvers):
             last = (i == len(solvers) - 1)
             try:
-                problem.solve(solver=_solver, verbose=False)
+                problem.solve(solver=_solver, verbose=False, warm_start=True)
                 # Accept inaccurate only from the last solver (SCS) as a fallback.
                 ok_status = ('optimal', 'optimal_inaccurate') if last else ('optimal',)
                 if problem.status in ok_status and z.value is not None:
@@ -400,11 +483,9 @@ class CertifiedAtlas:
                     'jac': lambda x, s=s_, e=e_: np.eye(len(x))[s:e].sum(axis=0),
                 })
 
-        # Start from center, but snap fixed dims to their required values so the
-        # initial point already satisfies the box bounds.
-        x_init = center.copy()
-        if fixed_dims is not None:
-            x_init[fixed_dims] = x0[fixed_dims]
+        x_init = self._projection_initial_guess(
+            x0, A_full, b_full, center, box_eps, box_eps, fixed_dims=fixed_dims
+        )
 
         result = minimize(
             objective,

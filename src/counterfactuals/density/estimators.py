@@ -62,7 +62,7 @@ class KNNEstimator(BaseDensityEstimator):
         assert self._nn is not None, "Call fit() before evaluating."
         z = np.asarray(z, dtype=np.float32)
         distances, _ = self._nn.kneighbors(z)
-        dist_k = distances[:, -1].astype(np.float64)
+        dist_k = distances[:, -1]
         denom = self._n_samples * self._eta_d * np.maximum(dist_k, 1e-300)
         density = self.n_neighbors / denom
         return np.clip(density, 0.0, np.finfo(np.float32).max).astype(np.float32)

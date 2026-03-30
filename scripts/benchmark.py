@@ -284,9 +284,9 @@ def _build_certified_atlas_method(
         )
     batch_size = int(params.get("batch_size", 256))
     atlas_subsample_method = str(params.get("atlas_subsample_method", "kmedoids")).lower()
-    if atlas_subsample_method not in {"kmedoids", "fps", "kmeans"}:
+    if atlas_subsample_method not in {"kmedoids", "bandit_kmedoids", "fps", "kmeans", "density_flat_kmedoids"}:
         raise ValueError(
-            f"my_method.atlas_subsample_method must be one of {{'kmedoids', 'fps', 'kmeans'}}, "
+            f"my_method.atlas_subsample_method must be one of {{'kmedoids', 'bandit_kmedoids', 'fps', 'kmeans', 'density_flat_kmedoids'}}, "
             f"got {atlas_subsample_method!r}"
         )
     solver_maxiter = int(params.get("solver_maxiter", 500))

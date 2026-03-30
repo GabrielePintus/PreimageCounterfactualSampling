@@ -57,7 +57,7 @@ class WachterMethod(BaseCounterfactualMethod):
     def generate(self, x: np.ndarray, target_class: Optional[int] = None) -> CounterfactualResult:
         if not self._is_fitted or self._feature_scale is None:
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
-        x_query = np.asarray(x, dtype=np.float32).reshape(-1).astype(np.float64)
+        x_query = np.asarray(x, dtype=np.float64).reshape(-1)
         target_class = self.resolve_target_class(x=x_query, target_class=target_class)
         scale = self._feature_scale
 
@@ -91,7 +91,7 @@ class WachterMethod(BaseCounterfactualMethod):
                     jac=None,          # forward-difference numerical gradient
                     options={"maxiter": self.max_iter, "ftol": 1e-12, "gtol": 1e-7},
                 )
-                x_cand = res.x.astype(np.float64)
+                x_cand = res.x
                 y_cand = int(self.model.predict(x_cand[None, :])[0])
                 if y_cand == target_class:
                     dist = float(np.linalg.norm(x_cand - x_query, ord=2))
@@ -111,4 +111,3 @@ class WachterMethod(BaseCounterfactualMethod):
             distance=best_dist if best_success else 0.0,
             metadata={"target_class": target_class, "lambda": used_lambda},
         )
-

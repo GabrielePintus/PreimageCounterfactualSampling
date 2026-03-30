@@ -153,10 +153,8 @@ class AdultDataModule(L.LightningDataModule):
         # StandardScaler on numerical positions, fit on train only.
         num_pos = [i for i, t in enumerate(OHE_FEATURE_TYPES) if t == "numerical"]
         self.scaler = StandardScaler()
-        self.scaler.fit(X[train_idx][:, num_pos].astype(np.float64))
-        X[:, num_pos] = self.scaler.transform(
-            X[:, num_pos].astype(np.float64)
-        ).astype(np.float32)
+        self.scaler.fit(X[train_idx][:, num_pos])
+        X[:, num_pos] = self.scaler.transform(X[:, num_pos]).astype(np.float32)
 
         X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
 

@@ -96,8 +96,8 @@ class HELOCDataModule(L.LightningDataModule):
 
         # StandardScaler fitted on train only
         self.scaler = StandardScaler()
-        self.scaler.fit(X[train_idx].astype(np.float64))
-        X = self.scaler.transform(X.astype(np.float64)).astype(np.float32)
+        self.scaler.fit(X[train_idx])
+        X = self.scaler.transform(X).astype(np.float32)
 
         X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
         y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]

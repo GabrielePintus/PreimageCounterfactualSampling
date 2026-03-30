@@ -31,8 +31,8 @@ class BaseCounterfactualMethod(ABC):
         k_per_class: Optional[int] = None,
         subsample_method: str = "kmedoids",
     ):
-        if subsample_method not in {"kmedoids", "kmeans", "fps"}:
-            raise ValueError("subsample_method must be one of {'kmedoids', 'kmeans', 'fps'}")
+        if subsample_method not in {"kmedoids", "bandit_kmedoids", "kmeans", "fps", "density_flat_kmedoids"}:
+            raise ValueError("subsample_method must be one of {'kmedoids', 'bandit_kmedoids', 'kmeans', 'fps', 'density_flat_kmedoids'}")
         self.model = model
         self.random_seed = random_seed
         self.k_per_class = k_per_class

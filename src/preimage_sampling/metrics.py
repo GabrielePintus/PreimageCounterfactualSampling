@@ -73,7 +73,7 @@ class TabularCounterfactualEvaluator:
         # Feature differences
         diff_num = np.abs(x_orig_np[self.num_cols] - x_cf_np[self.num_cols])
         # Categorical differences (Hamming / Mismatch indicator)
-        diff_cat = (x_orig_np[self.cat_cols] != x_cf_np[self.cat_cols]).astype(float)
+        diff_cat = x_orig_np[self.cat_cols] != x_cf_np[self.cat_cols]
         
         # L1: Sum of absolute differences
         # Normalize continuous difference by training standard deviation (similar to Gower)
@@ -101,4 +101,3 @@ class TabularCounterfactualEvaluator:
         metrics['plausibility_lof_score'] = float(self.lof.score_samples(z_cf)[0])
         
         return metrics
-

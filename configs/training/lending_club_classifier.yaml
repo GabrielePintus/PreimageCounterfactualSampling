@@ -46,7 +46,7 @@ model:
           - categorical  # home_ownership
           - categorical  # verification_status
         cardinalities: [2, 7, 5, 3]  # term (2), grade (7), home_ownership (5), verification_status (3)
-        hidden_dims: [64, 32]
+        hidden_dims: [128, 32]
         num_classes: 2
         dropout: 0.1
 
@@ -54,6 +54,9 @@ model:
     final_lr: 1e-6
     weight_decay: 1e-4
     warmup_steps: 200
+    # Inverse-frequency weights from the current train split (26301 vs 4522),
+    # normalized to keep the average weight near 1.
+    class_weights: [0.586, 3.408]
 
 data:
   class_path: training.datamodules.lending_club.LendingClubDataModule

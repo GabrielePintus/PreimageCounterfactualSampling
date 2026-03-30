@@ -36,8 +36,8 @@ class RedundancyMetric(MetricInterface):
         target_class = int(context["target_class"])
         predict_fn = context["predict_fn"]  # callable: (n, d) → (n,) int array
 
-        x_orig = np.asarray(x_orig, dtype=np.float64)
-        x_cf = np.asarray(x_cf, dtype=np.float64)
+        x_orig = np.asarray(x_orig, dtype=np.float32)
+        x_cf = np.asarray(x_cf, dtype=np.float32)
 
         changed = np.where(np.abs(x_cf - x_orig) > self.atol)[0]
         if len(changed) == 0:

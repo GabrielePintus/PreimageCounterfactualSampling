@@ -49,15 +49,15 @@ class MADWeightedL1Proximity(MetricInterface):
         input_types: list[str],
         atol: float = 1e-6,
     ) -> None:
-        self.mad_weights = np.asarray(mad_weights, dtype=np.float64)
+        self.mad_weights = np.asarray(mad_weights, dtype=np.float32)
         self.input_types = input_types
         self.atol = atol
 
     def evaluate(self, x_orig: np.ndarray, x_cf: np.ndarray, context=None) -> float:
         del context
-        x_orig = np.asarray(x_orig, dtype=np.float64)
-        x_cf = np.asarray(x_cf, dtype=np.float64)
-        per_feature = np.empty(len(x_orig))
+        x_orig = np.asarray(x_orig, dtype=np.float32)
+        x_cf = np.asarray(x_cf, dtype=np.float32)
+        per_feature = np.empty(len(x_orig), dtype=np.float32)
         for i, t in enumerate(self.input_types):
             if t == "numerical":
                 per_feature[i] = abs(x_cf[i] - x_orig[i]) / self.mad_weights[i]
