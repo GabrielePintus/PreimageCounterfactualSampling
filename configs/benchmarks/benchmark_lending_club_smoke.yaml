@@ -15,7 +15,7 @@ model:
     dropout: 0.1
 
 sampling:
-  n_queries: 100
+  n_queries: 50
 
 timeout_per_sample: 60   # seconds per (method, query)
 
@@ -31,13 +31,13 @@ methods:
       norm: 1
 
   # --- DiCE ---
-  - name: dice
-    run_name: dice
-    params:
-      total_cfs: 1
-      diversity_weight: 0.0
-      proximity_weight: 1.0
-      min_iter: 50
+  # - name: dice
+  #   run_name: dice
+  #   params:
+  #     total_cfs: 1
+  #     diversity_weight: 0.0
+  #     proximity_weight: 1.0
+  #     min_iter: 50
 
   # --- Growing Spheres ---
   - name: growing_spheres
@@ -56,5 +56,6 @@ methods:
       norm: 1
       eps_alpha: 0.25
       batch_size: 256
-      subsample_method: fps
+      subsample_method: kmedoids
       k_per_class: 200
+

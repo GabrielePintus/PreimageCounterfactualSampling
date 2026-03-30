@@ -20,6 +20,12 @@ Classifier and autoencoder training configs for `python train.py fit --config co
 
 Counterfactual benchmark configs for `python scripts/benchmark.py --config configs/benchmarks/<name>.yaml`.
 
+- `benchmark_adult_meeting.yaml`
+- `benchmark_compas_meeting.yaml`
+- `benchmark_german_credit_meeting.yaml`
+- `benchmark_give_me_some_credit_meeting.yaml`
+- `benchmark_heloc_meeting.yaml`
+- `benchmark_lending_club_meeting.yaml`
 - `benchmark_adult.yaml`
 - `benchmark_adult_main.yaml`
 - `benchmark_adult_cpp.yaml`

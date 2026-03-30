@@ -1,15 +1,16 @@
 seed: 42
 
 dataset:
-  name: heloc
-  params: {}
+  name: german_credit
+  params:
+    data_dir: data/
 
 model:
   name: tabular_classifier_ckpt
   params:
-    checkpoint: checkpoints/heloc_classifier/best.ckpt
+    checkpoint: checkpoints/german_credit_classifier/best.ckpt
     device: cuda
-    dataset_module: heloc
+    dataset_module: german_credit
     hidden_dims: [64, 32]
     dropout: 0.1
 
@@ -19,7 +20,7 @@ sampling:
 timeout_per_sample: 60   # seconds per (method, query)
 
 output:
-  path: results/benchmark_heloc_smoke.parquet
+  path: results/benchmark_german_credit_meeting.parquet
 
 methods:
 
@@ -29,14 +30,14 @@ methods:
     params:
       norm: 1
 
-  # # --- DiCE ---
-  # - name: dice
-  #   run_name: dice
-  #   params:
-  #     total_cfs: 1
-  #     diversity_weight: 0.0
-  #     proximity_weight: 1.0
-  #     min_iter: 50
+  # --- DiCE ---
+  - name: dice
+    run_name: dice
+    params:
+      total_cfs: 1
+      diversity_weight: 0.0
+      proximity_weight: 1.0
+      min_iter: 50
 
   # --- Growing Spheres ---
   - name: growing_spheres
@@ -46,14 +47,25 @@ methods:
       radius_step: 0.15
       n_in_layer: 512
 
+  # --- FACE ---
+  - name: face
+    run_name: face
+    params:
+      density_estimator:
+        name: kde
+      tp: 0.5
+      epsilon: 2.0
+      subsample_method: kmedoids
+      k_per_class: 200
+
   # --- Certified Preimage Counterfactuals (CPP) ---
   - name: cpp
     run_name: cpp
     params:
-      checkpoint: checkpoints/heloc_classifier/best.ckpt
+      checkpoint: checkpoints/german_credit_classifier/best.ckpt
       device: cuda
       norm: 1
-      eps_alpha: 0.35
+      eps_alpha: 0.25
       batch_size: 256
       subsample_method: kmedoids
       k_per_class: 200

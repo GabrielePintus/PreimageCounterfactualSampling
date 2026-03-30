@@ -30,14 +30,14 @@ methods:
     params:
       norm: 1
 
-  # --- DiCE ---
-  - name: dice
-    run_name: dice
-    params:
-      total_cfs: 1
-      diversity_weight: 0.0
-      proximity_weight: 1.0
-      min_iter: 50
+  # # --- DiCE ---
+  # - name: dice
+  #   run_name: dice
+  #   params:
+  #     total_cfs: 1
+  #     diversity_weight: 0.0
+  #     proximity_weight: 1.0
+  #     min_iter: 50
 
   # --- Growing Spheres ---
   - name: growing_spheres
@@ -56,5 +56,5 @@ methods:
       norm: 1
       eps_alpha: 0.25
       batch_size: 256
-      subsample_method: kmeans
+      subsample_method: kmedoids
       k_per_class: 200
