@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from .base_dataset import BaseDataset
 
@@ -231,6 +232,56 @@ class AdultDataset(BaseDataset):
         self._x_train = x_train.cpu().numpy().astype(np.float32)
         self._y_train = y_train.cpu().numpy().astype(np.int64)
         self._x_test = x_test.cpu().numpy().astype(np.float32)
+        self._y_test = y_test.cpu().numpy().astype(np.int64)
+        self._loaded = True
+
+    def get_train(self) -> tuple[np.ndarray, np.ndarray]:
+        self._check_loaded()
+        return self._x_train, self._y_train
+
+    def get_test(self) -> tuple[np.ndarray, np.ndarray]:
+        self._check_loaded()
+        return self._x_test, self._y_test
+
+
+class MNISTDataset(BaseDataset):
+    """Adapter that wraps the MNIST LightningDataModule and flattens images."""
+
+    def __init__(self, data_dir: str = "data/", seed: int = 42):
+        super().__init__()
+        self.data_dir = data_dir
+        self.seed = seed
+        self._x_train: np.ndarray
+        self._y_train: np.ndarray
+        self._x_test: np.ndarray
+        self._y_test: np.ndarray
+
+    def load(self) -> None:
+        from training.datamodules.mnist import MNISTDataModule
+
+        dm = MNISTDataModule(
+            data_dir=self.data_dir,
+            batch_size=256,
+            val_size=5000,
+            num_workers=0,
+            augment=False,
+        )
+        dm.setup()
+        train_subset = dm.train_ds
+        if hasattr(train_subset, "tensors"):
+            x_train, y_train = train_subset.tensors
+            if x_train.ndim == 4:
+                x_train = x_train[:, 0]
+        else:
+            train_base = train_subset.dataset
+            train_idx = torch.as_tensor(train_subset.indices, dtype=torch.long)
+            x_train = train_base.data[train_idx].float().div(255.0)
+            y_train = train_base.targets[train_idx]
+        x_test, y_test = dm.test_ds.data, dm.test_ds.targets
+
+        self._x_train = x_train.view(x_train.shape[0], -1).cpu().numpy().astype(np.float32)
+        self._y_train = y_train.cpu().numpy().astype(np.int64)
+        self._x_test = (x_test.float().div(255.0).view(x_test.shape[0], -1).cpu().numpy().astype(np.float32))
         self._y_test = y_test.cpu().numpy().astype(np.int64)
         self._loaded = True
 

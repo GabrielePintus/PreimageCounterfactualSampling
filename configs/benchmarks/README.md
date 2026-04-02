@@ -1,0 +1,228 @@
+# Benchmark Pipeline
+
+This directory contains YAML configuration files for the counterfactual benchmark pipeline.
+Two scripts consume these configs:
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/benchmark.py` | Single dataset — one config, one output file |
+| `scripts/benchmark_multi.py` | Multiple datasets — one config, one combined output file |
+
+---
+
+## Quick Start
+
+```bash
+# Single dataset
+python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
+
+# All tabular datasets (meeting benchmark)
+python scripts/benchmark_multi.py --config configs/benchmarks/benchmark_meeting_all.yaml
+
+# Subset of datasets
+python scripts/benchmark_multi.py \
+    --config configs/benchmarks/benchmark_meeting_all.yaml \
+    --datasets adult compas
+
+# Override output path
+python scripts/benchmark_multi.py \
+    --config configs/benchmarks/benchmark_meeting_all.yaml \
+    --output results/my_run.parquet
+```
+
+---
+
+## Output
+
+Both scripts produce:
+- **`.parquet`** — flat DataFrame loaded directly by the analysis notebooks (`notebooks/6.x`).
+- **`.bmk`** — pickled `BenchmarkResult` object for programmatic access.
+
+`benchmark_multi.py` additionally writes one `.parquet` + `.bmk` per dataset
+(`<stem>_<dataset>.parquet`) alongside the combined output file.
+
+---
+
+## Single-Dataset Config Schema
+
+Used by `benchmark.py`. All fields except `dataset`, `model`, and `methods` are optional.
+
+```yaml
+seed: 42
+timeout_per_sample: 60        # seconds per (method, query); 0 = no limit
+
+dataset:
+  name: adult                 # registry key: adult | compas | german_credit |
+                              #   heloc | give_me_some_credit | lending_club | mnist
+  params:
+    data_dir: data/
+
+model:
+  name: tabular_classifier_ckpt   # or: mnist_classifier_ckpt | sklearn_mlp | torch_model
+  params:
+    checkpoint: checkpoints/adult_classifier/best.ckpt
+    device: cuda              # cpu | cuda | auto
+    dataset_module: adult     # which datamodule to load constants from
+    hidden_dims: [32, 8]
+    dropout: 0.2
+
+sampling:
+  n_queries: 50               # how many test queries (shared by all methods)
+  # MNIST only:
+  # balanced_per_class: 1
+  # target_policy: all_other_classes
+
+output:
+  path: results/benchmark_adult.parquet
+
+methods:
+  - name: nearest_neighbor    # registry key — selects the implementation
+    run_name: nn              # label used in results; defaults to name
+    params:
+      norm: 1
+      subsample_method: kmedoids
+      k_per_class: 200
+
+  - name: cpp
+    run_name: cpp
+    params:
+      checkpoint: checkpoints/adult_classifier/best.ckpt
+      device: cuda
+      norm: 1
+      eps_alpha: 0.25
+      batch_size: 256
+      subsample_method: kmedoids
+      k_per_class: 200
+```
+
+### Grid expansion
+
+Any parameter whose value is a **list** is treated as a sweep axis.
+All list parameters are expanded into a Cartesian product; the `run_name` gets a
+`_param=value` suffix for each varied parameter.
+
+```yaml
+# This single entry expands to 8 runs:
+- name: cpp
+  run_name: cpp
+  params:
+    norm: [1, 2]
+    eps_alpha: [0.15, 0.25, 0.35, 0.45]   # 2 × 4 = 8
+    k_per_class: 200                        # fixed
+```
+
+---
+
+## Multi-Dataset Config Schema
+
+Used by `benchmark_multi.py`. Methods are defined once and applied to every dataset.
+
+```yaml
+seed: 42
+output: results/benchmark_meeting_all.parquet
+timeout_per_sample: 60
+
+methods:                        # shared across all datasets
+  - name: nearest_neighbor
+    run_name: nn
+    params: { norm: 1, subsample_method: kmedoids, k_per_class: 200 }
+
+  - name: cpp
+    run_name: cpp
+    params:
+      # 'checkpoint' is auto-inherited from each dataset's model.params.checkpoint
+      device: cuda
+      norm: 1
+      eps_alpha: 0.25
+
+datasets:
+  - name: adult
+    sampling:
+      n_queries: 50
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/adult_classifier/best.ckpt
+        device: cuda
+        dataset_module: adult
+        hidden_dims: [32, 8]
+        dropout: 0.2
+
+  - name: compas
+    sampling:
+      n_queries: 50
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/compas_classifier/best.ckpt
+        device: cuda
+        dataset_module: compas
+        hidden_dims: [64, 32]
+        dropout: 0.1
+    method_overrides:           # optional: override individual params for this dataset
+      cpp:
+        eps_alpha: 0.35
+```
+
+### Auto-inherit for `cpp`
+
+If `cpp` (or `my_method`) appears in the shared methods list **without** a `checkpoint` key,
+`benchmark_multi.py` automatically copies `model.params.checkpoint` (and `device`) into it.
+This avoids repeating the checkpoint path in both `model` and `method_overrides`.
+
+### `method_overrides`
+
+A dict keyed by `run_name` (or `name`). Values are **shallow-merged** on top of the shared
+method params — individual keys are overwritten, everything else is preserved.
+
+### `dataset_params`
+
+If a dataset needs non-default `dataset.params` (e.g. `heloc` has no `data_dir`), set it
+directly on the dataset block:
+
+```yaml
+- name: heloc
+  dataset_params: {}            # overrides the default {data_dir: data/}
+  ...
+```
+
+---
+
+## Available Config Files
+
+### Multi-dataset (run with `benchmark_multi.py`)
+
+| File | Datasets | Methods | Queries |
+|------|----------|---------|---------|
+| `benchmark_meeting_all.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, cpp | 50 |
+| `benchmark_smoke_all.yaml` | compas, german_credit, heloc, give_me_some_credit, lending_club | nn, gs, cpp | 50 |
+
+### Single-dataset (run with `benchmark.py`)
+
+| File | Dataset | Purpose |
+|------|---------|---------|
+| `benchmark_adult.yaml` | adult | CPP grid search (eps_alpha × k_per_class), 200 queries |
+| `benchmark_adult_main.yaml` | adult | All-methods comparison with grid expansion, 20 queries |
+| `benchmark_adult_cpp.yaml` | adult | CPP-only grid search, 20 queries |
+| `benchmark_mnist.yaml` | mnist | Full benchmark on MNIST (balanced per-class sampling) |
+
+### Other schemas
+
+| File | Script | Purpose |
+|------|--------|---------|
+| `cpp_query_benchmark_adult.yaml` | `scripts/cpp_query_benchmark.py` | BVH vs sorted query method comparison |
+| `cpp_query_benchmark_adult_smoke.yaml` | `scripts/cpp_query_benchmark.py` | Smoke version of the above |
+| `counterfactual_experiment.yaml` | `src/.../runner.py` | Legacy experiment runner schema |
+
+---
+
+## Available Methods
+
+| Registry key | Description |
+|---|---|
+| `cpp` / `my_method` | Certified Preimage Projection (our method) |
+| `nearest_neighbor` | Closest opposite-class training point |
+| `face` | FACE: density-weighted shortest path |
+| `dice` | DiCE: gradient-based diverse counterfactuals |
+| `growing_spheres` | Growing Spheres: shell sampling |
+| `wachter` | Wachter: L-BFGS-B with validity loss |

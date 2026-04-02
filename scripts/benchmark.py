@@ -219,6 +219,8 @@ def _compute_query_metrics(
 
 def _load_dataset_constants(dataset_name: str):
     """Return (INPUT_TYPES, CARDINALITIES, OHE_FEATURE_TYPES) for the given dataset."""
+    if dataset_name == "mnist":
+        return ["numerical"] * (28 * 28), [], []
     if dataset_name == "compas":
         from training.datamodules.compas import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
     elif dataset_name == "german_credit":
@@ -234,6 +236,96 @@ def _load_dataset_constants(dataset_name: str):
     return INPUT_TYPES, CARDINALITIES, OHE_FEATURE_TYPES
 
 
+def _sample_balanced_indices(
+    y: np.ndarray,
+    per_class: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Sample up to ``per_class`` items per class without replacement."""
+    selected = []
+    for cls in np.unique(y):
+        idx = np.where(y == cls)[0]
+        if len(idx) == 0:
+            continue
+        take = min(per_class, len(idx))
+        chosen = rng.choice(idx, size=take, replace=False)
+        selected.extend(chosen.tolist())
+    return np.array(sorted(selected), dtype=np.int64)
+
+
+def _make_failure_query_result(
+    q_idx: int,
+    runtime_s: float,
+    error: str,
+    target_class: Optional[int],
+) -> QueryResult:
+    return QueryResult(
+        query_idx=int(q_idx),
+        x_cf=None,
+        y_cf=None,
+        success=False,
+        runtime_s=float(runtime_s),
+        error=error,
+        l2_distance=float("nan"),
+        l1_distance=float("nan"),
+        l0_sparsity=float("nan"),
+        mad_l1_distance=float("nan"),
+        redundancy=float("nan"),
+        target_class=(None if target_class is None else int(target_class)),
+    )
+
+
+def _build_query_tasks(
+    *,
+    dataset_name: str,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    model,
+    sampling_cfg: Dict[str, Any],
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Return (query_indices, y_true_tasks, y_orig_tasks, target_classes)."""
+    n_queries = int(sampling_cfg.get("n_queries", len(x_test)))
+    if dataset_name != "mnist":
+        n_queries = min(n_queries, len(x_test))
+        query_indices = np.sort(rng.choice(len(x_test), size=n_queries, replace=False))
+        y_orig = model.predict(x_test[query_indices])
+        return query_indices, y_test[query_indices], y_orig, None
+
+    per_class = int(sampling_cfg.get("balanced_per_class", 10))
+    target_policy = str(sampling_cfg.get("target_policy", "all_other_classes")).lower()
+    source_indices = _sample_balanced_indices(y=y_test, per_class=per_class, rng=rng)
+    if source_indices.size == 0:
+        raise ValueError("No MNIST source queries were selected.")
+
+    source_preds = model.predict(x_test[source_indices])
+    n_classes = int(model.predict_proba(x_test[source_indices[:1]]).shape[1])
+    if target_policy != "all_other_classes":
+        raise ValueError(
+            "MNIST benchmark currently supports only sampling.target_policy='all_other_classes'."
+        )
+
+    task_indices: List[int] = []
+    task_true: List[int] = []
+    task_orig: List[int] = []
+    task_targets: List[int] = []
+    for idx, source_pred in zip(source_indices, source_preds):
+        for target_class in range(n_classes):
+            if target_class == int(source_pred):
+                continue
+            task_indices.append(int(idx))
+            task_true.append(int(y_test[idx]))
+            task_orig.append(int(source_pred))
+            task_targets.append(int(target_class))
+
+    return (
+        np.asarray(task_indices, dtype=np.int64),
+        np.asarray(task_true, dtype=np.int64),
+        np.asarray(task_orig, dtype=np.int64),
+        np.asarray(task_targets, dtype=np.int64),
+    )
+
+
 # ---------------------------------------------------------------------------
 # CertifiedAtlas builder
 # ---------------------------------------------------------------------------
@@ -241,6 +333,7 @@ def _load_dataset_constants(dataset_name: str):
 def _build_certified_atlas_method(
     params: Dict[str, Any],
     model_params: Dict[str, Any],
+    dataset_name: str,
     x_train: np.ndarray,
     y_train: np.ndarray,
     x_queries: np.ndarray,
@@ -256,9 +349,7 @@ def _build_certified_atlas_method(
     """
     import torch
 
-    from models.classifiers import TabularClassifier
     from preimage_sampling import NearestOppositeClassClearanceStrategy
-    from training.datamodules.adult import CARDINALITIES, INPUT_TYPES
     from training.lit_classifier import LitClassifier
 
     from counterfactuals.methods.my_method import CertifiedAtlasMethod
@@ -291,35 +382,47 @@ def _build_certified_atlas_method(
         )
     solver_maxiter = int(params.get("solver_maxiter", 500))
     # Architecture params come from the shared model config, not method params.
-    dataset_module = str(model_params.get("dataset_module", "adult"))
+    dataset_module = str(model_params.get("dataset_module", dataset_name))
     hidden_dims = list(model_params.get("hidden_dims", [32, 8]))
     dropout = float(model_params.get("dropout", 0.2))
 
-    # Load backbone + Lightning checkpoint.
-    INPUT_TYPES, CARDINALITIES, _ = _load_dataset_constants(dataset_module)
-    backbone = TabularClassifier(
-        input_types=INPUT_TYPES,
-        cardinalities=CARDINALITIES,
-        hidden_dims=hidden_dims,
-        num_classes=2,
-        dropout=dropout,
-    )
-    lit = _load_lit_checkpoint_resilient(LitClassifier, ckpt, backbone, map_location=device)
-    model = lit.model.eval().to(device)
-
-    # Wrap the full model (Dropout included — CertifiedAtlasMethod._fit strips it for LiRPA).
-    atlas_model = TorchModelWrapper(model=model.net, device=device)
-
-    # Input space = embedding space; data is already standardized by the datamodule.
-    z_train   = x_train
+    z_train = x_train
     z_queries = x_queries
+    cat_slices = None
 
-    # OHE simplex constraints: sum(block)==1 is valid in raw OHE space.
-    cat_slices = [
-        (s, e)
-        for t, (s, e) in zip(INPUT_TYPES, model._slices)
-        if t == "categorical"
-    ] or None
+    if dataset_module == "mnist":
+        from models.classifiers import MNISTClassifier
+
+        num_classes = int(model_params.get("num_classes", 10))
+        backbone = MNISTClassifier(num_classes=num_classes)
+        lit = _load_lit_checkpoint_resilient(LitClassifier, ckpt, backbone, map_location=device)
+        model = lit.model.eval().to(device)
+        atlas_model = TorchModelWrapper(model=model, device=device)
+        cnn = True
+    else:
+        from models.classifiers import TabularClassifier
+
+        INPUT_TYPES, CARDINALITIES, _ = _load_dataset_constants(dataset_module)
+        backbone = TabularClassifier(
+            input_types=INPUT_TYPES,
+            cardinalities=CARDINALITIES,
+            hidden_dims=hidden_dims,
+            num_classes=2,
+            dropout=dropout,
+        )
+        lit = _load_lit_checkpoint_resilient(LitClassifier, ckpt, backbone, map_location=device)
+        model = lit.model.eval().to(device)
+
+        # Wrap the full model (Dropout included — CertifiedAtlasMethod._fit strips it for LiRPA).
+        atlas_model = TorchModelWrapper(model=model.net, device=device)
+
+        # OHE simplex constraints: sum(block)==1 is valid in raw OHE space.
+        cat_slices = [
+            (s, e)
+            for t, (s, e) in zip(INPUT_TYPES, model._slices)
+            if t == "categorical"
+        ] or None
+        cnn = False
 
     eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
     atlas_method = CertifiedAtlasMethod(
@@ -328,6 +431,7 @@ def _build_certified_atlas_method(
         eps_strategy=eps_strategy,
         batch_size=batch_size,
         ohe_slices=cat_slices,
+        cnn=cnn,
         default_query_method=query_method,
         solver_maxiter=solver_maxiter,
         k_per_class=k_per_class,
@@ -383,6 +487,30 @@ def _build_torch_model_from_checkpoint(
         *[m for m in net.net if not isinstance(m, torch.nn.Dropout)]
     )
     return TorchModelWrapper(model=net_no_dropout, device=device)
+
+
+def _build_mnist_model_from_checkpoint(
+    checkpoint: str,
+    device: str = "cpu",
+    num_classes: int = 10,
+    input_shape: tuple[int, ...] | None = (1, 28, 28),
+) -> "TorchModelWrapper":
+    """Load MNISTClassifier from checkpoint and optionally wrap flat inputs."""
+    from counterfactuals.models.torch_model import TorchModelWrapper
+    from models.classifiers import MNISTClassifier
+    from training.lit_classifier import LitClassifier
+
+    requested_device = device
+    device = _normalize_torch_device(device)
+    if str(requested_device).strip().lower() != device:
+        print(f"[INFO] model device normalized: {requested_device!r} -> {device!r}")
+
+    backbone = MNISTClassifier(num_classes=num_classes)
+    lit = _load_lit_checkpoint_resilient(
+        LitClassifier, checkpoint, backbone, map_location=device
+    )
+    net = lit.model.eval().to(device)
+    return TorchModelWrapper(model=net, device=device, input_shape=input_shape)
 
 
 # ---------------------------------------------------------------------------
@@ -485,25 +613,22 @@ def _build_shared_preprocessing(cfg: Dict[str, Any], seed: int):
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Core per-dataset runner (importable by benchmark_multi.py)
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Benchmark counterfactual methods on a single dataset."
-    )
-    parser.add_argument("--config", required=True, help="Path to YAML config file.")
-    parser.add_argument("--output", default=None, help="Override output Parquet path.")
-    parser.add_argument("--seed", type=int, default=None, help="Override random seed.")
-    parser.add_argument("--n_queries", type=int, default=None, help="Override number of test queries.")
-    parser.add_argument(
-        "--methods", nargs="+", default=None,
-        help="Run only these methods (space-separated names).",
-    )
-    args = parser.parse_args()
+def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
+    """Run all configured methods on a single dataset and save results.
 
-    cfg = _apply_cli_overrides(read_yaml(args.config), args)
+    Parameters
+    ----------
+    cfg:
+        Fully resolved config dict (same schema as the single-dataset YAML files).
 
+    Returns
+    -------
+    BenchmarkResult
+        The structured benchmark result (already persisted to disk).
+    """
     seed = int(cfg.get("seed", 42))
     seed_everything(seed)
     rng = np.random.default_rng(seed)
@@ -514,7 +639,7 @@ def main() -> None:
     dataset = registries["dataset"].create(ds_cfg["name"], **ds_cfg.get("params", {}))
     dataset.load()
     x_train_full, y_train_full = dataset.get_train()
-    x_test_full, _ = dataset.get_test()
+    x_test_full, y_test_full = dataset.get_test()
     n_features = x_train_full.shape[1]
 
     # --- MAD weights for MAD-normalized L1 proximity ---
@@ -542,25 +667,13 @@ def main() -> None:
     # either the full training set or a *random* subsample if n_train is set.
     sampling_cfg = cfg.get("sampling", {})
     n_train = int(sampling_cfg.get("n_train", len(x_train_full)))
-    n_queries = int(sampling_cfg.get("n_queries", len(x_test_full)))
 
     x_train, y_train = subsample_train(x_train_full, y_train_full, n_train, "random", rng)
-
-    # --- Test query selection (fixed set, shared by all methods) ---
-    n_queries = min(n_queries, len(x_test_full))
-    query_indices = np.sort(rng.choice(len(x_test_full), size=n_queries, replace=False))
-    x_queries = x_test_full[query_indices]
-    print(f"[INFO] {n_queries} test queries selected from {len(x_test_full)} test samples.")
 
     # --- Shared preprocessing for generation space ---
     transform, transform_name = _build_shared_preprocessing(cfg, seed=seed)
     transform.fit(x_train)
     x_train_gen = transform.transform(x_train)
-    x_queries_gen = transform.transform(x_queries)
-    print(
-        f"[INFO] Preprocessing: {transform_name} "
-        f"({x_train.shape[1]} -> {x_train_gen.shape[1]} dims)."
-    )
 
     ohe_blocks = None
     try:
@@ -591,6 +704,20 @@ def main() -> None:
         )
         acc = float(np.mean(model.predict(x_train) == y_train))
         print(f"[INFO] Train accuracy: {acc:.3f}")
+    elif model_cfg["name"] == "mnist_classifier_ckpt":
+        _model_params = model_cfg.get("params", {})
+        ckpt = _model_params.get("checkpoint")
+        device = _model_params.get("device", "cpu")
+        num_classes = int(_model_params.get("num_classes", 10))
+        print(f"[INFO] Loading MNISTClassifier from checkpoint: {ckpt}")
+        model = _build_mnist_model_from_checkpoint(
+            ckpt,
+            device=device,
+            num_classes=num_classes,
+            input_shape=(1, 28, 28),
+        )
+        acc = float(np.mean(model.predict(x_train) == y_train))
+        print(f"[INFO] Train accuracy: {acc:.3f}")
     else:
         model = registries["model"].create(model_cfg["name"], **model_cfg.get("params", {}))
         estimator = getattr(model, "estimator", None)
@@ -602,8 +729,22 @@ def main() -> None:
 
     model_for_methods = InverseTransformModel(base_model=model, transform=transform, ohe_blocks=ohe_blocks)
 
-    # Pre-compute original class predictions for all queries (shared across methods).
-    y_orig_all = model.predict(x_queries)
+    # --- Test task selection (fixed set, shared across methods) ---
+    query_indices, y_true_all, y_orig_all, target_classes_all = _build_query_tasks(
+        dataset_name=ds_cfg["name"],
+        x_test=x_test_full,
+        y_test=y_test_full,
+        model=model,
+        sampling_cfg=sampling_cfg,
+        rng=rng,
+    )
+    x_queries = x_test_full[query_indices]
+    x_queries_gen = transform.transform(x_queries)
+    print(f"[INFO] {len(query_indices)} benchmark tasks selected from {len(x_test_full)} test samples.")
+    print(
+        f"[INFO] Preprocessing: {transform_name} "
+        f"({x_train.shape[1]} -> {x_train_gen.shape[1]} dims)."
+    )
 
     timeout_s = int(cfg.get("timeout_per_sample", 0))
     output_path = Path(cfg.get("output", {}).get("path", "results/benchmark.parquet"))
@@ -617,6 +758,7 @@ def main() -> None:
         seed=seed,
         x_queries=x_queries,
         y_orig=y_orig_all,
+        y_true=y_true_all,
     )
 
     for method_cfg in methods_cfg:
@@ -637,6 +779,7 @@ def main() -> None:
                 method, active_model, embed_model, _, active_queries, _ = _build_certified_atlas_method(
                     params=method_params,
                     model_params=model_cfg.get("params", {}),
+                    dataset_name=ds_cfg["name"],
                     x_train=x_train,
                     y_train=y_train,
                     x_queries=x_queries,
@@ -644,19 +787,22 @@ def main() -> None:
                 )
                 build_time_s = time.perf_counter() - _t_build
                 embed_device = method_params.get("device", "cpu")
-                active_y_orig = active_model.predict(active_queries)
+                active_y_orig = y_orig_all
                 space = "raw"  # CFs are decoded back to raw feature space
             except Exception as exc:
                 print(f"  [ERROR] build failed: {exc}")
                 qrs = [
-                    QueryResult(
-                        query_idx=int(q_idx), x_cf=None, y_cf=None, success=False,
-                        runtime_s=0.0, error=f"build_error: {exc}",
-                        l2_distance=float("nan"), l1_distance=float("nan"),
-                        l0_sparsity=float("nan"), mad_l1_distance=float("nan"),
-                        redundancy=float("nan"),
+                    _make_failure_query_result(
+                        q_idx=int(q_idx),
+                        runtime_s=0.0,
+                        error=f"build_error: {exc}",
+                        target_class=(
+                            int(target_classes_all[pos])
+                            if target_classes_all is not None
+                            else 1 - int(y_orig_all[pos])
+                        ),
                     )
-                    for q_idx in query_indices
+                    for pos, q_idx in enumerate(query_indices)
                 ]
                 benchmark_result.method_results.append(MethodResult(
                     method=method_name, run_name=run_name, params=method_params,
@@ -672,14 +818,17 @@ def main() -> None:
             except Exception as exc:
                 print(f"  [ERROR] fit() failed: {exc}")
                 qrs = [
-                    QueryResult(
-                        query_idx=int(q_idx), x_cf=None, y_cf=None, success=False,
-                        runtime_s=0.0, error=f"fit_error: {exc}",
-                        l2_distance=float("nan"), l1_distance=float("nan"),
-                        l0_sparsity=float("nan"), mad_l1_distance=float("nan"),
-                        redundancy=float("nan"),
+                    _make_failure_query_result(
+                        q_idx=int(q_idx),
+                        runtime_s=0.0,
+                        error=f"fit_error: {exc}",
+                        target_class=(
+                            int(target_classes_all[pos])
+                            if target_classes_all is not None
+                            else 1 - int(y_orig_all[pos])
+                        ),
                     )
-                    for q_idx in query_indices
+                    for pos, q_idx in enumerate(query_indices)
                 ]
                 benchmark_result.method_results.append(MethodResult(
                     method=method_name, run_name=run_name, params=method_params,
@@ -696,15 +845,20 @@ def main() -> None:
         n_ok = 0
         n_failed = 0
         query_results: List[QueryResult] = []
+        task_targets = (
+            target_classes_all
+            if target_classes_all is not None
+            else np.asarray([1 - int(y) for y in active_y_orig], dtype=np.int64)
+        )
         pbar = tqdm(
-            enumerate(zip(query_indices, active_queries, active_y_orig)),
-            total=n_queries,
+            enumerate(zip(query_indices, active_queries, active_y_orig, task_targets)),
+            total=len(query_indices),
             desc=f"  {run_name}",
             unit="query",
         )
-        for pos, (q_idx, x_active, y_orig) in pbar:
+        for pos, (q_idx, x_active, y_orig, target_class) in pbar:
             x_orig_raw = x_queries[pos]   # raw feature vector, always
-            target_class = 1 - int(y_orig)
+            target_class = int(target_class)
 
             t0 = time.perf_counter()
             try:
@@ -713,6 +867,17 @@ def main() -> None:
                     timeout_s,
                 )
                 runtime_s = time.perf_counter() - t0
+                if result.x_cf is None:
+                    reason = str(result.metadata.get("reason", "no_counterfactual"))
+                    query_results.append(_make_failure_query_result(
+                        q_idx=int(q_idx),
+                        runtime_s=runtime_s,
+                        error=reason,
+                        target_class=target_class,
+                    ))
+                    n_failed += 1
+                    pbar.set_postfix(valid=n_ok, failed=n_failed)
+                    continue
                 x_cf_active = np.asarray(result.x_cf, dtype=np.float32)
 
                 # For cpp/my_method: atlas outputs are already in raw/OHE space.
@@ -758,26 +923,25 @@ def main() -> None:
                     l0_sparsity=l0,
                     mad_l1_distance=mad_l1,
                     redundancy=redundancy_val,
+                    target_class=target_class,
                 ))
                 n_ok += int(cf_success)
             except TimeoutError:
                 runtime_s = time.perf_counter() - t0
-                query_results.append(QueryResult(
-                    query_idx=int(q_idx), x_cf=None, y_cf=None, success=False,
-                    runtime_s=runtime_s, error="timeout",
-                    l2_distance=float("nan"), l1_distance=float("nan"),
-                    l0_sparsity=float("nan"), mad_l1_distance=float("nan"),
-                    redundancy=float("nan"),
+                query_results.append(_make_failure_query_result(
+                    q_idx=int(q_idx),
+                    runtime_s=runtime_s,
+                    error="timeout",
+                    target_class=target_class,
                 ))
                 n_failed += 1
             except Exception as exc:
                 runtime_s = time.perf_counter() - t0
-                query_results.append(QueryResult(
-                    query_idx=int(q_idx), x_cf=None, y_cf=None, success=False,
-                    runtime_s=runtime_s, error=str(exc),
-                    l2_distance=float("nan"), l1_distance=float("nan"),
-                    l0_sparsity=float("nan"), mad_l1_distance=float("nan"),
-                    redundancy=float("nan"),
+                query_results.append(_make_failure_query_result(
+                    q_idx=int(q_idx),
+                    runtime_s=runtime_s,
+                    error=str(exc),
+                    target_class=target_class,
                 ))
                 n_failed += 1
 
@@ -802,6 +966,28 @@ def main() -> None:
     print(f"[INFO] Saved flat parquet to {output_path}")
 
     benchmark_result.summary()
+    return benchmark_result
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Benchmark counterfactual methods on a single dataset."
+    )
+    parser.add_argument("--config", required=True, help="Path to YAML config file.")
+    parser.add_argument("--output", default=None, help="Override output Parquet path.")
+    parser.add_argument("--seed", type=int, default=None, help="Override random seed.")
+    parser.add_argument("--n_queries", type=int, default=None, help="Override number of test queries.")
+    parser.add_argument(
+        "--methods", nargs="+", default=None,
+        help="Run only these methods (space-separated names).",
+    )
+    args = parser.parse_args()
+    cfg = _apply_cli_overrides(read_yaml(args.config), args)
+    run_single_dataset(cfg)
 
 
 if __name__ == "__main__":

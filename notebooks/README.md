@@ -28,3 +28,4 @@ Interactive notebooks for training evaluation and counterfactual generation demo
 
 - `6.1 - Benchmark analysis.ipynb`: earlier single-file benchmark analysis notebook.
 - `6.2 - Multi-dataset benchmark analysis.ipynb`: new multi-dataset analysis notebook for the meeting results.
+- `6.3 - MNIST benchmark analysis.ipynb`: MNIST-specific benchmark analysis with quantitative results and example images.

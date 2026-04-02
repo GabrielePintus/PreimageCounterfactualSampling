@@ -7,6 +7,7 @@ Lightning and experiment configuration files.
 Classifier and autoencoder training configs for `python train.py fit --config configs/training/<name>.yaml`.
 
 - `mnist_classifier.yaml`
+- `mnist_classifier_benchmark.yaml`
 - `mnist_ae.yaml`
 - `spiral_classifier.yaml`
 - `adult_classifier.yaml`
@@ -18,22 +19,25 @@ Classifier and autoencoder training configs for `python train.py fit --config co
 
 ## Benchmarks (`configs/benchmarks/`)
 
-Counterfactual benchmark configs for `python scripts/benchmark.py --config configs/benchmarks/<name>.yaml`.
+Benchmark config details live in `configs/benchmarks/README.md`.
 
-- `benchmark_adult_meeting.yaml`
-- `benchmark_compas_meeting.yaml`
-- `benchmark_german_credit_meeting.yaml`
-- `benchmark_give_me_some_credit_meeting.yaml`
-- `benchmark_heloc_meeting.yaml`
-- `benchmark_lending_club_meeting.yaml`
+### Single-dataset benchmarks (`scripts/benchmark.py`)
+
 - `benchmark_adult.yaml`
 - `benchmark_adult_main.yaml`
 - `benchmark_adult_cpp.yaml`
-- `benchmark_compas_smoke.yaml`
-- `benchmark_german_credit_smoke.yaml`
-- `benchmark_heloc_smoke.yaml`
-- `benchmark_give_me_some_credit_smoke.yaml`
-- `benchmark_lending_club_smoke.yaml`
+- `benchmark_mnist.yaml`
+
+### Multi-dataset benchmarks (`scripts/benchmark_multi.py`)
+
+- `benchmark_meeting_all.yaml`
+- `benchmark_smoke_all.yaml`
+
+### CPP query benchmarks (`scripts/cpp_query_benchmark.py`)
+
 - `cpp_query_benchmark_adult.yaml`
 - `cpp_query_benchmark_adult_smoke.yaml`
+
+### Typed experiment runner (`python run_experiment.py <config_path>`)
+
 - `counterfactual_experiment.yaml`

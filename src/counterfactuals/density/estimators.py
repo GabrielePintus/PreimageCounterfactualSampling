@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import gamma, pi
+from math import exp, lgamma, log, pi
 
 import numpy as np
 from sklearn.neighbors import KernelDensity, NearestNeighbors, radius_neighbors_graph
@@ -10,7 +10,15 @@ from .base import BaseDensityEstimator
 
 def unit_ball_volume(d: int) -> float:
     """Volume of the unit ball in R^d."""
-    return (pi ** (d / 2.0)) / gamma(d / 2.0 + 1.0)
+    log_volume = log_unit_ball_volume(d)
+    if log_volume < np.log(np.finfo(np.float64).tiny):
+        return 0.0
+    return exp(log_volume)
+
+
+def log_unit_ball_volume(d: int) -> float:
+    """Log-volume of the unit ball in R^d, stable in high dimension."""
+    return (d / 2.0) * log(pi) - lgamma(d / 2.0 + 1.0)
 
 
 class KDEEstimator(BaseDensityEstimator):
@@ -49,12 +57,12 @@ class KNNEstimator(BaseDensityEstimator):
     def __init__(self, n_neighbors: int = 15) -> None:
         self.n_neighbors = n_neighbors
         self._nn: NearestNeighbors | None = None
-        self._eta_d: float = 1.0
+        self._log_eta_d: float = 0.0
         self._n_samples: int = 1
 
     def fit(self, z_train: np.ndarray) -> None:
         self._n_samples = len(z_train)
-        self._eta_d = unit_ball_volume(z_train.shape[1])
+        self._log_eta_d = log_unit_ball_volume(z_train.shape[1])
         self._nn = NearestNeighbors(n_neighbors=self.n_neighbors)
         self._nn.fit(z_train)
 
@@ -63,9 +71,15 @@ class KNNEstimator(BaseDensityEstimator):
         z = np.asarray(z, dtype=np.float32)
         distances, _ = self._nn.kneighbors(z)
         dist_k = distances[:, -1]
-        denom = self._n_samples * self._eta_d * np.maximum(dist_k, 1e-300)
-        density = self.n_neighbors / denom
-        return np.clip(density, 0.0, np.finfo(np.float32).max).astype(np.float32)
+        log_density = (
+            log(float(self.n_neighbors))
+            - log(float(self._n_samples))
+            - self._log_eta_d
+            - np.log(np.maximum(dist_k, 1e-300))
+        )
+        # FACE weights use -log(density), so keep densities in (0, 1].
+        log_density = np.clip(log_density, np.log(np.finfo(np.float32).tiny), 0.0)
+        return np.exp(log_density).astype(np.float32)
 
 
 class EpsilonBallEstimator(BaseDensityEstimator):

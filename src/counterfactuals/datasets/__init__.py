@@ -1,6 +1,6 @@
 """Dataset adapters."""
 
 from .base_dataset import BaseDataset, NumpyDataset
-from .loaders import AdultDataset, CompasDataset, GermanCreditDataset, GiveMeSomeCreditDataset, HELOCDataset, LendingClubDataset
+from .loaders import AdultDataset, CompasDataset, GermanCreditDataset, GiveMeSomeCreditDataset, HELOCDataset, LendingClubDataset, MNISTDataset
 
-__all__ = ["BaseDataset", "NumpyDataset", "AdultDataset", "CompasDataset", "GermanCreditDataset", "GiveMeSomeCreditDataset", "HELOCDataset", "LendingClubDataset"]
+__all__ = ["BaseDataset", "NumpyDataset", "AdultDataset", "CompasDataset", "GermanCreditDataset", "GiveMeSomeCreditDataset", "HELOCDataset", "LendingClubDataset", "MNISTDataset"]

@@ -216,5 +216,3 @@ class FACEMethod(BaseCounterfactualMethod):
         indices = np.where(conf_mask & density_mask)[0]
         return np.array([i for i in indices if self.conditions_fn(x_query, self._x_train[i])])
 
-
-

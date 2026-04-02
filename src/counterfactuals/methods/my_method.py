@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Optional, List, Tuple
 
 import numpy as np
@@ -15,6 +16,17 @@ from counterfactuals.core.base_classes import CounterfactualResult, BaseCounterf
 from counterfactuals.core.interfaces import ModelInterface
 from preimage_sampling.atlas import CertifiedAtlas
 from preimage_sampling.eps_strategies import EpsStrategy
+
+
+def _strip_dropout_modules(module: nn.Module) -> nn.Module:
+    """Deep-copy a module and replace all dropout layers with identities."""
+    clean = copy.deepcopy(module)
+    for name, child in list(clean.named_children()):
+        if isinstance(child, nn.Dropout):
+            setattr(clean, name, nn.Identity())
+        else:
+            setattr(clean, name, _strip_dropout_modules(child))
+    return clean
 
 
 class CertifiedAtlasMethod(BaseCounterfactualMethod):
@@ -66,8 +78,9 @@ class CertifiedAtlasMethod(BaseCounterfactualMethod):
         device = getattr(self.model, "device", torch.device("cpu"))
         device = torch.device(device)
 
-        # Strip Dropout for deterministic LiRPA certification
-        clean_module = nn.Sequential(*[m for m in module.children() if not isinstance(m, nn.Dropout)])
+        # Strip Dropout for deterministic LiRPA certification while preserving
+        # the module's original forward logic (e.g. CNN flatten/view steps).
+        clean_module = _strip_dropout_modules(module)
 
         dataset = TensorDataset(
             torch.from_numpy(self._x_train).float(),

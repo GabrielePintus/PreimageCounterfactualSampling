@@ -4,15 +4,37 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from .base_model import BaseModelWrapper
+
+
+class FlatToTensorModel(nn.Module):
+    """Wrap a module so it can consume flattened inputs."""
+
+    def __init__(self, model: nn.Module, input_shape: tuple[int, ...]):
+        super().__init__()
+        self.model = model
+        self.input_shape = tuple(int(v) for v in input_shape)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 2:
+            x = x.view(x.shape[0], *self.input_shape)
+        return self.model(x)
 
 
 class TorchModelWrapper(BaseModelWrapper):
     """Adapter around ``torch.nn.Module`` for model-agnostic methods."""
 
-    def __init__(self, model: torch.nn.Module, device: str = "cpu"):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        device: str = "cpu",
+        input_shape: tuple[int, ...] | None = None,
+    ):
         super().__init__(n_classes=None)
+        if input_shape is not None:
+            model = FlatToTensorModel(model=model, input_shape=input_shape)
         self.model = model.eval().to(device)
         self.device = device
 

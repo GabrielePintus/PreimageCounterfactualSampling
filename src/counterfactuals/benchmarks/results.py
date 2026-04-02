@@ -4,7 +4,8 @@ Hierarchy
 ---------
 BenchmarkResult
     x_queries  — shared query set, stored once
-    y_orig     — shared ground-truth labels, stored once
+    y_orig     — shared source-class labels used by the benchmark task
+    y_true     — optional ground-truth labels, stored once
     method_results: list[MethodResult]
         params        — native dict (no JSON)
         build_time_s  — once per run, not repeated per query
@@ -50,6 +51,7 @@ class QueryResult:
     l0_sparsity: float
     mad_l1_distance: float
     redundancy: float
+    target_class: Optional[int] = None
 
 
 @dataclass
@@ -72,6 +74,7 @@ class BenchmarkResult:
     seed: int
     x_queries: np.ndarray             # (n_queries, d) — stored once
     y_orig: np.ndarray                # (n_queries,) — stored once
+    y_true: Optional[np.ndarray] = None
     method_results: List[MethodResult] = field(default_factory=list)
 
     # ---------------------------------------------------------------------------
@@ -102,7 +105,7 @@ class BenchmarkResult:
         """Flatten to a DataFrame matching the legacy parquet column schema.
 
         Columns produced (identical to the old row-builder output):
-          method, query_idx, space, y_orig, y_cf, success,
+          method, query_idx, space, y_orig, source_class, y_cf, target_class, success,
           build_time_s, runtime_s, params (JSON string), error,
           l2_distance, l1_distance, l0_sparsity, mad_l1_distance, redundancy
           [x_orig_0 .. x_orig_{d-1}, x_cf_0 .. x_cf_{d-1}]  (if include_features)
@@ -121,7 +124,9 @@ class BenchmarkResult:
                     "query_idx": int(qr.query_idx),
                     "space": mr.space,
                     "y_orig": y_orig_val,
+                    "source_class": y_orig_val,
                     "y_cf": int(qr.y_cf) if qr.y_cf is not None else float("nan"),
+                    "target_class": int(qr.target_class) if qr.target_class is not None else float("nan"),
                     "success": bool(qr.success),
                     "build_time_s": float(mr.build_time_s),
                     "runtime_s": float(qr.runtime_s),
@@ -133,6 +138,8 @@ class BenchmarkResult:
                     "mad_l1_distance": float(qr.mad_l1_distance),
                     "redundancy": float(qr.redundancy),
                 }
+                if self.y_true is not None:
+                    row["y_true"] = int(self.y_true[pos])
 
                 if include_features:
                     for k in range(n_features):
@@ -221,6 +228,7 @@ class BenchmarkResult:
         first_grp = df[df["method"] == first_method].sort_values("query_idx")
         x_queries = first_grp[orig_cols].to_numpy(dtype=np.float32)
         y_orig = first_grp["y_orig"].to_numpy(dtype=np.int64)
+        y_true = first_grp["y_true"].to_numpy(dtype=np.int64) if "y_true" in first_grp.columns else None
         query_idx_order = first_grp["query_idx"].tolist()
 
         # Build an index from query_idx → position in x_queries.
@@ -259,6 +267,11 @@ class BenchmarkResult:
                     l0_sparsity=float(row.get("l0_sparsity", float("nan"))),
                     mad_l1_distance=float(row.get("mad_l1_distance", float("nan"))),
                     redundancy=float(row.get("redundancy", float("nan"))),
+                    target_class=(
+                        int(row["target_class"])
+                        if "target_class" in row and not pd.isna(row.get("target_class"))
+                        else None
+                    ),
                 ))
 
             # Sort query_results by position in x_queries so to_dataframe() aligns correctly.
@@ -278,5 +291,6 @@ class BenchmarkResult:
             seed=0,
             x_queries=x_queries,
             y_orig=y_orig,
+            y_true=y_true,
             method_results=method_results,
         )

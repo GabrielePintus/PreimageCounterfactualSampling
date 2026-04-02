@@ -69,7 +69,8 @@ $$\min_{\mathbf{z}}\; \|\mathbf{z} - \mathbf{x}_0\|_2^2 \quad \text{s.t.} \quad 
 
 Solver dispatch depends on the norm:
 - **$L_\infty$**: SLSQP (all constraints are linear, very fast)
-- **$L_2$ / $L_1$**: CVXPY with solver fallback chain OSQP → CLARABEL → SCS (handles SOCP and $L_1$ ball constraints natively)
+- **$L_2$**: CVXPY with solver fallback chain CLARABEL → OSQP → SCS
+- **$L_1$**: CVXPY with solver fallback chain OSQP → CLARABEL → SCS
 
 **3. Return the global minimum.** The counterfactual is the projection with smallest distance across all evaluated polytopes. BVH guarantees this is the global minimum over the full atlas.
 
@@ -211,22 +212,17 @@ In 2D, exact polygon area via Shapely validates the Monte Carlo estimator, which
 ## Library Structure
 
 ```
-preimage_sampling/
-├── atlas.py               # CertifiedAtlas: main API (build + query)
-├── certification/
-│   └── lirpa.py           # LiRPA bound propagation via auto_LiRPA
-├── geometry/
-│   ├── polytopes.py       # Ball/box constraints, Shapely polygon helpers
-│   └── operations.py      # Polygon union, refinement
-├── indexing/
-│   └── bvh.py             # BVH spatial index with branch-and-bound
-├── models/
-│   ├── classifiers.py     # SimpleClassifier (spiral), MNISTClassifier (CNN)
-│   └── ae_channels.py     # ConvAutoencoder (VAE): ConvEncoder + PixelShuffleDecoder
-├── sampling/
-│   └── sampler.py         # Low-level sampler (legacy API)
-└── visualization/
-    └── plotting.py        # Plotting utilities
+src/
+├── preimage_sampling/
+│   ├── atlas.py               # CertifiedAtlas: main CPP API (build + query)
+│   ├── certification/         # LiRPA orchestration and wrapped models
+│   ├── geometry/              # Polytope helpers and 2D unions
+│   ├── indexing/              # BVH spatial index
+│   ├── sampling/              # Low-level legacy sampler
+│   └── visualization/         # Plotting utilities
+├── counterfactuals/           # Modular benchmarking framework
+├── models/                    # NN architectures (spiral, MNIST, tabular, AE/VAE)
+└── training/                  # Lightning modules and datamodules
 ```
 
 ---
@@ -237,15 +233,22 @@ preimage_sampling/
 
 ```python
 import torch
-from preimage_sampling.models import SimpleClassifier
-from preimage_sampling.atlas import CertifiedAtlas
+from models import SimpleClassifier
+from preimage_sampling import CertifiedAtlas, ConstantEpsStrategy
 
 # Load model and dataset
+device = "cuda" if torch.cuda.is_available() else "cpu"
 model = SimpleClassifier(num_classes=5)
 dataset = torch.load('data/TOY Spiral/train_spiral.pt')
 
-atlas = CertifiedAtlas(model, dataset, device='cuda')
-atlas.build(eps=0.1, norm=2, build_unions=True)  # build_unions for 2D visualization
+atlas = CertifiedAtlas(
+    model,
+    dataset,
+    device=device,
+    norm=2,
+    eps_strategy=ConstantEpsStrategy(0.1),
+)
+atlas.build(build_unions=True)  # build_unions for 2D visualization
 
 # Find counterfactual
 x_query = dataset[0][0].numpy()
@@ -261,10 +264,12 @@ if result.success:
 ```python
 import torch
 import torch.nn as nn
-from preimage_sampling.models import MNISTClassifier
-from preimage_sampling.models import ConvAutoencoderChannels as ConvAutoencoder
-from preimage_sampling.atlas import CertifiedAtlas
+from models import MNISTClassifier, ConvAutoencoderChannels as ConvAutoencoder
+from preimage_sampling import CertifiedAtlas, ConstantEpsStrategy
 from torch.utils.data import TensorDataset
+
+# Assume images, labels, and x_query have already been loaded as tensors.
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Load models
 classifier = MNISTClassifier(num_classes=10).to(device)
@@ -283,12 +288,19 @@ composite = DecoderClassifier(vae.decoder, classifier).to(device)
 
 # Encode dataset to latent space (use mu for deterministic representation)
 with torch.no_grad():
-    mu, logvar = vae.encoder(images.to(device))
+    mu, _ = vae.encoder(images.to(device))
     latent_vectors = mu.cpu()
 
 latent_dataset = TensorDataset(latent_vectors, labels)
-atlas = CertifiedAtlas(composite, latent_dataset, device, cnn=False)
-atlas.build(eps=0.1, norm=1)
+atlas = CertifiedAtlas(
+    composite,
+    latent_dataset,
+    device=device,
+    cnn=False,
+    norm=1,
+    eps_strategy=ConstantEpsStrategy(0.1),
+)
+atlas.build()
 
 # Query: encode → find counterfactual in latent space → decode
 with torch.no_grad():
@@ -320,16 +332,39 @@ result_cross = atlas.find_counterfactual(
 
 ---
 
+## Benchmark Pipeline
+
+Counterfactual methods can be evaluated against each other using the benchmark scripts.
+A single config file specifies the dataset(s), model checkpoint, methods, and hyperparameter grids.
+
+```bash
+# Single dataset
+python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
+
+# Multiple datasets → one combined parquet
+python scripts/benchmark_multi.py --config configs/benchmarks/benchmark_meeting_all.yaml
+```
+
+Results are written as `.parquet` files and loaded directly by the `notebooks/6.x` analysis notebooks.
+
+See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the full pipeline documentation: config schema, grid expansion, multi-dataset format, and the list of available config files.
+
+---
+
 ## Notebooks
 
 | Notebook | Description |
 |----------|-------------|
-| `1 - Training the NN.ipynb` | Train `SimpleClassifier` on 2D spiral data |
-| `1.2 - Training the AE.ipynb` | Train convolutional VAE on MNIST with ELBO loss |
-| `2 - Preimage approximation.ipynb` | Compute and visualize certified polytopes in 2D |
-| `3.1 - MNIST-AE counterfactual sampling.ipynb` | Full pipeline in 32D VAE latent space |
-| `3.2 - Spiral counterfactual sampling.ipynb` | Full pipeline on 2D spiral (ground-truth polytope visualization, value-add metrics, BVH benchmark) |
-| `6.1 - Benchmark analysis.ipynb` | Full comparative analysis of 5 methods on Adult dataset: validity, sparsity, redundancy, on-manifoldness, empirical and certified robustness |
+| `1.2 - MNIST Classifier Evaluation.ipynb` | Evaluate the MNIST classifier training path |
+| `1.3 - MNIST Autoencoder Evaluation.ipynb` | Evaluate the convolutional autoencoder / VAE path |
+| `2 - Preimage approximation + CF sampling.ipynb` | Visualize certified regions and counterfactual sampling |
+| `3.1 - Spiral counterfactual sampling.ipynb` | Spiral CPP workflow in 2D |
+| `3.3 - MNIST counterfactual sampling.ipynb` | Pixel-space MNIST counterfactual sampling |
+| `3.4 - MNIST-AE counterfactual sampling.ipynb` | Latent-space MNIST counterfactual sampling |
+| `5.0 - Adult counterfactual sampling CertifiedAtlas.ipynb` | Adult tabular CPP workflow |
+| `6.1 - Benchmark analysis.ipynb` | Single-dataset benchmark analysis |
+| `6.2 - Multi-dataset benchmark analysis.ipynb` | Combined tabular benchmark analysis |
+| `6.3 - MNIST benchmark analysis.ipynb` | MNIST benchmark analysis |
 
 ---
 
@@ -338,11 +373,16 @@ result_cross = atlas.find_counterfactual(
 ```bash
 git clone https://github.com/gabrielepintus/PreimageCounterfactualSampling.git
 cd PreimageCounterfactualSampling
-pip install -r requirements.txt
 pip install -e .
 ```
 
-**Dependencies:** `torch`, `auto_LiRPA`, `cvxpy`, `scipy`, `shapely`, `scikit-learn`, `numpy`, `matplotlib`, `seaborn`
+For notebook and test tooling:
+
+```bash
+pip install -e .[dev]
+```
+
+**Dependencies:** declared in `setup.py` and include `torch`, `auto_LiRPA`, `cvxpy`, `scipy`, `shapely`, `scikit-learn`, `numpy`, `matplotlib`, `pandas`, `pyarrow`, and `lightning`
 
 **Recommended environment:** `py13` conda env (includes all dependencies + CUDA).
 
