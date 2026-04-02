@@ -10,7 +10,7 @@ import pytest
 
 from counterfactuals.benchmarks.results import BenchmarkResult, MethodResult, QueryResult
 from counterfactuals.datasets.loaders import MNISTDataset
-from counterfactuals.methods.my_method import _strip_dropout_modules
+from counterfactuals.methods.certcf import _strip_dropout_modules
 from counterfactuals.models.torch_model import TorchModelWrapper
 
 

@@ -25,7 +25,7 @@ Benchmark config details live in `configs/benchmarks/README.md`.
 
 - `benchmark_adult.yaml`
 - `benchmark_adult_main.yaml`
-- `benchmark_adult_cpp.yaml`
+- `benchmark_adult_certcf.yaml`
 - `benchmark_mnist.yaml`
 
 ### Multi-dataset benchmarks (`scripts/benchmark_multi.py`)

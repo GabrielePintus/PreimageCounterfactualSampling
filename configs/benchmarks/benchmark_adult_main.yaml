@@ -68,10 +68,10 @@ methods:
       subsample_method: kmedoids
       epsilon: [1.0, 2.0]
 
-  # --- Certified Preimage Counterfactuals (CPP) ---
+  # --- CertCF ---
   # Grid: eps_alpha x k_per_class (fix norm=1, batch_size=256)
-  - name: cpp
-    run_name: cpp
+  - name: certcf
+    run_name: certcf
     params:
       checkpoint: checkpoints/adult_classifier/best.ckpt
       device: cuda

@@ -1,4 +1,4 @@
-"""Adapter for the Certified Preimage Counterfactual (CPP) method.
+"""Adapter for the CertCF method.
 
 """
 
@@ -29,7 +29,7 @@ def _strip_dropout_modules(module: nn.Module) -> nn.Module:
     return clean
 
 
-class CertifiedAtlasMethod(BaseCounterfactualMethod):
+class CertCF(BaseCounterfactualMethod):
     """Wrap ``preimage_sampling.CertifiedAtlas`` into the common method interface."""
 
     def __init__(
@@ -73,7 +73,7 @@ class CertifiedAtlasMethod(BaseCounterfactualMethod):
         module = getattr(self.model, "model", None)
         if not isinstance(module, nn.Module):
             raise TypeError(
-                "CertifiedAtlasMethod requires a TorchModelWrapper (model.model must be an nn.Module)."
+                "CertCF requires a TorchModelWrapper (model.model must be an nn.Module)."
             )
         device = getattr(self.model, "device", torch.device("cpu"))
         device = torch.device(device)
@@ -104,7 +104,7 @@ class CertifiedAtlasMethod(BaseCounterfactualMethod):
         if not self._is_fitted:
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
         if target_class is None:
-            raise ValueError("CertifiedAtlasMethod requires target_class.")
+            raise ValueError("CertCF requires target_class.")
 
         result = self.atlas.find_counterfactual(
             x_query=np.asarray(x, dtype=np.float32),

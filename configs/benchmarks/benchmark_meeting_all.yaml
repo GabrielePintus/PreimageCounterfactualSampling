@@ -4,7 +4,7 @@ timeout_per_sample: 60   # seconds per (method, query)
 
 # ---------------------------------------------------------------------------
 # Shared methods — applied to every dataset below.
-# cpp.checkpoint is auto-inherited from each dataset's model.params.checkpoint.
+# certcf.checkpoint is auto-inherited from each dataset's model.params.checkpoint.
 # Use dataset.method_overrides to change individual params for a specific dataset.
 # ---------------------------------------------------------------------------
 methods:
@@ -41,8 +41,8 @@ methods:
       subsample_method: kmedoids
       k_per_class: 200
 
-  - name: cpp
-    run_name: cpp
+  - name: certcf
+    run_name: certcf
     params:
       # checkpoint is auto-inherited from model.params.checkpoint
       device: cuda

@@ -13,11 +13,6 @@ BenchmarkResult
             x_cf      — None on failure
             metrics   — pre-computed at benchmark time
 
-Serialization
--------------
-BenchmarkResult.save(path)  — pickle to .bmk file
-BenchmarkResult.load(path)  — unpickle
-
 Notebook compatibility
 ----------------------
 BenchmarkResult.to_dataframe()  — flatten to the same column schema used by
@@ -27,7 +22,6 @@ BenchmarkResult.to_dataframe()  — flatten to the same column schema used by
 from __future__ import annotations
 
 import json
-import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -76,26 +70,6 @@ class BenchmarkResult:
     y_orig: np.ndarray                # (n_queries,) — stored once
     y_true: Optional[np.ndarray] = None
     method_results: List[MethodResult] = field(default_factory=list)
-
-    # ---------------------------------------------------------------------------
-    # Persistence
-    # ---------------------------------------------------------------------------
-
-    def save(self, path: str | Path) -> None:
-        """Serialize to a .bmk file using pickle."""
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    @classmethod
-    def load(cls, path: str | Path) -> "BenchmarkResult":
-        """Deserialize from a .bmk file."""
-        with open(Path(path), "rb") as f:
-            obj = pickle.load(f)
-        if not isinstance(obj, cls):
-            raise TypeError(f"Expected BenchmarkResult, got {type(obj)}")
-        return obj
 
     # ---------------------------------------------------------------------------
     # Notebook compatibility

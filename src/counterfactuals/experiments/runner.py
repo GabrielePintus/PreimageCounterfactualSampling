@@ -12,10 +12,10 @@ from counterfactuals.core.registry import Registry
 from counterfactuals.datasets.loaders import AdultDataset, CompasDataset, GermanCreditDataset, GiveMeSomeCreditDataset, HELOCDataset, LendingClubDataset, MNISTDataset
 from counterfactuals.experiments.config import ExperimentConfig, parse_experiment_config
 from counterfactuals.methods.dice import DiceMethod
+from counterfactuals.methods.certcf import CertCF
 from counterfactuals.methods.face import FACEMethod
 from counterfactuals.methods.growing_spheres import GrowingSpheresMethod
 from counterfactuals.methods.nearest_neighbor import NearestNeighborMethod
-from counterfactuals.methods.my_method import CertifiedAtlasMethod
 from counterfactuals.methods.wachter import WachterMethod
 from counterfactuals.metrics.plausibility import KNNPlausibility
 from counterfactuals.metrics.proximity import L2Proximity
@@ -51,8 +51,7 @@ def create_default_registries() -> Dict[str, Registry]:
     method_registry.register("face", FACEMethod)
     method_registry.register("growing_spheres", GrowingSpheresMethod)
     method_registry.register("nearest_neighbor", NearestNeighborMethod)
-    method_registry.register("my_method", CertifiedAtlasMethod)
-    method_registry.register("cpp", CertifiedAtlasMethod)
+    method_registry.register("certcf", CertCF)
 
     dataset_registry.register("adult", AdultDataset)
     dataset_registry.register("compas", CompasDataset)

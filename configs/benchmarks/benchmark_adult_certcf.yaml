@@ -18,12 +18,12 @@ sampling:
 timeout_per_sample: 120   # seconds per (method, query)
 
 output:
-  path: results/benchmark_adult_cpp.parquet
+  path: results/benchmark_adult_certcf.parquet
 
 methods:
-  # --- Certified Preimage Counterfactuals (CPP) ---
-  - name: cpp
-    run_name: cpp
+  # --- CertCF ---
+  - name: certcf
+    run_name: certcf
     params:
       checkpoint: checkpoints/adult_classifier/best.ckpt
       device: cuda

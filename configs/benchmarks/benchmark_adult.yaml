@@ -96,9 +96,9 @@ methods:
   #     diversity_weight: 0.0
   #     min_iter: 50
 
-  # --- Certified Preimage Counterfactuals (CPP) ---
-  - name: cpp
-    run_name: cpp_smoke
+  # --- CertCF ---
+  - name: certcf
+    run_name: certcf_smoke
     params:
       checkpoint: checkpoints/adult_classifier/best.ckpt
       device: cuda

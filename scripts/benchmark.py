@@ -8,8 +8,7 @@ Usage:
     python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --methods dice face nearest_neighbor
 
 Output:
-    A .bmk file (BenchmarkResult, pickle) and a .parquet file (flat, for notebooks).
-    Both are written to the path specified in the config (with suffix swapped for .bmk).
+    A .parquet file (flat, for notebooks and analysis).
 """
 
 from __future__ import annotations
@@ -330,7 +329,7 @@ def _build_query_tasks(
 # CertifiedAtlas builder
 # ---------------------------------------------------------------------------
 
-def _build_certified_atlas_method(
+def _build_certcf_method(
     params: Dict[str, Any],
     model_params: Dict[str, Any],
     dataset_name: str,
@@ -339,7 +338,7 @@ def _build_certified_atlas_method(
     x_queries: np.ndarray,
     seed: int,
 ):
-    """Build CertifiedAtlasMethod from a checkpoint.
+    """Build CertCF from a checkpoint.
 
     Returns (atlas_method, atlas_model, embed_model, z_train, z_queries).
 
@@ -352,17 +351,17 @@ def _build_certified_atlas_method(
     from preimage_sampling import NearestOppositeClassClearanceStrategy
     from training.lit_classifier import LitClassifier
 
-    from counterfactuals.methods.my_method import CertifiedAtlasMethod
+    from counterfactuals.methods.certcf import CertCF
     from counterfactuals.models.torch_model import TorchModelWrapper
 
     ckpt = params.get("checkpoint")
     if not ckpt:
-        raise ValueError("my_method requires a 'checkpoint' param pointing to the .ckpt file.")
+        raise ValueError("certcf requires a 'checkpoint' param pointing to the .ckpt file.")
 
     requested_device = params.get("device", "cpu")
     device = _normalize_torch_device(requested_device)
     if str(requested_device).strip().lower() != device:
-        print(f"[INFO] cpp device normalized: {requested_device!r} -> {device!r}")
+        print(f"[INFO] certcf device normalized: {requested_device!r} -> {device!r}")
     eps_alpha = float(params.get("eps_alpha", 0.25))
     _k_per_class = params.get("k_per_class", 500)
     k_per_class = int(_k_per_class) if _k_per_class is not None else None
@@ -371,13 +370,13 @@ def _build_certified_atlas_method(
     query_method = str(params.get("query_method", "sorted")).lower()
     if query_method not in {"sorted", "bvh"}:
         raise ValueError(
-            f"my_method.query_method must be one of {{'sorted', 'bvh'}}, got {query_method!r}"
+            f"certcf.query_method must be one of {{'sorted', 'bvh'}}, got {query_method!r}"
         )
     batch_size = int(params.get("batch_size", 256))
     atlas_subsample_method = str(params.get("atlas_subsample_method", "kmedoids")).lower()
     if atlas_subsample_method not in {"kmedoids", "bandit_kmedoids", "fps", "kmeans", "density_flat_kmedoids"}:
         raise ValueError(
-            f"my_method.atlas_subsample_method must be one of {{'kmedoids', 'bandit_kmedoids', 'fps', 'kmeans', 'density_flat_kmedoids'}}, "
+            f"certcf.atlas_subsample_method must be one of {{'kmedoids', 'bandit_kmedoids', 'fps', 'kmeans', 'density_flat_kmedoids'}}, "
             f"got {atlas_subsample_method!r}"
         )
     solver_maxiter = int(params.get("solver_maxiter", 500))
@@ -413,7 +412,7 @@ def _build_certified_atlas_method(
         lit = _load_lit_checkpoint_resilient(LitClassifier, ckpt, backbone, map_location=device)
         model = lit.model.eval().to(device)
 
-        # Wrap the full model (Dropout included — CertifiedAtlasMethod._fit strips it for LiRPA).
+        # Wrap the full model (Dropout included — CertCF._fit strips it for LiRPA).
         atlas_model = TorchModelWrapper(model=model.net, device=device)
 
         # OHE simplex constraints: sum(block)==1 is valid in raw OHE space.
@@ -425,7 +424,7 @@ def _build_certified_atlas_method(
         cnn = False
 
     eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
-    atlas_method = CertifiedAtlasMethod(
+    atlas_method = CertCF(
         model=atlas_model,
         norm=norm,
         eps_strategy=eps_strategy,
@@ -661,9 +660,9 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             mad_weights[i] = mad if mad > 0 else 1.0
     # Categorical features keep weight = 1.0 (binary mismatch is already in [0, 1]).
 
-    # --- Train subsampling (shared by all methods EXCEPT cpp) ---
-    # k-medoids is reserved for the CPP method's own atlas construction (see
-    # k_per_class inside _build_certified_atlas_method).  Other methods receive
+    # --- Train subsampling (shared by all methods EXCEPT certcf) ---
+    # k-medoids is reserved for the CertCF method's own atlas construction (see
+    # k_per_class inside _build_certcf_method). Other methods receive
     # either the full training set or a *random* subsample if n_train is set.
     sampling_cfg = cfg.get("sampling", {})
     n_train = int(sampling_cfg.get("n_train", len(x_train_full)))
@@ -768,15 +767,15 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         print(f"\n[METHOD] {run_name}" + (f" (impl: {method_name})" if run_name != method_name else ""))
 
         # --- Fit / Build ---
-        # my_method (CertifiedAtlas) operates in embedding space internally but
+        # certcf (CertifiedAtlas) operates in embedding space internally but
         # we decode CFs back to raw feature space for fair comparison.
-        embed_model = None   # full TabularClassifier (has .decode()); set for my_method only
+        embed_model = None   # full TabularClassifier (has .decode()); set for certcf only
         embed_device = "cpu"
         build_time_s = 0.0
-        if method_name in ("my_method", "cpp"):
+        if method_name == "certcf":
             try:
                 _t_build = time.perf_counter()
-                method, active_model, embed_model, _, active_queries, _ = _build_certified_atlas_method(
+                method, active_model, embed_model, _, active_queries, _ = _build_certcf_method(
                     params=method_params,
                     model_params=model_cfg.get("params", {}),
                     dataset_name=ds_cfg["name"],
@@ -880,7 +879,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     continue
                 x_cf_active = np.asarray(result.x_cf, dtype=np.float32)
 
-                # For cpp/my_method: atlas outputs are already in raw/OHE space.
+                # For certcf: atlas outputs are already in raw/OHE space.
                 if embed_model is not None:
                     x_cf_row = x_cf_active
                     y_cf = int(model.predict(x_cf_row[None, :])[0])
@@ -957,13 +956,9 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         ))
 
     # --- Save ---
-    bmk_path = output_path.with_suffix(".bmk")
-    benchmark_result.save(bmk_path)
-    print(f"\n[INFO] Saved BenchmarkResult to {bmk_path}")
-
     df = benchmark_result.to_dataframe()
     df.to_parquet(output_path, index=False, compression="gzip")
-    print(f"[INFO] Saved flat parquet to {output_path}")
+    print(f"\n[INFO] Saved benchmark parquet to {output_path}")
 
     benchmark_result.summary()
     return benchmark_result

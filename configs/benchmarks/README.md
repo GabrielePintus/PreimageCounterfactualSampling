@@ -36,9 +36,8 @@ python scripts/benchmark_multi.py \
 
 Both scripts produce:
 - **`.parquet`** — flat DataFrame loaded directly by the analysis notebooks (`notebooks/6.x`).
-- **`.bmk`** — pickled `BenchmarkResult` object for programmatic access.
 
-`benchmark_multi.py` additionally writes one `.parquet` + `.bmk` per dataset
+`benchmark_multi.py` additionally writes one per-dataset parquet
 (`<stem>_<dataset>.parquet`) alongside the combined output file.
 
 ---
@@ -83,8 +82,8 @@ methods:
       subsample_method: kmedoids
       k_per_class: 200
 
-  - name: cpp
-    run_name: cpp
+  - name: certcf
+    run_name: certcf
     params:
       checkpoint: checkpoints/adult_classifier/best.ckpt
       device: cuda
@@ -103,8 +102,8 @@ All list parameters are expanded into a Cartesian product; the `run_name` gets a
 
 ```yaml
 # This single entry expands to 8 runs:
-- name: cpp
-  run_name: cpp
+- name: certcf
+  run_name: certcf
   params:
     norm: [1, 2]
     eps_alpha: [0.15, 0.25, 0.35, 0.45]   # 2 × 4 = 8
@@ -127,8 +126,8 @@ methods:                        # shared across all datasets
     run_name: nn
     params: { norm: 1, subsample_method: kmedoids, k_per_class: 200 }
 
-  - name: cpp
-    run_name: cpp
+  - name: certcf
+    run_name: certcf
     params:
       # 'checkpoint' is auto-inherited from each dataset's model.params.checkpoint
       device: cuda
@@ -160,13 +159,13 @@ datasets:
         hidden_dims: [64, 32]
         dropout: 0.1
     method_overrides:           # optional: override individual params for this dataset
-      cpp:
+      certcf:
         eps_alpha: 0.35
 ```
 
-### Auto-inherit for `cpp`
+### Auto-inherit for `certcf`
 
-If `cpp` (or `my_method`) appears in the shared methods list **without** a `checkpoint` key,
+If `certcf` appears in the shared methods list **without** a `checkpoint` key,
 `benchmark_multi.py` automatically copies `model.params.checkpoint` (and `device`) into it.
 This avoids repeating the checkpoint path in both `model` and `method_overrides`.
 
@@ -194,16 +193,16 @@ directly on the dataset block:
 
 | File | Datasets | Methods | Queries |
 |------|----------|---------|---------|
-| `benchmark_meeting_all.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, cpp | 50 |
-| `benchmark_smoke_all.yaml` | compas, german_credit, heloc, give_me_some_credit, lending_club | nn, gs, cpp | 50 |
+| `benchmark_meeting_all.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 50 |
+| `benchmark_smoke_all.yaml` | compas, german_credit, heloc, give_me_some_credit, lending_club | nn, gs, certcf | 50 |
 
 ### Single-dataset (run with `benchmark.py`)
 
 | File | Dataset | Purpose |
 |------|---------|---------|
-| `benchmark_adult.yaml` | adult | CPP grid search (eps_alpha × k_per_class), 200 queries |
+| `benchmark_adult.yaml` | adult | CertCF grid search (eps_alpha × k_per_class), 200 queries |
 | `benchmark_adult_main.yaml` | adult | All-methods comparison with grid expansion, 20 queries |
-| `benchmark_adult_cpp.yaml` | adult | CPP-only grid search, 20 queries |
+| `benchmark_adult_certcf.yaml` | adult | CertCF-only grid search, 20 queries |
 | `benchmark_mnist.yaml` | mnist | Full benchmark on MNIST (balanced per-class sampling) |
 
 ### Other schemas
@@ -220,7 +219,7 @@ directly on the dataset block:
 
 | Registry key | Description |
 |---|---|
-| `cpp` / `my_method` | Certified Preimage Projection (our method) |
+| `certcf` | CertCF (our method) |
 | `nearest_neighbor` | Closest opposite-class training point |
 | `face` | FACE: density-weighted shortest path |
 | `dice` | DiCE: gradient-based diverse counterfactuals |

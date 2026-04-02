@@ -15,8 +15,8 @@ Config schema:
       - name: nearest_neighbor
         run_name: nn
         params: { ... }
-      - name: cpp
-        run_name: cpp
+      - name: certcf
+        run_name: certcf
         params:                      # checkpoint auto-inherited from model.params.checkpoint
           norm: 1
           ...
@@ -35,7 +35,7 @@ Config schema:
             epsilon: 3.0
 
 Output:
-    - One .parquet + .bmk per dataset:  <output_stem>_<dataset>.<ext>
+    - One .parquet per dataset:         <output_stem>_<dataset>.<ext>
     - One combined .parquet:            <output> (from config or --output)
 """
 
@@ -66,7 +66,7 @@ def _merge_methods(
 
     1. Deep-copy shared methods.
     2. Shallow-merge method_overrides[run_name] into each method's params.
-    3. Auto-inherit ``checkpoint`` and ``device`` from model_params for cpp/my_method
+    3. Auto-inherit ``checkpoint`` and ``device`` from model_params for certcf
        if not already set.
     """
     result = []
@@ -79,8 +79,8 @@ def _merge_methods(
         if override:
             m.setdefault("params", {}).update(override)
 
-        # Auto-inherit checkpoint / device for cpp from the dataset's model config.
-        if m["name"] in ("cpp", "my_method"):
+        # Auto-inherit checkpoint / device for certcf from the dataset's model config.
+        if m["name"] == "certcf":
             params = m.setdefault("params", {})
             if "checkpoint" not in params and "checkpoint" in model_params:
                 params["checkpoint"] = model_params["checkpoint"]
