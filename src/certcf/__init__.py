@@ -1,18 +1,18 @@
 """
-Preimage Sampling Library for Counterfactual Explanation Generation
+CertCF library for certified counterfactual generation.
 
 This library provides tools for:
 - Neural network certification using LiRPA
 - Preimage approximation via certified polytopes
-- Counterfactual generation through Certified Polyhedral Projection (CPP)
+- Counterfactual generation through CertCF
 - Efficient spatial indexing via Bounding Volume Hierarchies (BVH)
 
 Quick Start
 -----------
->>> from preimage_sampling import CertifiedAtlas
+>>> from certcf import CertCFAtlas
 >>>
 >>> # Build the atlas (offline phase)
->>> atlas = CertifiedAtlas(model, dataset, device='cuda')
+>>> atlas = CertCFAtlas(model, dataset, device='cuda')
 >>> atlas.build(eps=0.1, norm=2)
 >>>
 >>> # Generate counterfactual (online phase)
@@ -23,7 +23,7 @@ Quick Start
 __version__ = "0.2.0"
 
 # High-level API (recommended)
-from .atlas import CertifiedAtlas, CounterfactualResult
+from .atlas import CertCFAtlas, CounterfactualResult
 
 # Epsilon strategies
 from .eps_strategies import (
@@ -39,7 +39,7 @@ from .indexing import BVHIndex, BVHNode
 
 __all__ = [
     # High-level API
-    "CertifiedAtlas",
+    "CertCFAtlas",
     "CounterfactualResult",
     # Epsilon strategies
     "EpsStrategy",

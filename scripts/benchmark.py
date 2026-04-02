@@ -48,13 +48,11 @@ from counterfactuals.preprocessing import (
     IdentityTransform,
     InverseTransformModel,
     PCATransform,
-    adult_ohe_blocks,
-    compas_ohe_blocks,
-    german_credit_ohe_blocks,
     snap_ohe_blocks,
 )
 from counterfactuals.utils.config import read_yaml
 from counterfactuals.utils.seed import seed_everything
+from dataset_specs import get_tabular_dataset_spec
 
 
 # ---------------------------------------------------------------------------
@@ -218,26 +216,15 @@ def _compute_query_metrics(
 
 
 # ---------------------------------------------------------------------------
-# Dataset constants helper
+# Dataset metadata helper
 # ---------------------------------------------------------------------------
 
-def _load_dataset_constants(dataset_name: str):
-    """Return (INPUT_TYPES, CARDINALITIES, OHE_FEATURE_TYPES) for the given dataset."""
-    if dataset_name == "mnist":
-        return ["numerical"] * (28 * 28), [], []
-    if dataset_name == "compas":
-        from training.datamodules.compas import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
-    elif dataset_name == "german_credit":
-        from training.datamodules.german_credit import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
-    elif dataset_name == "heloc":
-        from training.datamodules.heloc import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
-    elif dataset_name == "give_me_some_credit":
-        from training.datamodules.give_me_some_credit import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
-    elif dataset_name == "lending_club":
-        from training.datamodules.lending_club import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
-    else:
-        from training.datamodules.adult import CARDINALITIES, INPUT_TYPES, OHE_FEATURE_TYPES
-    return INPUT_TYPES, CARDINALITIES, OHE_FEATURE_TYPES
+def _get_tabular_spec(dataset_name: str):
+    """Return the shared tabular dataset spec when one exists."""
+    try:
+        return get_tabular_dataset_spec(dataset_name)
+    except KeyError:
+        return None
 
 
 def _sample_balanced_indices(
@@ -331,7 +318,7 @@ def _build_query_tasks(
 
 
 # ---------------------------------------------------------------------------
-# CertifiedAtlas builder
+# CertCFAtlas builder
 # ---------------------------------------------------------------------------
 
 def _build_certcf_method(
@@ -353,7 +340,7 @@ def _build_certcf_method(
     """
     import torch
 
-    from preimage_sampling import NearestOppositeClassClearanceStrategy
+    from certcf import NearestOppositeClassClearanceStrategy
     from training.lit_classifier import LitClassifier
 
     from counterfactuals.methods.certcf import CertCF
@@ -406,10 +393,10 @@ def _build_certcf_method(
     else:
         from models.classifiers import TabularClassifier
 
-        INPUT_TYPES, CARDINALITIES, _ = _load_dataset_constants(dataset_module)
+        spec = get_tabular_dataset_spec(dataset_module)
         backbone = TabularClassifier(
-            input_types=INPUT_TYPES,
-            cardinalities=CARDINALITIES,
+            input_types=list(spec.input_types),
+            cardinalities=list(spec.cardinalities),
             hidden_dims=hidden_dims,
             num_classes=2,
             dropout=dropout,
@@ -421,11 +408,7 @@ def _build_certcf_method(
         atlas_model = TorchModelWrapper(model=model.net, device=device)
 
         # OHE simplex constraints: sum(block)==1 is valid in raw OHE space.
-        cat_slices = [
-            (s, e)
-            for t, (s, e) in zip(INPUT_TYPES, model._slices)
-            if t == "categorical"
-        ] or None
+        cat_slices = list(spec.categorical_slices) or None
         cnn = False
 
     eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
@@ -469,7 +452,7 @@ def _build_torch_model_from_checkpoint(
     from training.lit_classifier import LitClassifier
     from counterfactuals.models.torch_model import TorchModelWrapper
 
-    INPUT_TYPES, CARDINALITIES, _ = _load_dataset_constants(dataset_module)
+    spec = get_tabular_dataset_spec(dataset_module)
 
     requested_device = device
     device = _normalize_torch_device(device)
@@ -477,8 +460,8 @@ def _build_torch_model_from_checkpoint(
         print(f"[INFO] model device normalized: {requested_device!r} -> {device!r}")
 
     backbone = TabularClassifier(
-        input_types=INPUT_TYPES,
-        cardinalities=CARDINALITIES,
+        input_types=list(spec.input_types),
+        cardinalities=list(spec.cardinalities),
         hidden_dims=hidden_dims,
         num_classes=2,
         dropout=dropout,
@@ -712,14 +695,12 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
     x_train_full, y_train_full = dataset.get_train()
     x_test_full, y_test_full = dataset.get_test()
     n_features = x_train_full.shape[1]
+    spec = getattr(dataset, "spec", None)
 
     # --- MAD weights for MAD-normalized L1 proximity ---
-    # Try to load feature type annotations from the dataset's datamodule.
-    # Falls back to treating all features as numerical if not available.
-    try:
-        _, _, _input_types = _load_dataset_constants(ds_cfg["name"])
-    except Exception:
-        _input_types = ["numerical"] * n_features
+    # Use shared schema metadata when available; otherwise treat every dimension
+    # as numerical (e.g. for image datasets).
+    _input_types = list(spec.ohe_feature_types) if spec is not None else ["numerical"] * n_features
 
     mad_weights = np.ones(n_features, dtype=np.float64)
     for i, t in enumerate(_input_types):
@@ -746,16 +727,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
     transform.fit(x_train)
     x_train_gen = transform.transform(x_train)
 
-    ohe_blocks = None
-    try:
-        if ds_cfg["name"] == "adult":
-            ohe_blocks = adult_ohe_blocks()
-        elif ds_cfg["name"] == "compas":
-            ohe_blocks = compas_ohe_blocks()
-        elif ds_cfg["name"] == "german_credit":
-            ohe_blocks = german_credit_ohe_blocks()
-    except Exception as exc:
-        print(f"[WARNING] Could not load OHE block metadata for inverse snap: {exc}")
+    ohe_blocks = tuple(spec.ohe_blocks) if spec is not None and spec.ohe_blocks else None
 
     # --- Model ---
     model_cfg = cfg["model"]
@@ -839,7 +811,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         print(f"\n[METHOD] {run_name}" + (f" (impl: {method_name})" if run_name != method_name else ""))
 
         # --- Fit / Build ---
-        # certcf (CertifiedAtlas) operates in embedding space internally but
+        # certcf (CertCFAtlas) operates in embedding space internally but
         # we decode CFs back to raw feature space for fair comparison.
         embed_model = None   # full TabularClassifier (has .decode()); set for certcf only
         embed_device = "cpu"

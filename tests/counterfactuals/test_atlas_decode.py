@@ -1,11 +1,11 @@
 import numpy as np
 import pytest
 
-from preimage_sampling.atlas import CVXPY_AVAILABLE, CertifiedAtlas
+from certcf.atlas import CVXPY_AVAILABLE, CertCFAtlas
 
 
 def _make_atlas(norm, ohe_slices):
-    atlas = CertifiedAtlas.__new__(CertifiedAtlas)
+    atlas = CertCFAtlas.__new__(CertCFAtlas)
     atlas.norm = norm
     atlas.ohe_slices = ohe_slices
     atlas.solver_maxiter = 200

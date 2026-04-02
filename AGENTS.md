@@ -5,7 +5,7 @@ Agent instructions for the `PreimageCounterfactualSampling` workspace.
 ## Project Overview
 
 This repository contains:
-- Main research code in `src/` for Certified Polyhedral Projection (CPP) and preimage-based counterfactual generation.
+- Main research code in `src/` for CertCF and preimage-based counterfactual generation.
 - A modular counterfactual benchmarking framework under `src/counterfactuals/`.
 
 Primary human-facing docs are in `README.md` and notebooks under `notebooks/`.
@@ -48,10 +48,10 @@ python train.py fit --config configs/adult_classifier.yaml
 
 ## Testing And Validation
 
-Validation is primarily workflow-based for core CPP modules:
+Validation is primarily workflow-based for core CertCF modules:
 - Run focused scripts/notebooks for changed modules.
 - For training changes, run at least one short `train.py fit` command with reduced epochs.
-- For atlas/sampling changes, run a minimal `CertifiedAtlas.build(...)` plus one `find_counterfactual(...)` call.
+- For atlas/sampling changes, run a minimal `CertCFAtlas.build(...)` plus one `find_counterfactual(...)` call.
 
 Automated tests currently available:
 - `tests/counterfactuals/` provides `pytest` coverage for the modular benchmarking framework.
@@ -59,7 +59,7 @@ Automated tests currently available:
 
 ## Scope And Safety Rules
 
-- Prefer editing `src/` and `configs/` for core CPP work.
+- Prefer editing `src/` and `configs/` for core CertCF work.
 - Prefer `src/counterfactuals/` + `scripts/benchmark.py` for benchmarking changes.
 - Do not commit large generated artifacts from `wandb/`, `checkpoints/`, or notebook outputs.
 - Keep code LiRPA-compatible when changing classifier/model pieces used for certification.
@@ -68,9 +68,9 @@ Automated tests currently available:
 
 - The codebase uses PyTorch + Lightning with explicit docstrings and clear module boundaries.
 - Keep public APIs stable where possible:
-  - `preimage_sampling.CertifiedAtlas`
-  - `CertifiedAtlas.build(...)`
-  - `CertifiedAtlas.find_counterfactual(...)`
+  - `certcf.CertCFAtlas`
+  - `CertCFAtlas.build(...)`
+  - `CertCFAtlas.find_counterfactual(...)`
 - Keep the modular benchmarking contracts stable:
   - `counterfactuals.core.BaseCounterfactualMethod`
   - `fit(...)`, `generate(...)`, `generate_batch(...)`

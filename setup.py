@@ -1,4 +1,4 @@
-"""Setup script for preimage_sampling, models, and training packages."""
+"""Setup script for certcf, models, and training packages."""
 
 from setuptools import setup, find_packages
 from pathlib import Path
@@ -8,10 +8,10 @@ readme_file = Path(__file__).parent / "README.md"
 long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists() else ""
 
 setup(
-    name="preimage_sampling",
+    name="certcf",
     version="0.2.0",
     author="Gabriele Pintus",
-    description="Certified Polyhedral Projection for Robust Counterfactual Explanations",
+    description="CertCF for robust counterfactual explanations",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/gabrielepintus/PreimageCounterfactualSampling",

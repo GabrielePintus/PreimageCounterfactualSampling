@@ -1,7 +1,7 @@
 """
-Certified Polyhedral Projection (CPP) for Robust Counterfactual Generation.
+CertCF for Robust Counterfactual Generation.
 
-This module implements the CPP method described in the research defense:
+This module implements the CertCF method described in the research defense:
 Given a query sample x from class A, find the closest certified point in class B
 by projecting onto the union of certified polytopes for class B.
 
@@ -64,9 +64,9 @@ class PolytopeAtlas:
 
 class CounterfactualSampler:
     """
-    Certified Polyhedral Projection (CPP) counterfactual generator.
+    CertCF counterfactual generator.
 
-    This class implements the CPP algorithm:
+    This class implements the CertCF algorithm:
     1. Offline: Build polytope atlases for each target class using LiRPA
     2. Online: For a query point, find k-nearest polytopes and project onto each
     3. Return the projection with minimum distance

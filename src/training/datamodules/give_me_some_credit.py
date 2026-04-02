@@ -8,27 +8,19 @@ from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.preprocessing import StandardScaler
 
-_FEATURE_COLS = [
-    "RevolvingUtilizationOfUnsecuredLines",
-    "age",
-    "NumberOfTime30-59DaysPastDueNotWorse",
-    "DebtRatio",
-    "MonthlyIncome",
-    "NumberOfOpenCreditLinesAndLoans",
-    "NumberOfTimes90DaysLate",
-    "NumberRealEstateLoansOrLines",
-    "NumberOfTime60-89DaysPastDueNotWorse",
-    "NumberOfDependents",
-]
+from dataset_specs import get_tabular_dataset_spec
+
+_SPEC = get_tabular_dataset_spec("give_me_some_credit")
+_FEATURE_COLS = list(_SPEC.feature_names)
 
 # Columns with missing values — imputed with median (fit on train only).
 _IMPUTE_COLS = ["MonthlyIncome", "NumberOfDependents"]
 
 # All features are numerical — no OHE.
-CARDINALITIES: list = []
-INPUT_TYPES = ["numerical"] * len(_FEATURE_COLS)
-N_FEATURES = len(_FEATURE_COLS)  # 10
-OHE_FEATURE_TYPES: list = ["numerical"] * N_FEATURES
+CARDINALITIES: list = list(_SPEC.cardinalities)
+INPUT_TYPES = list(_SPEC.input_types)
+N_FEATURES = int(_SPEC.n_features)
+OHE_FEATURE_TYPES: list = list(_SPEC.ohe_feature_types)
 
 
 class GiveMeSomeCreditDataModule(L.LightningDataModule):

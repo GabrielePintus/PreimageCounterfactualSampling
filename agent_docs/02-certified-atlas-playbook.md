@@ -2,7 +2,7 @@
 
 ## What This Module Does
 
-`src/preimage_sampling/` implements the CPP pipeline:
+`src/certcf/` implements the CertCF pipeline:
 - certify local regions via LiRPA bounds
 - represent class preimages as unions of certified polytopes
 - query nearest certified counterfactual by convex projection
@@ -10,15 +10,15 @@
 
 ## Primary API
 
-From `preimage_sampling` package:
+From `certcf` package:
 
 ```python
-from preimage_sampling import CertifiedAtlas
-from preimage_sampling import ConstantEpsStrategy, NearestOppositeClassClearanceStrategy
+from certcf import CertCFAtlas
+from certcf import ConstantEpsStrategy, NearestOppositeClassClearanceStrategy
 ```
 
 Main calls:
-- `CertifiedAtlas(...).build(...)`
+- `CertCFAtlas(...).build(...)`
 - `atlas.find_counterfactual(...)`
 - `atlas.find_counterfactual_batch(...)`
 - `atlas.verify_counterfactual(...)`
@@ -73,14 +73,14 @@ If CVXPY is unavailable, code falls back where possible, but robust behavior for
 
 ## Agent Editing Guardrails
 
-- Preserve `CertifiedAtlas` method signatures unless explicitly requested.
+- Preserve `CertCFAtlas` method signatures unless explicitly requested.
 - Keep 2D and CNN pathways both functional (`cnn` flag and flattening logic).
 - Do not break assumptions that dataset is TensorDataset-like with `.tensors`.
 - Avoid changing numerical tolerances globally without benchmarking impact on feasibility/success.
 
 ## Minimal Runtime Check
 
-After edits in `src/preimage_sampling/`, run a tiny end-to-end check:
+After edits in `src/certcf/`, run a tiny end-to-end check:
 1. Build a small atlas on synthetic/spiral data.
 2. Run one `find_counterfactual` call.
 3. Confirm result object fields (`success`, `distance`, `n_qp_solved`) behave as expected.

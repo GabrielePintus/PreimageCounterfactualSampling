@@ -23,3 +23,7 @@ This package provides a modular, extensible framework for running counterfactual
 1. Implement a new method class in `counterfactuals/methods/`.
 2. Register it in a method `Registry` in your experiment setup.
 3. Add method-specific tests under `tests/counterfactuals/`.
+
+For tabular datasets, schema-level metadata now lives in `dataset_specs/`.
+Lightning datamodules still own data loading and fitted preprocessing, while the
+benchmark stack consumes shared specs instead of importing datamodule constants.

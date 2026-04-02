@@ -4,10 +4,10 @@
 
 This workspace includes two Python packages with different maintenance intent.
 
-## Main Package: `preimage_sampling`
+## Main Package: `certcf`
 
 Location:
-- `src/preimage_sampling/`
+- `src/certcf/`
 - `src/models/`
 - `src/training/`
 

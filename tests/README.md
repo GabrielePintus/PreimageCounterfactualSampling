@@ -15,4 +15,4 @@ pytest tests/counterfactuals -q
 ## Notes
 
 - Tests focus on API contracts and lightweight integration behavior.
-- Core CPP/preimage workflows are primarily validated with notebooks and targeted scripts.
+- Core CertCF/preimage workflows are primarily validated with notebooks and targeted scripts.

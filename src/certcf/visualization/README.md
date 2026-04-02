@@ -7,5 +7,5 @@ Plotting helpers to inspect certification regions, embeddings, and counterfactua
 
 ## Example
 ```python
-from preimage_sampling.visualization.plotting import plot_counterfactual_path
+from certcf.visualization.plotting import plot_counterfactual_path
 ```

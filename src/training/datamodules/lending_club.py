@@ -8,29 +8,23 @@ from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-_NUMERICAL_COLS = [
-    "loan_amnt", "int_rate", "annual_inc", "dti",
-    "delinq_2yrs", "open_acc", "pub_rec", "revol_util",
-]
-_CATEGORICAL_COLS = ["term", "grade", "home_ownership", "verification_status"]
+from dataset_specs import get_tabular_dataset_spec
+
+_SPEC = get_tabular_dataset_spec("lending_club")
+_NUMERICAL_COLS = list(_SPEC.numerical_features)
+_CATEGORICAL_COLS = list(_SPEC.categorical_features)
 
 # Empirically verified from standard Kaggle 2007-2011 filtered to Fully Paid/Charged Off.
 # term: 36/60 months (2), grade: A-G (7), home_ownership: MORTGAGE/OWN/RENT/OTHER (4),
 # verification_status: Not Verified/Source Verified/Verified (3).
-CARDINALITIES = [2, 7, 5, 3]  # term, grade, home_ownership (MORTGAGE/NONE/OTHER/OWN/RENT), verification_status
+CARDINALITIES = list(_SPEC.cardinalities)
 
-INPUT_TYPES = (
-    ["numerical"] * len(_NUMERICAL_COLS)
-    + ["categorical"] * len(_CATEGORICAL_COLS)
-)
+INPUT_TYPES = list(_SPEC.input_types)
 
-N_FEATURES = len(_NUMERICAL_COLS) + sum(CARDINALITIES)  # 8 + 17 = 25
+N_FEATURES = int(_SPEC.n_features)
 
 # Per-OHE-dimension type annotation (length N_FEATURES = 25).
-OHE_FEATURE_TYPES: list = (
-    ["numerical"] * len(_NUMERICAL_COLS)
-    + ["categorical"] * sum(CARDINALITIES)
-)
+OHE_FEATURE_TYPES: list = list(_SPEC.ohe_feature_types)
 
 
 class LendingClubDataModule(L.LightningDataModule):
@@ -43,10 +37,10 @@ class LendingClubDataModule(L.LightningDataModule):
     Features:
     - Numerical (8): loan_amnt, int_rate, annual_inc, dti,
                      delinq_2yrs, open_acc, pub_rec, revol_util
-    - Categorical (4 → 16 OHE dims): term (2), grade (7),
-                                      home_ownership (4), verification_status (3)
+    - Categorical (4 → 17 OHE dims): term (2), grade (7),
+                                      home_ownership (5), verification_status (3)
 
-    Total: N_FEATURES = 24.
+    Total: N_FEATURES = 25.
 
     Preprocessing:
     - OHE fitted on full cleaned dataset (stable column assignments across splits).
@@ -106,7 +100,7 @@ class LendingClubDataModule(L.LightningDataModule):
         X_num = df[_NUMERICAL_COLS].values.astype(np.float32)
 
         # Full feature matrix: numericals first, then OHE categoricals
-        X = np.concatenate([X_num, X_cat], axis=1)  # (N, 24)
+        X = np.concatenate([X_num, X_cat], axis=1)  # (N, 25)
 
         # Shuffle and split
         rng = np.random.default_rng(self.hparams.seed)

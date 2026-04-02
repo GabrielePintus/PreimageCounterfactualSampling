@@ -6,7 +6,7 @@ Each strategy exposes a single method::
     eps = strategy.compute_eps(X, y)   # shape (N,)
 
 The returned array is aligned with the dataset rows (all classes combined).
-``CertifiedAtlas.build()`` splits it by class before passing it downstream.
+``CertCFAtlas.build()`` splits it by class before passing it downstream.
 """
 
 from abc import ABC, abstractmethod
@@ -40,7 +40,7 @@ class ConstantEpsStrategy(EpsStrategy):
     """
     Returns the same epsilon for every data point.
 
-    This is the original behaviour of ``CertifiedAtlas.build(eps=...)``.
+    This is the original behaviour of ``CertCFAtlas.build(eps=...)``.
 
     Parameters
     ----------

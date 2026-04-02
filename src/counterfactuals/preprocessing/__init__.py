@@ -1,15 +1,12 @@
 """Preprocessing primitives for shared benchmark representation spaces."""
 
+from dataset_specs import OHEBlockSpec
+
 from .transforms import (
     IdentityTransform,
     InverseTransformModel,
-    OHEBlockSpec,
     PCATransform,
     RepresentationTransform,
-    adult_ohe_blocks,
-    compas_ohe_blocks,
-    german_credit_ohe_blocks,
-    lending_club_ohe_blocks,
     snap_ohe_blocks,
 )
 
@@ -20,8 +17,4 @@ __all__ = [
     "InverseTransformModel",
     "OHEBlockSpec",
     "snap_ohe_blocks",
-    "adult_ohe_blocks",
-    "compas_ohe_blocks",
-    "german_credit_ohe_blocks",
-    "lending_club_ohe_blocks",
 ]

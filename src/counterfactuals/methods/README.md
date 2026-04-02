@@ -11,4 +11,4 @@ Counterfactual generation methods behind a shared interface.
 | `face.py` | FACE | Poyiadzi, Sokol, Santos-Rodriguez, De Bie, Flach (2020). "FACE: Feasible and Actionable Counterfactual Explanations". AIES. |
 | `growing_spheres.py` | Growing Spheres | Laugel, Lesot, Marsala, Renard, Detyniecki (2017). "Inverse Classification for Comparison-based Interpretability in Machine Learning". FUZZ-IEEE. |
 | `nearest_neighbor.py` | Nearest Neighbour | Baseline — returns the closest opposite-class training point. |
-| `certcf.py` | CertCF (CertifiedAtlas) | This work. |
+| `certcf.py` | CertCF (CertCFAtlas) | This work. |

@@ -7,7 +7,7 @@ Sampling and projection routines used to search certified regions for counterfac
 
 ## Example
 ```python
-from preimage_sampling.sampling import CounterfactualSampler
+from certcf.sampling import CounterfactualSampler
 
 sampler = CounterfactualSampler(solver="ECOS")
 ```

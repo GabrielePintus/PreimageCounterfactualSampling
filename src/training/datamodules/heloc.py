@@ -8,37 +8,16 @@ from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.preprocessing import StandardScaler
 
-_FEATURE_COLS = [
-    "estimate_of_risk",
-    "months_since_first_trade",
-    "months_since_last_trade",
-    "average_duration_of_resolution",
-    "number_of_satisfactory_trades",
-    "nr_trades_insolvent_for_over_60_days",
-    "nr_trades_insolvent_for_over_90_days",
-    "percentage_of_legal_trades",
-    "months_since_last_illegal_trade",
-    "maximum_illegal_trades_over_last_year",
-    "maximum_illegal_trades",
-    "nr_total_trades",
-    "nr_trades_initiated_in_last_year",
-    "percentage_of_installment_trades",
-    "months_since_last_inquiry_not_recent",
-    "nr_inquiries_in_last_6_months",
-    "nr_inquiries_in_last_6_months_not_recent",
-    "net_fraction_of_revolving_burden",
-    "net_fraction_of_installment_burden",
-    "nr_revolving_trades_with_balance",
-    "nr_installment_trades_with_balance",
-    "nr_banks_with_high_ratio",
-    "percentage_trades_with_balance",
-]
+from dataset_specs import get_tabular_dataset_spec
+
+_SPEC = get_tabular_dataset_spec("heloc")
+_FEATURE_COLS = list(_SPEC.feature_names)
 
 # All features are numerical — no OHE.
-CARDINALITIES: list = []
-INPUT_TYPES = ["numerical"] * len(_FEATURE_COLS)
-N_FEATURES = len(_FEATURE_COLS)  # 23
-OHE_FEATURE_TYPES: list = ["numerical"] * N_FEATURES
+CARDINALITIES: list = list(_SPEC.cardinalities)
+INPUT_TYPES = list(_SPEC.input_types)
+N_FEATURES = int(_SPEC.n_features)
+OHE_FEATURE_TYPES: list = list(_SPEC.ohe_feature_types)
 
 
 class HELOCDataModule(L.LightningDataModule):

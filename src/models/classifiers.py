@@ -256,7 +256,7 @@ class TabularClassifier(nn.Module):
         Return the OHE-space dimension indices for the given original feature names.
 
         Use this to build the ``fixed_dims`` argument for
-        ``CertifiedAtlas.find_counterfactual``.
+        ``CertCFAtlas.find_counterfactual``.
 
         Parameters
         ----------

@@ -7,5 +7,5 @@ Shared utility helpers for data handling used by certification and sampling work
 
 ## Example
 ```python
-from preimage_sampling.utils import data
+from certcf.utils import data
 ```

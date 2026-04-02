@@ -7,5 +7,5 @@ Spatial indexing utilities for faster candidate polytope retrieval.
 
 ## Example
 ```python
-from preimage_sampling.indexing import BVHIndex
+from certcf.indexing import BVHIndex
 ```

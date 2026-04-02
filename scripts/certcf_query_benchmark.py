@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from counterfactuals.benchmarks import create_default_registries
 from counterfactuals.utils.config import read_yaml
 from counterfactuals.utils.seed import seed_everything
+from dataset_specs import get_tabular_dataset_spec
 
 
 def subsample_train(
@@ -56,15 +57,16 @@ def _build_certcf_atlas(
     y_train: np.ndarray,
     seed: int,
 ):
-    """Build a CertifiedAtlas for Adult tabular classifier checkpoint."""
+    """Build a CertCFAtlas for Adult tabular classifier checkpoint."""
     import torch
     from torch.utils.data import TensorDataset
 
     from models.classifiers import TabularClassifier
-    from preimage_sampling import CertifiedAtlas, NearestOppositeClassClearanceStrategy
-    from training.datamodules.adult import CARDINALITIES, INPUT_TYPES
+    from certcf import CertCFAtlas, NearestOppositeClassClearanceStrategy
     from training.lit_classifier import LitClassifier
     from counterfactuals.models.torch_model import TorchModelWrapper
+
+    spec = get_tabular_dataset_spec("adult")
 
     ckpt = params.get("checkpoint")
     if not ckpt:
@@ -86,8 +88,8 @@ def _build_certcf_atlas(
         )
 
     backbone = TabularClassifier(
-        input_types=INPUT_TYPES,
-        cardinalities=CARDINALITIES,
+        input_types=list(spec.input_types),
+        cardinalities=list(spec.cardinalities),
         hidden_dims=[32, 8],
         num_classes=2,
         dropout=0.2,
@@ -127,7 +129,7 @@ def _build_certcf_atlas(
 
     medoid_ds = TensorDataset(torch.cat(z_parts), torch.cat(y_parts))
 
-    atlas = CertifiedAtlas(
+    atlas = CertCFAtlas(
         net_for_atlas,
         medoid_ds,
         device=device,
@@ -141,7 +143,7 @@ def _build_certcf_atlas(
         max_samples_per_class=max_samples_per_class,
     )
 
-    cat_slices = [(s, e) for t, (s, e) in zip(INPUT_TYPES, full_model._slices) if t == "categorical"]
+    cat_slices = list(spec.categorical_slices)
     atlas.ohe_slices = cat_slices if cat_slices else None
 
     return atlas, atlas_model, full_model, device

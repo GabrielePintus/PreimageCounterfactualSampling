@@ -1,7 +1,7 @@
 # Preimage Counterfactual Sampling
 
 This repository develops and benchmarks **CertCF**, our novel counterfactual method.
-`certcf` is the benchmark-facing name used in configs and result tables; its underlying algorithm is based on **Certified Polyhedral Projection (CPP)**.
+`certcf` is the package, config, and benchmark name used throughout the repo. The citation section preserves the exact published paper title where needed.
 
 ---
 
@@ -9,7 +9,7 @@ This repository develops and benchmarks **CertCF**, our novel counterfactual met
 
 The repository has two main roles:
 
-- implement the CertCF method and its lower-level certification/query engine in `src/preimage_sampling/`
+- implement the CertCF method and its lower-level certification/query engine in `src/certcf/`
 - benchmark CertCF against baselines such as DiCE, FACE, nearest-neighbor, and Growing Spheres via `scripts/benchmark.py`
 
 Given a classifier $f: \mathbb{R}^d \to \mathbb{R}^K$ and a query input $\mathbf{x}_0$ classified as class $l$, a **counterfactual explanation** is the closest point $\mathbf{x}'$ that the model classifies as a different target class $t$:
@@ -18,11 +18,11 @@ $$\mathbf{x}' = \arg\min_{\mathbf{z}} \|\mathbf{x}_0 - \mathbf{z}\|_2 \quad \tex
 
 Standard gradient-based approaches minimize a non-convex loss combining distance and classification confidence. This leads to local minima, boundary-hugging solutions with no validity guarantee, and fragility under small perturbations.
 
-**CPP replaces gradient descent with projection onto certified convex regions**, converting a non-convex search into a series of tractable quadratic programs.
+**CertCF replaces gradient descent with projection onto certified convex regions**, converting a non-convex search into a series of tractable quadratic programs.
 
 ---
 
-## The CPP Methodology
+## The CertCF Methodology
 
 ### Core Idea
 
@@ -219,8 +219,8 @@ In 2D, exact polygon area via Shapely validates the Monte Carlo estimator, which
 
 ```
 src/
-├── preimage_sampling/
-│   ├── atlas.py               # CertifiedAtlas: main CPP API (build + query)
+├── certcf/
+│   ├── atlas.py               # CertCFAtlas: main CertCF API (build + query)
 │   ├── certification/         # LiRPA orchestration and wrapped models
 │   ├── geometry/              # Polytope helpers and 2D unions
 │   ├── indexing/              # BVH spatial index
@@ -240,14 +240,14 @@ src/
 ```python
 import torch
 from models import SimpleClassifier
-from preimage_sampling import CertifiedAtlas, ConstantEpsStrategy
+from certcf import CertCFAtlas, ConstantEpsStrategy
 
 # Load model and dataset
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = SimpleClassifier(num_classes=5)
 dataset = torch.load('data/TOY Spiral/train_spiral.pt')
 
-atlas = CertifiedAtlas(
+atlas = CertCFAtlas(
     model,
     dataset,
     device=device,
@@ -271,7 +271,7 @@ if result.success:
 import torch
 import torch.nn as nn
 from models import MNISTClassifier, ConvAutoencoderChannels as ConvAutoencoder
-from preimage_sampling import CertifiedAtlas, ConstantEpsStrategy
+from certcf import CertCFAtlas, ConstantEpsStrategy
 from torch.utils.data import TensorDataset
 
 # Assume images, labels, and x_query have already been loaded as tensors.
@@ -298,7 +298,7 @@ with torch.no_grad():
     latent_vectors = mu.cpu()
 
 latent_dataset = TensorDataset(latent_vectors, labels)
-atlas = CertifiedAtlas(
+atlas = CertCFAtlas(
     composite,
     latent_dataset,
     device=device,
@@ -366,7 +366,7 @@ See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the ful
 | `1.2 - MNIST Classifier Evaluation.ipynb` | Evaluate the MNIST classifier training path |
 | `1.3 - MNIST Autoencoder Evaluation.ipynb` | Evaluate the convolutional autoencoder / VAE path |
 | `2 - Preimage approximation + CF sampling.ipynb` | Visualize certified regions and counterfactual sampling |
-| `3.1 - Spiral counterfactual sampling.ipynb` | Spiral CertCF/CPP workflow in 2D |
+| `3.1 - Spiral counterfactual sampling.ipynb` | Spiral CertCF/CertCF workflow in 2D |
 | `3.3 - MNIST counterfactual sampling.ipynb` | Pixel-space MNIST counterfactual sampling |
 | `3.4 - MNIST-AE counterfactual sampling.ipynb` | Latent-space MNIST counterfactual sampling |
 | `5.0 - Adult counterfactual sampling CertCF.ipynb` | Adult tabular CertCF workflow |
@@ -458,7 +458,7 @@ Key findings:
 ## Citation
 
 ```bibtex
-@software{preimage_sampling2025,
+@software{certcf2025,
   author = {Pintus, Gabriele},
   title  = {Preimage Counterfactual Sampling: Certified Polyhedral Projection for Counterfactual Explanations},
   year   = {2025},

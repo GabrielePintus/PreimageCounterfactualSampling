@@ -7,11 +7,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from dataset_specs import get_tabular_dataset_spec
+
 from .base_dataset import BaseDataset
 
 
 class CompasDataset(BaseDataset):
     """Adapter that wraps the ProPublica COMPAS LightningDataModule."""
+
+    spec = get_tabular_dataset_spec("compas")
 
     def __init__(self, data_dir: str = "data/", seed: int = 42):
         super().__init__()
@@ -52,6 +56,8 @@ class CompasDataset(BaseDataset):
 class GiveMeSomeCreditDataset(BaseDataset):
     """Adapter that wraps the Give Me Some Credit LightningDataModule."""
 
+    spec = get_tabular_dataset_spec("give_me_some_credit")
+
     def __init__(self, data_dir: str = "data/", seed: int = 42):
         super().__init__()
         self.data_dir = data_dir
@@ -90,6 +96,8 @@ class GiveMeSomeCreditDataset(BaseDataset):
 
 class HELOCDataset(BaseDataset):
     """Adapter that wraps the FICO HELOC LightningDataModule."""
+
+    spec = get_tabular_dataset_spec("heloc")
 
     def __init__(self, data_dir: str = "data/", seed: int = 42):
         super().__init__()
@@ -130,6 +138,8 @@ class HELOCDataset(BaseDataset):
 class GermanCreditDataset(BaseDataset):
     """Adapter that wraps the UCI German Credit LightningDataModule."""
 
+    spec = get_tabular_dataset_spec("german_credit")
+
     def __init__(self, data_dir: str = "data/", seed: int = 42):
         super().__init__()
         self.data_dir = data_dir
@@ -169,6 +179,8 @@ class GermanCreditDataset(BaseDataset):
 class LendingClubDataset(BaseDataset):
     """Adapter that wraps the LendingClub LightningDataModule."""
 
+    spec = get_tabular_dataset_spec("lending_club")
+
     def __init__(self, data_dir: str = "data/", seed: int = 42):
         super().__init__()
         self.data_dir = data_dir
@@ -207,6 +219,8 @@ class LendingClubDataset(BaseDataset):
 
 class AdultDataset(BaseDataset):
     """Adapter that reuses the existing Lightning Adult datamodule."""
+
+    spec = get_tabular_dataset_spec("adult")
 
     def __init__(self, data_dir: str = "data/", seed: int = 42):
         super().__init__()

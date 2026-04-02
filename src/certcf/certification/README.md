@@ -9,5 +9,5 @@ LiRPA-related wrappers and bound computation utilities.
 
 ## Example
 ```python
-from preimage_sampling.certification import PreimageApproximation
+from certcf.certification import PreimageApproximation
 ```

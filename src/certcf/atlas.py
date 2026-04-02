@@ -1,5 +1,5 @@
 """
-CertifiedAtlas: High-level API for certified counterfactual generation.
+CertCFAtlas: High-level API for certified counterfactual generation.
 
 This module provides a simple, user-friendly interface that combines:
 - LiRPA bound propagation for preimage certification
@@ -8,8 +8,8 @@ This module provides a simple, user-friendly interface that combines:
 - QP-based counterfactual projection
 
 Example usage:
-    >>> from preimage_sampling import CertifiedAtlas
-    >>> atlas = CertifiedAtlas(model, dataset, device, eps=0.1, norm=2)
+    >>> from certcf import CertCFAtlas
+    >>> atlas = CertCFAtlas(model, dataset, device, eps=0.1, norm=2)
     >>> atlas.build()
     >>> cf = atlas.find_counterfactual(x_query, target_class=3)
 """
@@ -74,7 +74,7 @@ class CounterfactualResult:
     profiling: Dict[str, ProfileValue] = field(default_factory=dict)
 
 
-class CertifiedAtlas:
+class CertCFAtlas:
     """
     High-level API for certified counterfactual generation.
 
@@ -154,7 +154,7 @@ class CertifiedAtlas:
         # Optional: Shapely polygon unions (only for 2D visualization)
         self._class_unions: Optional[Dict] = None
 
-    def build(self, build_unions: bool = False, verbose: bool = True) -> 'CertifiedAtlas':
+    def build(self, build_unions: bool = False, verbose: bool = True) -> 'CertCFAtlas':
         """Compute LiRPA bounds and build BVH spatial indices from the dataset."""
         # Resolve eps strategy
         eps_strategy = self.eps_strategy
@@ -1344,7 +1344,7 @@ class CertifiedAtlas:
     def summary(self) -> str:
         """Return a summary string of the atlas."""
         if self.bounds is None:
-            return "CertifiedAtlas (not built)"
+            return "CertCFAtlas (not built)"
 
         all_eps = np.concatenate([self.bounds[l]['eps'] for l in range(self.n_classes)])
         eps_desc = (
@@ -1353,7 +1353,7 @@ class CertifiedAtlas:
         )
 
         lines = [
-            f"CertifiedAtlas Summary",
+            f"CertCFAtlas Summary",
             f"=" * 40,
             f"Classes: {self.n_classes}",
             f"Perturbation: {eps_desc}, L{self.norm} norm",
@@ -1375,4 +1375,4 @@ class CertifiedAtlas:
 
     def __repr__(self) -> str:
         status = "built" if self.bounds is not None else "not built"
-        return f"CertifiedAtlas(n_classes={self.n_classes}, {status})"
+        return f"CertCFAtlas(n_classes={self.n_classes}, {status})"

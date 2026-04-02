@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`PreimageCounterfactualSampling` implements Certified Polyhedral Projection (CPP):
+`PreimageCounterfactualSampling` implements CertCF:
 - Build certified class-region approximations (polytopes) via LiRPA.
 - Search those certified regions to generate valid counterfactuals.
 - Use BVH indexing to reduce query-time projection cost.
@@ -13,7 +13,7 @@
 - `configs/`: training recipes for MNIST/Spiral/Adult models.
 - `src/models/`: classifier and autoencoder architectures.
 - `src/training/`: Lightning modules and datamodules.
-- `src/preimage_sampling/`: certification, atlas construction, geometry, indexing, sampling.
+- `src/certcf/`: certification, atlas construction, geometry, indexing, sampling.
 - `notebooks/`: experiment workflows and analysis.
 - `checkpoints/`, `wandb/`: generated artifacts.
 - `vicreg-loss/`: separate VICReg loss package.
@@ -31,18 +31,18 @@
 
 ### Counterfactual path
 
-1. Instantiate `preimage_sampling.CertifiedAtlas(model, dataset, device, ...)`.
+1. Instantiate `certcf.CertCFAtlas(model, dataset, device, ...)`.
 2. Call `build(...)` to compute LiRPA bounds and BVH indices.
 3. Call `find_counterfactual(...)` for online query-time projection.
 
 ## Main Public APIs
 
-- `src/preimage_sampling/atlas.py`:
-  - `CertifiedAtlas.build(...)`
-  - `CertifiedAtlas.find_counterfactual(...)`
-  - `CertifiedAtlas.find_counterfactual_batch(...)`
-  - `CertifiedAtlas.verify_counterfactual(...)`
-- `src/preimage_sampling/eps_strategies.py`:
+- `src/certcf/atlas.py`:
+  - `CertCFAtlas.build(...)`
+  - `CertCFAtlas.find_counterfactual(...)`
+  - `CertCFAtlas.find_counterfactual_batch(...)`
+  - `CertCFAtlas.verify_counterfactual(...)`
+- `src/certcf/eps_strategies.py`:
   - `ConstantEpsStrategy`
   - `NearestOppositeClassClearanceStrategy`
 
@@ -56,7 +56,7 @@
 ## Agent Priorities
 
 When asked to work quickly and safely, prioritize:
-1. `src/preimage_sampling/*` for CPP behavior.
+1. `src/certcf/*` for CertCF behavior.
 2. `src/models/*` and `src/training/*` for train/inference regressions.
 3. `configs/*.yaml` for reproducible experiments.
 4. `notebooks/` only when workflow parity matters.

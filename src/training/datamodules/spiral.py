@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import lightning as L
 
-from preimage_sampling.utils.data import make_spiral
+from certcf.utils.data import make_spiral
 
 
 class SpiralDataModule(L.LightningDataModule):

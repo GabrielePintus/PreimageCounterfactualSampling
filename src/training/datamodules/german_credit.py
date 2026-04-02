@@ -8,43 +8,24 @@ from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-_COLUMNS = [
-    "status", "duration", "credit_history", "purpose", "credit_amount",
-    "savings", "employment", "installment_rate", "personal_status",
-    "other_debtors", "present_residence", "property", "age",
-    "other_installment_plans", "housing", "num_credits", "job",
-    "num_liable", "telephone", "foreign_worker", "target",
-]
+from dataset_specs import get_tabular_dataset_spec
 
-_NUMERICAL_COLS = [
-    "duration", "credit_amount", "installment_rate", "present_residence",
-    "age", "num_credits", "num_liable",
-]
-
-_CATEGORICAL_COLS = [
-    "status", "credit_history", "purpose", "savings", "employment",
-    "personal_status", "other_debtors", "property",
-    "other_installment_plans", "housing", "job", "telephone", "foreign_worker",
-]
+_SPEC = get_tabular_dataset_spec("german_credit")
+_NUMERICAL_COLS = list(_SPEC.numerical_features)
+_CATEGORICAL_COLS = list(_SPEC.categorical_features)
 
 # Empirically verified from the UCI German Credit dataset (1000 samples).
 # status(4), credit_history(5), purpose(10), savings(5), employment(5),
 # personal_status(4, A95 absent), other_debtors(3), property(4),
 # other_installment_plans(3), housing(3), job(4), telephone(2), foreign_worker(2).
-CARDINALITIES = [4, 5, 10, 5, 5, 4, 3, 4, 3, 3, 4, 2, 2]
+CARDINALITIES = list(_SPEC.cardinalities)
 
-INPUT_TYPES = (
-    ["numerical"] * len(_NUMERICAL_COLS)
-    + ["categorical"] * len(_CATEGORICAL_COLS)
-)
+INPUT_TYPES = list(_SPEC.input_types)
 
-N_FEATURES = len(_NUMERICAL_COLS) + sum(CARDINALITIES)  # 7 + 54 = 61
+N_FEATURES = int(_SPEC.n_features)
 
-# Per-OHE-dimension type annotation (length N_FEATURES = 62).
-OHE_FEATURE_TYPES: list = (
-    ["numerical"] * len(_NUMERICAL_COLS)
-    + ["categorical"] * sum(CARDINALITIES)
-)
+# Per-OHE-dimension type annotation (length N_FEATURES = 61).
+OHE_FEATURE_TYPES: list = list(_SPEC.ohe_feature_types)
 
 
 class GermanCreditDataModule(L.LightningDataModule):
@@ -59,8 +40,8 @@ class GermanCreditDataModule(L.LightningDataModule):
     Features:
     - Numerical (7): duration, credit_amount, installment_rate, present_residence,
                      age, num_credits, num_liable
-    - Categorical (13 → 55 OHE dims): status(4), credit_history(5), purpose(10),
-      savings(5), employment(5), personal_status(5), other_debtors(3), property(4),
+    - Categorical (13 → 54 OHE dims): status(4), credit_history(5), purpose(10),
+      savings(5), employment(5), personal_status(4), other_debtors(3), property(4),
       other_installment_plans(3), housing(3), job(4), telephone(2), foreign_worker(2)
 
     Total: N_FEATURES = 61.

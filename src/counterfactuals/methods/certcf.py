@@ -14,8 +14,8 @@ from torch.utils.data import TensorDataset
 
 from counterfactuals.core.base_classes import CounterfactualResult, BaseCounterfactualMethod
 from counterfactuals.core.interfaces import ModelInterface
-from preimage_sampling.atlas import CertifiedAtlas
-from preimage_sampling.eps_strategies import EpsStrategy
+from certcf.atlas import CertCFAtlas
+from certcf.eps_strategies import EpsStrategy
 
 
 def _strip_dropout_modules(module: nn.Module) -> nn.Module:
@@ -30,7 +30,7 @@ def _strip_dropout_modules(module: nn.Module) -> nn.Module:
 
 
 class CertCF(BaseCounterfactualMethod):
-    """Wrap ``preimage_sampling.CertifiedAtlas`` into the common method interface."""
+    """Wrap ``certcf.CertCFAtlas`` into the common method interface."""
 
     def __init__(
         self,
@@ -65,10 +65,10 @@ class CertCF(BaseCounterfactualMethod):
         self.cnn = cnn
         self.default_query_method = default_query_method
         self.solver_maxiter = solver_maxiter
-        self.atlas: Optional[CertifiedAtlas] = None
+        self.atlas: Optional[CertCFAtlas] = None
 
     def _fit(self) -> None:
-        """Build the CertifiedAtlas from training data."""
+        """Build the CertCFAtlas from training data."""
         # Extract the raw torch module and device from the ModelInterface wrapper
         module = getattr(self.model, "model", None)
         if not isinstance(module, nn.Module):
@@ -87,7 +87,7 @@ class CertCF(BaseCounterfactualMethod):
             torch.from_numpy(self._y_train).long(),
         )
 
-        self.atlas = CertifiedAtlas(
+        self.atlas = CertCFAtlas(
             clean_module, dataset, device,
             cnn=self.cnn,
             norm=self.norm,

@@ -9,35 +9,22 @@ import lightning as L
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from dataset_specs import get_tabular_dataset_spec
 
-# Column ordering (matches UCI Adult schema)
-_ALL_COLS = [
-    "age", "workclass", "fnlwgt", "education", "education-num",
-    "marital-status", "occupation", "relationship", "race", "sex",
-    "capital-gain", "capital-loss", "hours-per-week", "native-country",
-]
-_NUMERICAL = {"age", "fnlwgt", "education-num", "capital-gain", "capital-loss", "hours-per-week"}
-_CATEGORICAL = ["workclass", "education", "marital-status", "occupation",
-                "relationship", "race", "sex", "native-country"]
+_SPEC = get_tabular_dataset_spec("adult")
+_ALL_COLS = list(_SPEC.feature_names)
+_NUMERICAL = set(_SPEC.numerical_features)
+_CATEGORICAL = list(_SPEC.categorical_features)
 
 # Module-level constants for TabularClassifier init.
 # Cardinalities are computed after NaN-row removal (empirically verified, see data/Adult/README.md).
-INPUT_TYPES = ["numerical" if c in _NUMERICAL else "categorical" for c in _ALL_COLS]
-CARDINALITIES = [7, 16, 7, 14, 6, 5, 2, 41]  # workclass, education, marital-status,
-                                              # occupation, relationship, race, sex, native-country
-# Computed from fetch_openml("adult", version=2) after dropna() — NaN rows are dropped,
-# so "missing" is never a category. The CSV-based count differs because it included NaN rows.
-N_FEATURES = len(_NUMERICAL) + sum(CARDINALITIES)  # 6 + 98 = 104
+INPUT_TYPES = list(_SPEC.input_types)
+CARDINALITIES = list(_SPEC.cardinalities)
+N_FEATURES = int(_SPEC.n_features)
 
-# Per-OHE-dimension type annotation (length N_FEATURES = 108).
+# Per-OHE-dimension type annotation (length N_FEATURES = 104).
 # Used downstream for MAD computation: numerical dims get MAD-scaled, categorical dims get 1.0.
-_cat_iter = iter(CARDINALITIES)
-OHE_FEATURE_TYPES: list = []
-for _t in INPUT_TYPES:
-    if _t == "numerical":
-        OHE_FEATURE_TYPES.append("numerical")
-    else:
-        OHE_FEATURE_TYPES.extend(["categorical"] * next(_cat_iter))
+OHE_FEATURE_TYPES: list = list(_SPEC.ohe_feature_types)
 
 
 class AdultDataModule(L.LightningDataModule):
@@ -53,7 +40,7 @@ class AdultDataModule(L.LightningDataModule):
     - Numerical features: StandardScaler fit on the train split only.
         - Optional PCA projection: fit on the train split only, then applied to
             train/val/test to train directly in reduced-dimensional space.
-    - Output feature dimension: N_FEATURES = 108 (6 numerical + 102 OHE).
+    - Output feature dimension: N_FEATURES = 104 (6 numerical + 98 OHE).
 
     Parameters
     ----------
@@ -129,7 +116,7 @@ class AdultDataModule(L.LightningDataModule):
         self.ohe = OneHotEncoder(sparse_output=False, handle_unknown="ignore", dtype=np.float32)
         self.ohe.fit(df[_CATEGORICAL].astype(str).values)
 
-        # OHE transform: shape (N, 102), columns ordered as in _CATEGORICAL.
+        # OHE transform: shape (N, 98), columns ordered as in _CATEGORICAL.
         X_ohe = self.ohe.transform(df[_CATEGORICAL].astype(str).values)
 
         # Map each categorical column to its slice in X_ohe.
@@ -148,7 +135,7 @@ class AdultDataModule(L.LightningDataModule):
             else:
                 s, e = _cat_offsets[col]
                 parts.append(X_ohe[:, s:e])
-        X = np.concatenate(parts, axis=1)  # (N, 108)
+        X = np.concatenate(parts, axis=1)  # (N, 104)
 
         # StandardScaler on numerical positions, fit on train only.
         num_pos = [i for i, t in enumerate(OHE_FEATURE_TYPES) if t == "numerical"]

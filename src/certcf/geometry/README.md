@@ -9,5 +9,5 @@ Geometric operations for polytope conversion, representation, and projection hel
 
 ## Example
 ```python
-from preimage_sampling.geometry.operations import project_onto_polytope
+from certcf.geometry.operations import project_onto_polytope
 ```

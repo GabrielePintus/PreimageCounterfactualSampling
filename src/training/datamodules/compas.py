@@ -8,27 +8,23 @@ from torch.utils.data import DataLoader, TensorDataset
 import lightning as L
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-# Features used (standard ProPublica subset)
-_NUMERICAL_COLS = ["age", "priors_count", "c_days_from_compas", "days_b_screening_arrest"]
-_CATEGORICAL_COLS = ["sex", "race", "c_charge_degree"]
+from dataset_specs import get_tabular_dataset_spec
+
+_SPEC = get_tabular_dataset_spec("compas")
+_NUMERICAL_COLS = list(_SPEC.numerical_features)
+_CATEGORICAL_COLS = list(_SPEC.categorical_features)
 
 # Empirically verified from the filtered ProPublica dataset.
 # sex: Male/Female (2), race: African-American/Asian/Caucasian/Hispanic/Native American/Other (6),
 # c_charge_degree: F/M (2).
-CARDINALITIES = [2, 6, 2]
+CARDINALITIES = list(_SPEC.cardinalities)
 
-INPUT_TYPES = (
-    ["numerical"] * len(_NUMERICAL_COLS)
-    + ["categorical"] * len(_CATEGORICAL_COLS)
-)
+INPUT_TYPES = list(_SPEC.input_types)
 
-N_FEATURES = len(_NUMERICAL_COLS) + sum(CARDINALITIES)  # 4 + 10 = 14
+N_FEATURES = int(_SPEC.n_features)
 
 # Per-OHE-dimension type annotation (length N_FEATURES = 14).
-OHE_FEATURE_TYPES: list = (
-    ["numerical"] * len(_NUMERICAL_COLS)
-    + ["categorical"] * sum(CARDINALITIES)
-)
+OHE_FEATURE_TYPES: list = list(_SPEC.ohe_feature_types)
 
 
 class CompasDataModule(L.LightningDataModule):

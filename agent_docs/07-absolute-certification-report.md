@@ -2,7 +2,7 @@
 
 ## 1) Problem Statement
 
-In our benchmark, `certcf` (the benchmark-facing name for our CertifiedAtlas-based method) reports validity below 100%:
+In our benchmark, `certcf` (the benchmark-facing name for our CertCFAtlas-based method) reports validity below 100%:
 
 - `nearest_neighbor`: 100.0%
 - `certcf`: 96.0% (8 failures out of 200)
@@ -142,7 +142,7 @@ Please propose and (if possible) provide a patch plan for:
    - extend `generate(...)` to support strict categorical fixing strategy and strict acceptance criteria
    - include metadata fields for certificate diagnostics
 
-3. `src/preimage_sampling/atlas.py`
+3. `src/certcf/atlas.py`
    - add/query helper for categorical assignment constrained search
    - ensure returned `x_cf` is already evaluation-ready (no extra snapping required)
    - add optional strict final target-margin check routine

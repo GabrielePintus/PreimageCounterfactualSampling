@@ -10,6 +10,8 @@ from counterfactuals.core.interfaces import DatasetInterface
 class BaseDataset(DatasetInterface):
     """Simple in-memory dataset base class."""
 
+    spec = None
+
     def __init__(self):
         self._loaded = False
 

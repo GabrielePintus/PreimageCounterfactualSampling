@@ -26,7 +26,7 @@ Avoid full-repo linear reads unless explicitly asked.
 ## Safe Edit Zones
 
 Preferred edit zones for core work:
-- `src/preimage_sampling/**`
+- `src/certcf/**`
 - `src/models/**`
 - `src/training/**`
 - `configs/*.yaml`
@@ -44,7 +44,7 @@ Default no-touch zones unless requested:
 
 After non-trivial edits, do at least one of:
 - run a reduced-epoch `train.py fit` command for impacted model path
-- run a minimal `CertifiedAtlas.build(...)` + `find_counterfactual(...)` check
+- run a minimal `CertCFAtlas.build(...)` + `find_counterfactual(...)` check
 - run subproject tests only when those subprojects are edited
 
 ## Common Failure Modes

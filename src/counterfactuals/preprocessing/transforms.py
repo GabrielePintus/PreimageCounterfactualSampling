@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
 from sklearn.decomposition import PCA
 
 from counterfactuals.core.interfaces import ModelInterface
+from dataset_specs import OHEBlockSpec
 
 
 class RepresentationTransform(ABC):
@@ -90,14 +90,6 @@ class PCATransform(RepresentationTransform):
         return float(np.sum(self._pca.explained_variance_ratio_))
 
 
-@dataclass(frozen=True)
-class OHEBlockSpec:
-    """One-hot block boundaries in flattened feature vectors."""
-
-    start: int
-    end: int
-
-
 def snap_ohe_blocks(x: np.ndarray, blocks: Sequence[OHEBlockSpec]) -> np.ndarray:
     """Project categorical OHE blocks onto valid one-hot vertices via argmax."""
     arr = np.asarray(x, dtype=np.float32)
@@ -111,79 +103,6 @@ def snap_ohe_blocks(x: np.ndarray, blocks: Sequence[OHEBlockSpec]) -> np.ndarray
         arr_2d[:, block.start:block.end] = block_vals
 
     return arr_2d[0] if arr.ndim == 1 else arr_2d
-
-
-def compas_ohe_blocks() -> list[OHEBlockSpec]:
-    """Infer COMPAS one-hot block boundaries from datamodule constants."""
-    from training.datamodules.compas import CARDINALITIES, INPUT_TYPES
-
-    blocks: list[OHEBlockSpec] = []
-    position = 0
-    cardinality_idx = 0
-    for feature_type in INPUT_TYPES:
-        if feature_type == "numerical":
-            position += 1
-            continue
-        cardinality = CARDINALITIES[cardinality_idx]
-        blocks.append(OHEBlockSpec(start=position, end=position + cardinality))
-        position += cardinality
-        cardinality_idx += 1
-    return blocks
-
-
-def german_credit_ohe_blocks() -> list[OHEBlockSpec]:
-    """Infer German Credit one-hot block boundaries from datamodule constants."""
-    from training.datamodules.german_credit import CARDINALITIES, INPUT_TYPES
-
-    blocks: list[OHEBlockSpec] = []
-    position = 0
-    cardinality_idx = 0
-    for feature_type in INPUT_TYPES:
-        if feature_type == "numerical":
-            position += 1
-            continue
-        cardinality = CARDINALITIES[cardinality_idx]
-        blocks.append(OHEBlockSpec(start=position, end=position + cardinality))
-        position += cardinality
-        cardinality_idx += 1
-    return blocks
-
-
-def lending_club_ohe_blocks() -> list[OHEBlockSpec]:
-    """Infer LendingClub one-hot block boundaries from datamodule constants."""
-    from training.datamodules.lending_club import CARDINALITIES, INPUT_TYPES
-
-    blocks: list[OHEBlockSpec] = []
-    position = 0
-    cardinality_idx = 0
-    for feature_type in INPUT_TYPES:
-        if feature_type == "numerical":
-            position += 1
-            continue
-        cardinality = CARDINALITIES[cardinality_idx]
-        blocks.append(OHEBlockSpec(start=position, end=position + cardinality))
-        position += cardinality
-        cardinality_idx += 1
-    return blocks
-
-
-def adult_ohe_blocks() -> list[OHEBlockSpec]:
-    """Infer Adult one-hot block boundaries from datamodule constants."""
-    from training.datamodules.adult import CARDINALITIES, INPUT_TYPES
-
-    blocks: list[OHEBlockSpec] = []
-    position = 0
-    cardinality_idx = 0
-    for feature_type in INPUT_TYPES:
-        if feature_type == "numerical":
-            position += 1
-            continue
-        cardinality = CARDINALITIES[cardinality_idx]
-        blocks.append(OHEBlockSpec(start=position, end=position + cardinality))
-        position += cardinality
-        cardinality_idx += 1
-    return blocks
-
 
 class InverseTransformModel(ModelInterface):
     """Model adapter that accepts generation-space inputs and predicts in eval space."""

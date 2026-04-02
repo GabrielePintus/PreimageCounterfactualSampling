@@ -1,4 +1,4 @@
-"""Counterfactual sampling using Certified Polyhedral Projection."""
+"""Counterfactual sampling utilities for CertCF."""
 
 from .sampler import CounterfactualSampler, PolytopeAtlas
 
