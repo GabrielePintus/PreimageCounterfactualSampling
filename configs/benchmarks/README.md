@@ -1,12 +1,8 @@
 # Benchmark Pipeline
 
 This directory contains YAML configuration files for the counterfactual benchmark pipeline.
-Two scripts consume these configs:
-
-| Script | Purpose |
-|--------|---------|
-| `scripts/benchmark.py` | Single dataset — one config, one output file |
-| `scripts/benchmark_multi.py` | Multiple datasets — one config, one combined output file |
+The official entrypoint is `scripts/benchmark.py`.
+It accepts both single-dataset and multi-dataset config schemas.
 
 ---
 
@@ -17,15 +13,15 @@ Two scripts consume these configs:
 python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
 
 # All tabular datasets (meeting benchmark)
-python scripts/benchmark_multi.py --config configs/benchmarks/benchmark_meeting_all.yaml
+python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all.yaml
 
 # Subset of datasets
-python scripts/benchmark_multi.py \
+python scripts/benchmark.py \
     --config configs/benchmarks/benchmark_meeting_all.yaml \
     --datasets adult compas
 
 # Override output path
-python scripts/benchmark_multi.py \
+python scripts/benchmark.py \
     --config configs/benchmarks/benchmark_meeting_all.yaml \
     --output results/my_run.parquet
 ```
@@ -34,10 +30,10 @@ python scripts/benchmark_multi.py \
 
 ## Output
 
-Both scripts produce:
+The benchmark pipeline produces:
 - **`.parquet`** — flat DataFrame loaded directly by the analysis notebooks (`notebooks/6.x`).
 
-`benchmark_multi.py` additionally writes one per-dataset parquet
+For a multi-dataset config, `benchmark.py` additionally writes one per-dataset parquet
 (`<stem>_<dataset>.parquet`) alongside the combined output file.
 
 ---
@@ -114,7 +110,8 @@ All list parameters are expanded into a Cartesian product; the `run_name` gets a
 
 ## Multi-Dataset Config Schema
 
-Used by `benchmark_multi.py`. Methods are defined once and applied to every dataset.
+Used by `benchmark.py` when the config contains a top-level `datasets:` list.
+Methods are defined once and applied to every dataset.
 
 ```yaml
 seed: 42
@@ -166,7 +163,7 @@ datasets:
 ### Auto-inherit for `certcf`
 
 If `certcf` appears in the shared methods list **without** a `checkpoint` key,
-`benchmark_multi.py` automatically copies `model.params.checkpoint` (and `device`) into it.
+`benchmark.py` automatically copies `model.params.checkpoint` (and `device`) into it.
 This avoids repeating the checkpoint path in both `model` and `method_overrides`.
 
 ### `method_overrides`
@@ -189,7 +186,7 @@ directly on the dataset block:
 
 ## Available Config Files
 
-### Multi-dataset (run with `benchmark_multi.py`)
+### Multi-dataset (run with `benchmark.py`)
 
 | File | Datasets | Methods | Queries |
 |------|----------|---------|---------|
@@ -209,9 +206,8 @@ directly on the dataset block:
 
 | File | Script | Purpose |
 |------|--------|---------|
-| `cpp_query_benchmark_adult.yaml` | `scripts/cpp_query_benchmark.py` | BVH vs sorted query method comparison |
-| `cpp_query_benchmark_adult_smoke.yaml` | `scripts/cpp_query_benchmark.py` | Smoke version of the above |
-| `counterfactual_experiment.yaml` | `src/.../runner.py` | Legacy experiment runner schema |
+| `certcf_query_benchmark_adult.yaml` | `scripts/certcf_query_benchmark.py` | BVH vs sorted query method comparison |
+| `certcf_query_benchmark_adult_smoke.yaml` | `scripts/certcf_query_benchmark.py` | Smoke version of the above |
 
 ---
 

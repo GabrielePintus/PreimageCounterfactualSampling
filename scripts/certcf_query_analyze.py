@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Analyze CPP query benchmark outputs and print optimization-focused diagnostics.
+"""Analyze CertCF query benchmark outputs and print optimization-focused diagnostics.
 
 Usage:
-    python scripts/cpp_query_analyze.py \
-      --per-query results/cpp_query_benchmark_adult.parquet \
-      --summary results/cpp_query_benchmark_adult_summary.parquet
+    python scripts/certcf_query_analyze.py \
+      --per-query results/certcf_query_benchmark_adult.parquet \
+      --summary results/certcf_query_benchmark_adult_summary.parquet
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def _fmt(df: pd.DataFrame) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyze CPP query benchmark artifacts")
+    parser = argparse.ArgumentParser(description="Analyze CertCF query benchmark artifacts")
     parser.add_argument("--per-query", required=True, help="Per-query parquet path")
     parser.add_argument("--summary", required=True, help="Summary parquet path")
     args = parser.parse_args()

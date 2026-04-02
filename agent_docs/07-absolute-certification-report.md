@@ -1,13 +1,13 @@
-# Report for Gemini Pro: Why CPP Validity Is <100% and How to Achieve Absolute Certification
+# Report for Gemini Pro: Why CertCF Validity Is <100% and How to Achieve Absolute Certification
 
 ## 1) Problem Statement
 
-In our benchmark, `cpp` (Certified Polyhedral Projection / CertifiedAtlas-based method) reports validity below 100%:
+In our benchmark, `certcf` (the benchmark-facing name for our CertifiedAtlas-based method) reports validity below 100%:
 
 - `nearest_neighbor`: 100.0%
-- `cpp`: 96.0% (8 failures out of 200)
+- `certcf`: 96.0% (8 failures out of 200)
 
-This is surprising because CPP should produce certified counterfactuals.
+This is surprising because CertCF should produce certified counterfactuals.
 
 We need to explain the discrepancy and redesign the pipeline to obtain **absolutely certified counterfactuals in the final evaluation space**.
 
@@ -33,7 +33,7 @@ Relevant logic:
 
 From `results/benchmark_adult_test.parquet`:
 
-- `cpp` rows: 200
+- `certcf` rows: 200
 - `success=True`: 192
 - `success=False`: 8
 - all 8 failures have `error = None`
@@ -45,7 +45,7 @@ Therefore failures are **not** from timeout or exceptions; they are outputs that
 
 ## 4) Root cause: certification space ≠ evaluation space
 
-Our CPP pipeline currently has a space mismatch:
+Our CertCF pipeline currently has a space mismatch:
 
 1. Certified projection is solved in a continuous space with linear constraints.
 2. For tabular categorical features (OHE), the solution can be fractional in categorical blocks.
@@ -132,13 +132,13 @@ No extra decode/snap after method output.
 Please propose and (if possible) provide a patch plan for:
 
 1. `scripts/benchmark.py`
-   - for `cpp`, remove post-hoc decode/snap path from validity evaluation (or gate it behind a legacy mode)
+   - for `certcf`, remove post-hoc decode/snap path from validity evaluation (or gate it behind a legacy mode)
    - add explicit columns distinguishing:
      - `solver_success`
      - `cert_check_success`
      - `eval_success`
 
-2. `src/counterfactuals/methods/my_method.py`
+2. `src/counterfactuals/methods/certcf.py`
    - extend `generate(...)` to support strict categorical fixing strategy and strict acceptance criteria
    - include metadata fields for certificate diagnostics
 

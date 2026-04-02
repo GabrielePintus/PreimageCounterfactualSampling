@@ -1,10 +1,16 @@
 # Preimage Counterfactual Sampling
 
-**Certified Polyhedral Projection (CPP)** for generating valid, proximal, and robust counterfactual explanations.
+This repository develops and benchmarks **CertCF**, our novel counterfactual method.
+`certcf` is the benchmark-facing name used in configs and result tables; its underlying algorithm is based on **Certified Polyhedral Projection (CPP)**.
 
 ---
 
 ## Overview
+
+The repository has two main roles:
+
+- implement the CertCF method and its lower-level certification/query engine in `src/preimage_sampling/`
+- benchmark CertCF against baselines such as DiCE, FACE, nearest-neighbor, and Growing Spheres via `scripts/benchmark.py`
 
 Given a classifier $f: \mathbb{R}^d \to \mathbb{R}^K$ and a query input $\mathbf{x}_0$ classified as class $l$, a **counterfactual explanation** is the closest point $\mathbf{x}'$ that the model classifies as a different target class $t$:
 
@@ -334,18 +340,20 @@ result_cross = atlas.find_counterfactual(
 
 ## Benchmark Pipeline
 
-Counterfactual methods can be evaluated against each other using the benchmark scripts.
+Counterfactual methods can be evaluated against each other using the benchmark pipeline.
 A single config file specifies the dataset(s), model checkpoint, methods, and hyperparameter grids.
+The official benchmark entrypoint is `scripts/benchmark.py`.
 
 ```bash
 # Single dataset
 python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
 
 # Multiple datasets → one combined parquet
-python scripts/benchmark_multi.py --config configs/benchmarks/benchmark_meeting_all.yaml
+python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all.yaml
 ```
 
 Results are written as `.parquet` files and loaded directly by the `notebooks/6.x` analysis notebooks.
+In benchmark configs and output tables, the novel method appears as `certcf`.
 
 See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the full pipeline documentation: config schema, grid expansion, multi-dataset format, and the list of available config files.
 
@@ -358,10 +366,10 @@ See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the ful
 | `1.2 - MNIST Classifier Evaluation.ipynb` | Evaluate the MNIST classifier training path |
 | `1.3 - MNIST Autoencoder Evaluation.ipynb` | Evaluate the convolutional autoencoder / VAE path |
 | `2 - Preimage approximation + CF sampling.ipynb` | Visualize certified regions and counterfactual sampling |
-| `3.1 - Spiral counterfactual sampling.ipynb` | Spiral CPP workflow in 2D |
+| `3.1 - Spiral counterfactual sampling.ipynb` | Spiral CertCF/CPP workflow in 2D |
 | `3.3 - MNIST counterfactual sampling.ipynb` | Pixel-space MNIST counterfactual sampling |
 | `3.4 - MNIST-AE counterfactual sampling.ipynb` | Latent-space MNIST counterfactual sampling |
-| `5.0 - Adult counterfactual sampling CertifiedAtlas.ipynb` | Adult tabular CPP workflow |
+| `5.0 - Adult counterfactual sampling CertCF.ipynb` | Adult tabular CertCF workflow |
 | `6.1 - Benchmark analysis.ipynb` | Single-dataset benchmark analysis |
 | `6.2 - Multi-dataset benchmark analysis.ipynb` | Combined tabular benchmark analysis |
 | `6.3 - MNIST benchmark analysis.ipynb` | MNIST benchmark analysis |
@@ -416,21 +424,21 @@ The VAE's KL regularization brings decision boundaries closer (vs. plain AE: 95%
 
 ### Adult tabular dataset (OHE input space, `L1`, adaptive ε, n=500 queries, 5 000 train medoids)
 
-Benchmark comparing CPP against DiCE, FACE, nearest_neighbor, and growing_spheres on the UCI Adult dataset. All methods operate and are evaluated in the same raw OHE feature space.
+Benchmark comparing CertCF against DiCE, FACE, nearest_neighbor, and growing_spheres on the UCI Adult dataset. All methods operate and are evaluated in the same raw OHE feature space.
 
 | Method | Validity | L1 (mean) | L2 (mean) | Sparsity (mean) | Runtime (mean) |
 |---|---|---|---|---|---|
-| **CPP** | **98.8%** | 7.34 | 2.65 | **8.5%** | 0.86 s |
+| **CertCF** | **98.8%** | 7.34 | 2.65 | **8.5%** | 0.86 s |
 | nearest_neighbor | 100% | 6.91 | 2.57 | — | <1 ms |
 | FACE | 100% | 7.44 | 2.71 | — | — |
 | DiCE | 100% | 8.23 | 1.69 | 60% | — |
 | growing_spheres | 82.6% | 6.13 | 0.99 | 100% | — |
 
 Key findings:
-- **Validity**: CPP achieves 98.8% with certified guarantees. growing_spheres fails on 17.4% of queries.
-- **Sparsity**: CPP changes only 8.5% of features on average — the sparsest of all methods — consistent with its QP minimising the L1 norm with OHE simplex constraints.
-- **Proximity**: CPP's L1/L2 distances are competitive with retrieval-based methods (nearest_neighbor, FACE) and better than DiCE.
-- **Runtime**: 0.86 s/query for CPP reflects online BVH traversal + a small number of CVXPY solves. The atlas is built once offline.
+- **Validity**: CertCF achieves 98.8% with certified guarantees. growing_spheres fails on 17.4% of queries.
+- **Sparsity**: CertCF changes only 8.5% of features on average — the sparsest of all methods — consistent with its QP minimising the L1 norm with OHE simplex constraints.
+- **Proximity**: CertCF's L1/L2 distances are competitive with retrieval-based methods (nearest_neighbor, FACE) and better than DiCE.
+- **Runtime**: 0.86 s/query for CertCF reflects online BVH traversal + a small number of CVXPY solves. The atlas is built once offline.
 
 ---
 

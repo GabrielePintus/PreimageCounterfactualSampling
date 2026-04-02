@@ -1,6 +1,6 @@
 # src
 
-This directory contains the Python source code for training models, building certified preimage approximations, and running modular counterfactual experiments.
+This directory contains the Python source code for training models, building certified preimage approximations, and running modular counterfactual benchmarks.
 
 ## Main packages
 - `training/`: Lightning modules and data modules.
@@ -11,5 +11,5 @@ This directory contains the Python source code for training models, building cer
 ## Example
 ```python
 from preimage_sampling import CertifiedAtlas
-from counterfactuals.experiments.runner import run_from_config_path
+from counterfactuals.benchmarks import create_default_registries
 ```

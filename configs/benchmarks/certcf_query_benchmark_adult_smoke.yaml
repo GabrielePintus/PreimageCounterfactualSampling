@@ -6,9 +6,9 @@ dataset:
     data_dir: data/
 
 sampling:
-  n_train: 5000
-  n_queries: 200
-  train_method: kmedoids   # kmedoids | random
+  n_train: 1000
+  n_queries: 40
+  train_method: random
 
 atlas:
   params:
@@ -18,7 +18,7 @@ atlas:
     k_per_class: null
     max_samples_per_class: null
     norm: 1
-    batch_size: 256
+    batch_size: 128
 
 variants:
   - name: bvh
@@ -33,6 +33,6 @@ variants:
 
 
 output:
-  per_query_path: results/cpp_query_benchmark_adult.parquet
-  summary_path: results/cpp_query_benchmark_adult_summary.parquet
-  report_md_path: results/cpp_query_benchmark_adult_summary.md
+  per_query_path: results/certcf_query_benchmark_adult_smoke.parquet
+  summary_path: results/certcf_query_benchmark_adult_smoke_summary.parquet
+  report_md_path: results/certcf_query_benchmark_adult_smoke_summary.md

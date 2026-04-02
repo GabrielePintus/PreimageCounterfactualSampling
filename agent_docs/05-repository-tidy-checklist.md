@@ -19,7 +19,7 @@ Tracked modified:
 - `.gitignore`
 - `data/Trained Models/conv_ae.pth`
 - `notebooks/5.1 - Adult counterfactual sampling FACE.ipynb`
-- `src/counterfactuals/experiments/runner.py`
+- `scripts/benchmark.py`
 - `src/counterfactuals/methods/README.md`
 - `src/counterfactuals/methods/__init__.py`
 - `src/counterfactuals/methods/dice.py`
@@ -31,7 +31,7 @@ Tracked deleted:
 
 Untracked:
 - `config.yaml`
-- `notebooks/5.0 - Adult counterfactual sampling CertifiedAtlas.ipynb`
+- `notebooks/5.0 - Adult counterfactual sampling CertCF.ipynb`
 - `notebooks/5.2 - Adult counterfactual sampling DiCE.ipynb`
 - `notebooks/5.3 - Adult counterfactual sampling 1-NN.ipynb`
 - `papers/Explaining Machine Learning Classifiers through Diverse Counterfactual Explanations.pdf`
@@ -41,13 +41,13 @@ Untracked:
 ## 3) Defaults (Can Be Revised)
 
 ### Keep as intentional work
-- [x] `src/counterfactuals/experiments/runner.py`
+- [x] `scripts/benchmark.py`
 - [x] `src/counterfactuals/methods/__init__.py`
 - [x] `src/counterfactuals/methods/dice.py`
 - [x] `src/counterfactuals/methods/face.py` (new file)
 - [x] `src/counterfactuals/methods/nearest_neighbor.py` (new file)
 - [x] `tests/counterfactuals/test_methods.py`
-- [x] `notebooks/5.0 - Adult counterfactual sampling CertifiedAtlas.ipynb`
+- [x] `notebooks/5.0 - Adult counterfactual sampling CertCF.ipynb`
 - [x] `notebooks/5.2 - Adult counterfactual sampling DiCE.ipynb`
 - [x] `notebooks/5.3 - Adult counterfactual sampling 1-NN.ipynb`
 

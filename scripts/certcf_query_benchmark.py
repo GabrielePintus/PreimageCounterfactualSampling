@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""CPP query-time benchmark suite with per-query profiling and ablations.
+"""CertCF query-time benchmark suite with per-query profiling and ablations.
 
 Usage:
-    python scripts/cpp_query_benchmark.py --config configs/benchmarks/cpp_query_benchmark_adult.yaml
+    python scripts/certcf_query_benchmark.py --config configs/benchmarks/certcf_query_benchmark_adult.yaml
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import pandas as pd
 # Allow running from repo root without installing as package.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from counterfactuals.experiments.runner import create_default_registries
+from counterfactuals.benchmarks import create_default_registries
 from counterfactuals.utils.config import read_yaml
 from counterfactuals.utils.seed import seed_everything
 
@@ -50,7 +50,7 @@ def subsample_train(
     return x_train[idx], y_train[idx]
 
 
-def _build_cpp_atlas(
+def _build_certcf_atlas(
     params: Dict[str, Any],
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -196,7 +196,7 @@ def _summarize(df: pd.DataFrame) -> pd.DataFrame:
 
 def _write_markdown_summary(summary_df: pd.DataFrame, out_path: Path) -> None:
     lines = [
-        "# CPP Query Benchmark Summary",
+        "# CertCF Query Benchmark Summary",
         "",
         "| Variant | Queries | Success | Validity | Mean ms | P50 ms | P95 ms | P99 ms | Mean QP | P50 QP | P95 QP | Mean L2 |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -236,7 +236,7 @@ def run_suite(cfg: Dict[str, Any]) -> None:
     x_queries = x_test_full[query_indices]
 
     atlas_cfg = cfg["atlas"]
-    atlas, atlas_model, full_model, device = _build_cpp_atlas(atlas_cfg.get("params", {}), x_train, y_train, seed=seed)
+    atlas, atlas_model, full_model, device = _build_certcf_atlas(atlas_cfg.get("params", {}), x_train, y_train, seed=seed)
 
     y_orig = atlas_model.predict(x_queries)
     nop_dists = np.array([
@@ -308,9 +308,9 @@ def run_suite(cfg: Dict[str, Any]) -> None:
     summary_df = _summarize(df)
 
     output_cfg = cfg.get("output", {})
-    per_query_path = Path(output_cfg.get("per_query_path", "results/cpp_query_benchmark.parquet"))
-    summary_path = Path(output_cfg.get("summary_path", "results/cpp_query_benchmark_summary.parquet"))
-    report_md_path = Path(output_cfg.get("report_md_path", "results/cpp_query_benchmark_summary.md"))
+    per_query_path = Path(output_cfg.get("per_query_path", "results/certcf_query_benchmark.parquet"))
+    summary_path = Path(output_cfg.get("summary_path", "results/certcf_query_benchmark_summary.parquet"))
+    report_md_path = Path(output_cfg.get("report_md_path", "results/certcf_query_benchmark_summary.md"))
 
     per_query_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -326,7 +326,7 @@ def run_suite(cfg: Dict[str, Any]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run CPP query-time benchmark suite")
+    parser = argparse.ArgumentParser(description="Run CertCF query-time benchmark suite")
     parser.add_argument("--config", required=True, help="Path to benchmark YAML config")
     args = parser.parse_args()
 

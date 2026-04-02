@@ -21,23 +21,16 @@ Classifier and autoencoder training configs for `python train.py fit --config co
 
 Benchmark config details live in `configs/benchmarks/README.md`.
 
-### Single-dataset benchmarks (`scripts/benchmark.py`)
+### Benchmarks (`scripts/benchmark.py`)
 
 - `benchmark_adult.yaml`
 - `benchmark_adult_main.yaml`
 - `benchmark_adult_certcf.yaml`
 - `benchmark_mnist.yaml`
-
-### Multi-dataset benchmarks (`scripts/benchmark_multi.py`)
-
 - `benchmark_meeting_all.yaml`
 - `benchmark_smoke_all.yaml`
 
-### CPP query benchmarks (`scripts/cpp_query_benchmark.py`)
+### CertCF query benchmarks (`scripts/certcf_query_benchmark.py`)
 
-- `cpp_query_benchmark_adult.yaml`
-- `cpp_query_benchmark_adult_smoke.yaml`
-
-### Typed experiment runner (`python run_experiment.py <config_path>`)
-
-- `counterfactual_experiment.yaml`
+- `certcf_query_benchmark_adult.yaml`
+- `certcf_query_benchmark_adult_smoke.yaml`

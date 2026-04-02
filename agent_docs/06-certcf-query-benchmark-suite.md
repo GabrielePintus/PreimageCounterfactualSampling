@@ -1,8 +1,8 @@
-# CPP Query Benchmark Suite
+# CertCF Query Benchmark Suite
 
 ## Purpose
 
-This benchmark is focused on **online CPP query-time performance** and pruning effectiveness.
+This benchmark is focused on **online CertCF query-time performance** and pruning effectiveness.
 It is designed for ablation studies before implementing search/pruning optimizations.
 
 ## Entrypoint
@@ -10,7 +10,7 @@ It is designed for ablation studies before implementing search/pruning optimizat
 Run:
 
 ```bash
-python scripts/cpp_query_benchmark.py --config configs/cpp_query_benchmark_adult.yaml
+python scripts/certcf_query_benchmark.py --config configs/benchmarks/certcf_query_benchmark_adult.yaml
 ```
 
 ## What It Logs

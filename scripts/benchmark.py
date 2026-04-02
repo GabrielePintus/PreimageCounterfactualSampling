@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Benchmark all counterfactual methods on a single dataset.
+"""Benchmark counterfactual methods from a single- or multi-dataset config.
 
 Usage:
     python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
     python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --output results/run2.parquet
     python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --seed 123 --n_queries 200
     python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --methods dice face nearest_neighbor
+    python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all.yaml
+    python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all.yaml --datasets adult compas
 
 Output:
-    A .parquet file (flat, for notebooks and analysis).
+    Single-dataset config:
+        A .parquet file (flat, for notebooks and analysis).
+    Multi-dataset config:
+        One per-dataset .parquet file plus one combined .parquet file.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import signal
 import sys
 import time
 import warnings
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,8 +43,7 @@ warnings.filterwarnings(
 # Allow running from repo root without installing as package.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from counterfactuals.benchmarks.results import BenchmarkResult, MethodResult, QueryResult
-from counterfactuals.experiments.runner import create_default_registries
+from counterfactuals.benchmarks import BenchmarkResult, MethodResult, QueryResult, create_default_registries
 from counterfactuals.preprocessing import (
     IdentityTransform,
     InverseTransformModel,
@@ -457,7 +462,7 @@ def _build_torch_model_from_checkpoint(
 
     Dropout layers are stripped so the model is deterministic at inference time.
     This wrapper can be used as the shared benchmark model so that all methods
-    (DiCE, FACE, NN, growing_spheres, CPP) target the same classifier.
+    (DiCE, FACE, NN, growing_spheres, CertCF) target the same classifier.
     """
     import torch
     from models.classifiers import TabularClassifier
@@ -568,16 +573,22 @@ def _expand_grid(methods_cfg: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _apply_cli_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     """Apply CLI overrides on top of the YAML config dict (mutates cfg)."""
     if args.output is not None:
-        cfg.setdefault("output", {})["path"] = args.output
+        if "datasets" in cfg:
+            cfg["output"] = args.output
+        else:
+            cfg.setdefault("output", {})["path"] = args.output
     if args.seed is not None:
         cfg["seed"] = args.seed
     if args.n_queries is not None:
-        cfg.setdefault("sampling", {})["n_queries"] = args.n_queries
+        if "datasets" in cfg:
+            cfg.setdefault("sampling", {})["n_queries"] = args.n_queries
+        else:
+            cfg.setdefault("sampling", {})["n_queries"] = args.n_queries
     if args.methods is not None:
         allowed = set(args.methods)
         cfg["methods"] = [
             m for m in cfg.get("methods", [])
-            if m.get("run_name", m["name"]) in allowed
+            if m.get("run_name", m["name"]) in allowed or m["name"] in allowed
         ]
     return cfg
 
@@ -611,8 +622,69 @@ def _build_shared_preprocessing(cfg: Dict[str, Any], seed: int):
     raise ValueError(f"Unsupported preprocessing name: {name}")
 
 
+def _merge_methods(
+    shared_methods: List[Dict[str, Any]],
+    method_overrides: Dict[str, Dict[str, Any]],
+    model_params: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Build the final per-dataset method list for a multi-dataset config."""
+    result = []
+    for entry in shared_methods:
+        m = deepcopy(entry)
+        run_name = m.get("run_name", m["name"])
+
+        override = method_overrides.get(run_name) or method_overrides.get(m["name"]) or {}
+        if override:
+            m.setdefault("params", {}).update(override)
+
+        if m["name"] == "certcf":
+            params = m.setdefault("params", {})
+            if "checkpoint" not in params and "checkpoint" in model_params:
+                params["checkpoint"] = model_params["checkpoint"]
+            if "device" not in params and "device" in model_params:
+                params["device"] = model_params["device"]
+
+        result.append(m)
+    return result
+
+
+def _build_dataset_cfg(
+    global_cfg: Dict[str, Any],
+    ds_cfg: Dict[str, Any],
+    global_output: Path,
+) -> Dict[str, Any]:
+    """Build a single-dataset config dict from a multi-dataset config."""
+    ds_name = ds_cfg["name"]
+    model_params = ds_cfg.get("model", {}).get("params", {})
+    method_overrides = ds_cfg.get("method_overrides", {})
+
+    merged_methods = _merge_methods(
+        shared_methods=global_cfg.get("methods", []),
+        method_overrides=method_overrides,
+        model_params=model_params,
+    )
+
+    per_ds_output = global_output.parent / f"{global_output.stem}_{ds_name}{global_output.suffix}"
+
+    return {
+        "seed": int(global_cfg.get("seed", 42)),
+        "dataset": {
+            "name": ds_name,
+            "params": ds_cfg.get("dataset_params", {"data_dir": "data/"}),
+        },
+        "model": ds_cfg["model"],
+        "sampling": ds_cfg.get("sampling", global_cfg.get("sampling", {})),
+        "preprocessing": ds_cfg.get("preprocessing", global_cfg.get("preprocessing")),
+        "timeout_per_sample": ds_cfg.get(
+            "timeout_per_sample", global_cfg.get("timeout_per_sample", 0)
+        ),
+        "output": {"path": str(per_ds_output)},
+        "methods": merged_methods,
+    }
+
+
 # ---------------------------------------------------------------------------
-# Core per-dataset runner (importable by benchmark_multi.py)
+# Core per-dataset runner
 # ---------------------------------------------------------------------------
 
 def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
@@ -964,13 +1036,59 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
     return benchmark_result
 
 
+def run_multi_dataset(
+    global_cfg: Dict[str, Any],
+    dataset_filter: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Run a multi-dataset benchmark config and return the combined dataframe."""
+    global_output = Path(global_cfg.get("output", "results/benchmark_multi.parquet"))
+    global_output.parent.mkdir(parents=True, exist_ok=True)
+
+    datasets_cfg: List[Dict[str, Any]] = global_cfg.get("datasets", [])
+    if dataset_filter is not None:
+        allowed = set(dataset_filter)
+        datasets_cfg = [d for d in datasets_cfg if d["name"] in allowed]
+
+    if not datasets_cfg:
+        raise ValueError("No datasets to run. Check --datasets filter or config.")
+
+    all_dfs: List[pd.DataFrame] = []
+
+    for i, ds_cfg in enumerate(datasets_cfg):
+        ds_name = ds_cfg["name"]
+        print(f"\n{'=' * 60}")
+        print(f"[DATASET {i + 1}/{len(datasets_cfg)}]  {ds_name}")
+        print(f"{'=' * 60}")
+
+        cfg = _build_dataset_cfg(global_cfg, ds_cfg, global_output)
+        result = run_single_dataset(cfg)
+        df = result.to_dataframe()
+        all_dfs.append(df)
+        print(f"[INFO] {ds_name}: {len(df)} rows, {df['success'].mean():.1%} valid")
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+    combined.to_parquet(global_output, index=False, compression="gzip")
+    print(f"\n[INFO] Combined results ({len(combined)} rows) saved to {global_output}")
+
+    print("\n[SUMMARY PER DATASET]")
+    summary = (
+        combined.groupby(["dataset", "method"])["success"]
+        .agg(["sum", "count"])
+        .rename(columns={"sum": "valid", "count": "total"})
+    )
+    summary["valid%"] = (summary["valid"] / summary["total"] * 100).round(1)
+    print(summary.to_string())
+
+    return combined
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Benchmark counterfactual methods on a single dataset."
+        description="Benchmark counterfactual methods from a single- or multi-dataset config."
     )
     parser.add_argument("--config", required=True, help="Path to YAML config file.")
     parser.add_argument("--output", default=None, help="Override output Parquet path.")
@@ -980,9 +1098,18 @@ def main() -> None:
         "--methods", nargs="+", default=None,
         help="Run only these methods (space-separated names).",
     )
+    parser.add_argument(
+        "--datasets", nargs="+", default=None,
+        help="For multi-dataset configs, run only these datasets by name.",
+    )
     args = parser.parse_args()
     cfg = _apply_cli_overrides(read_yaml(args.config), args)
-    run_single_dataset(cfg)
+    if "datasets" in cfg:
+        run_multi_dataset(cfg, dataset_filter=args.datasets)
+    else:
+        if args.datasets is not None:
+            raise SystemExit("--datasets is only supported for multi-dataset benchmark configs.")
+        run_single_dataset(cfg)
 
 
 if __name__ == "__main__":

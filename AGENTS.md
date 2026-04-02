@@ -10,7 +10,7 @@ This repository contains:
 
 Primary human-facing docs are in `README.md` and notebooks under `notebooks/`.
 Primary executable training entrypoint is `train.py`.
-Counterfactual benchmark entrypoint is `run_experiment.py`.
+Counterfactual benchmark entrypoint is `scripts/benchmark.py`.
 
 ## Fast Navigation
 
@@ -60,7 +60,7 @@ Automated tests currently available:
 ## Scope And Safety Rules
 
 - Prefer editing `src/` and `configs/` for core CPP work.
-- Prefer `src/counterfactuals/` + `run_experiment.py` for method-agnostic benchmarking changes.
+- Prefer `src/counterfactuals/` + `scripts/benchmark.py` for benchmarking changes.
 - Do not commit large generated artifacts from `wandb/`, `checkpoints/`, or notebook outputs.
 - Keep code LiRPA-compatible when changing classifier/model pieces used for certification.
 

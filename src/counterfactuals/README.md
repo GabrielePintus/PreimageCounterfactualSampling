@@ -6,7 +6,7 @@ This package provides a modular, extensible framework for running counterfactual
 
 - Pluggable methods, models, datasets, and metrics
 - Reproducible experiments via global seeding
-- Config-driven execution (`python run_experiment.py <config.yaml>`)
+- Config-driven execution via the benchmark pipeline (`python scripts/benchmark.py --config <config.yaml>`)
 - Easy extension through registries without modifying runner logic
 
 ## Core Contracts
