@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -184,3 +185,57 @@ def test_strip_dropout_modules_preserves_custom_forward():
 
     assert y.shape == (4, 3)
     assert not any(isinstance(m, torch.nn.Dropout) for m in clean.modules())
+
+
+def test_build_certcf_method_forwards_atlas_subsample_space(monkeypatch):
+    torch = pytest.importorskip("torch")
+    benchmark = _load_benchmark_module()
+    init_calls = []
+
+    class FakeLitModel:
+        def __init__(self):
+            self.net = torch.nn.Sequential(
+                torch.nn.Linear(2, 3),
+                torch.nn.ReLU(),
+                torch.nn.Linear(3, 2),
+            )
+
+        def eval(self):
+            return self
+
+        def to(self, _device):
+            return self
+
+    class FakeCertCF:
+        def __init__(self, **kwargs):
+            init_calls.append(kwargs)
+
+        def fit(self, x_train, y_train):
+            self.x_train = x_train
+            self.y_train = y_train
+
+    monkeypatch.setattr(benchmark, "_load_lit_checkpoint_resilient", lambda *args, **kwargs: SimpleNamespace(model=FakeLitModel()))
+    monkeypatch.setattr("counterfactuals.methods.certcf.CertCF", FakeCertCF)
+
+    benchmark._build_certcf_method(
+        params={
+            "checkpoint": "checkpoints/adult_classifier/best.ckpt",
+            "device": "cpu",
+            "atlas_subsample_method": "kmedoids",
+            "atlas_subsample_space": "latent",
+            "k_per_class": 10,
+        },
+        model_params={
+            "dataset_module": "adult",
+            "hidden_dims": [32, 8],
+            "dropout": 0.2,
+        },
+        dataset_name="adult",
+        x_train=np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+        y_train=np.array([0, 1], dtype=np.int64),
+        x_queries=np.array([[0.5, 0.5]], dtype=np.float32),
+        seed=7,
+    )
+
+    assert init_calls
+    assert init_calls[0]["subsample_space"] == "latent"

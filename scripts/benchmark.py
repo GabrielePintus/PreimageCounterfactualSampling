@@ -401,11 +401,19 @@ def _build_certcf_method(
             f"certcf.query_method must be one of {{'sorted', 'bvh'}}, got {query_method!r}"
         )
     batch_size = int(params.get("batch_size", 256))
-    atlas_subsample_method = str(params.get("atlas_subsample_method", "kmedoids")).lower()
+    atlas_subsample_method = str(
+        params.get("atlas_subsample_method", params.get("subsample_method", "kmedoids"))
+    ).lower()
     if atlas_subsample_method not in {"kmedoids", "bandit_kmedoids", "fps", "kmeans", "density_flat_kmedoids"}:
         raise ValueError(
             f"certcf.atlas_subsample_method must be one of {{'kmedoids', 'bandit_kmedoids', 'fps', 'kmeans', 'density_flat_kmedoids'}}, "
             f"got {atlas_subsample_method!r}"
+        )
+    atlas_subsample_space = str(params.get("atlas_subsample_space", "input")).lower()
+    if atlas_subsample_space not in {"input", "latent"}:
+        raise ValueError(
+            f"certcf.atlas_subsample_space must be one of {{'input', 'latent'}}, "
+            f"got {atlas_subsample_space!r}"
         )
     solver_maxiter = int(params.get("solver_maxiter", 500))
     # Architecture params come from the shared model config, not method params.
@@ -463,6 +471,7 @@ def _build_certcf_method(
         solver_maxiter=solver_maxiter,
         k_per_class=k_per_class,
         subsample_method=atlas_subsample_method,
+        subsample_space=atlas_subsample_space,
         random_seed=seed,
     )
     atlas_method.fit(x_train=z_train, y_train=y_train)

@@ -19,6 +19,39 @@ class LinearRawLabelModel(torch.nn.Module):
         return torch.stack([-score, score], dim=1)
 
 
+class TinyTabularTorchModel:
+    def __init__(self):
+        self.model = torch.nn.Sequential(
+            torch.nn.Dropout(p=0.1),
+            torch.nn.Linear(2, 3),
+            torch.nn.ReLU(),
+            torch.nn.Linear(3, 2),
+        )
+        with torch.no_grad():
+            self.model[1].weight.copy_(
+                torch.tensor(
+                    [
+                        [1.0, 0.0],
+                        [0.0, 1.0],
+                        [1.0, 1.0],
+                    ],
+                    dtype=torch.float32,
+                )
+            )
+            self.model[1].bias.zero_()
+            self.model[3].weight.copy_(
+                torch.tensor(
+                    [
+                        [1.0, -1.0, 0.0],
+                        [-1.0, 1.0, 0.0],
+                    ],
+                    dtype=torch.float32,
+                )
+            )
+            self.model[3].bias.zero_()
+        self.device = "cpu"
+
+
 class _DummyBVH:
     def __init__(self, x_cf: np.ndarray):
         self.n_polytopes = 1
@@ -109,6 +142,92 @@ def test_certcf_method_forwards_delta_and_robust_norm():
     assert calls[0]["target_class"] == 5
     assert np.isclose(calls[0]["delta"], 0.3)
     assert calls[0]["robust_norm"] == np.inf
+
+
+def test_certcf_rejects_invalid_subsample_space():
+    with pytest.raises(ValueError, match="subsample_space must be one of"):
+        CertCF(model=TinyTabularTorchModel(), subsample_space="bad-space")
+
+
+def test_certcf_fit_uses_input_space_for_subsampling(monkeypatch):
+    seen_spaces = []
+
+    def fake_selector(X, k, method, random_state):
+        del k, method, random_state
+        seen_spaces.append(np.array(X, copy=True))
+        return np.array([0], dtype=np.int64)
+
+    monkeypatch.setattr("counterfactuals.utils.clustering.select_prototype_indices", fake_selector)
+    monkeypatch.setattr(CertCF, "_fit", lambda self: None)
+
+    x_train = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 0, 1, 1], dtype=np.int64)
+    method = CertCF(model=TinyTabularTorchModel(), k_per_class=1, subsample_method="kmedoids", subsample_space="input")
+
+    method.fit(x_train=x_train, y_train=y_train)
+
+    assert len(seen_spaces) == 2
+    assert all(space.shape[1] == x_train.shape[1] for space in seen_spaces)
+    assert np.allclose(method._x_train, np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float32))
+    assert np.array_equal(method._y_train, np.array([0, 1], dtype=np.int64))
+
+
+def test_certcf_fit_uses_penultimate_latent_space_for_subsampling(monkeypatch):
+    seen_spaces = []
+
+    def fake_selector(X, k, method, random_state):
+        del k, method, random_state
+        seen_spaces.append(np.array(X, copy=True))
+        return np.array([0], dtype=np.int64)
+
+    monkeypatch.setattr("counterfactuals.utils.clustering.select_prototype_indices", fake_selector)
+    monkeypatch.setattr(CertCF, "_fit", lambda self: None)
+
+    x_train = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 0, 1, 1], dtype=np.int64)
+    method = CertCF(model=TinyTabularTorchModel(), k_per_class=1, subsample_method="kmedoids", subsample_space="latent")
+
+    method.fit(x_train=x_train, y_train=y_train)
+
+    assert len(seen_spaces) == 2
+    assert all(space.shape[1] == 3 for space in seen_spaces)
+    assert seen_spaces[0].shape != x_train[y_train == 0].shape
+    assert seen_spaces[1].shape != x_train[y_train == 1].shape
+    assert np.allclose(method._x_train, np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float32))
+    assert np.array_equal(method._y_train, np.array([0, 1], dtype=np.int64))
+
+
+def test_certcf_fit_rejects_latent_subsampling_for_unsupported_models(monkeypatch):
+    class UnsupportedTorchModel:
+        def __init__(self):
+            self.model = torch.nn.Linear(2, 2)
+            self.device = "cpu"
+
+    monkeypatch.setattr(CertCF, "_fit", lambda self: None)
+
+    method = CertCF(model=UnsupportedTorchModel(), k_per_class=1, subsample_space="latent")
+
+    with pytest.raises(ValueError, match="requires the wrapped model to be an nn.Sequential"):
+        method.fit(
+            x_train=np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+            y_train=np.array([0, 1], dtype=np.int64),
+        )
 
 
 def test_l2_ray_step_stays_inside_ball():

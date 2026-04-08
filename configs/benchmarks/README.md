@@ -128,7 +128,8 @@ methods:
       norm: 1
       eps_alpha: 0.25
       batch_size: 256
-      subsample_method: kmedoids
+      atlas_subsample_method: kmedoids
+      atlas_subsample_space: input
       k_per_class: 200
 ```
 
@@ -172,6 +173,8 @@ methods:                        # shared across all datasets
       device: cuda
       norm: 1
       eps_alpha: 0.25
+      atlas_subsample_method: kmedoids
+      atlas_subsample_space: input
 
 datasets:
   - name: adult
@@ -208,6 +211,25 @@ If `certcf` appears in the shared methods list **without** a `checkpoint` key,
 `benchmark.py` automatically copies `model.params.checkpoint` (and `device`) into it.
 This avoids repeating the checkpoint path in both `model` and `method_overrides`.
 
+### CertCF atlas subsampling
+
+CertCF supports selecting atlas anchors in either raw input space or penultimate latent space:
+
+```yaml
+- name: certcf
+  run_name: certcf_latent_kmedoids
+  params:
+    checkpoint: checkpoints/adult_classifier/best.ckpt
+    device: cuda
+    norm: 1
+    eps_alpha: 0.45
+    k_per_class: 200
+    atlas_subsample_method: kmedoids
+    atlas_subsample_space: latent
+```
+
+`atlas_subsample_space: latent` is currently supported for tabular torch classifiers used by the CertCF benchmark path. The atlas itself is still built and queried in input space; only anchor selection changes.
+
 ### `method_overrides`
 
 A dict keyed by `run_name` (or `name`). Values are **shallow-merged** on top of the shared
@@ -234,6 +256,7 @@ directly on the dataset block:
 |------|----------|---------|---------|
 | `benchmark_meeting_all.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 50 |
 | `benchmark_meeting_all_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 200 |
+| `benchmark_meeting_certcf_input_vs_latent_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | certcf input kmedoids, certcf latent kmedoids | 200 |
 | `benchmark_smoke_all.yaml` | compas, german_credit, heloc, give_me_some_credit, lending_club | nn, gs, certcf | 50 |
 
 ### Single-dataset (run with `benchmark.py`)
