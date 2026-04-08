@@ -115,6 +115,26 @@ def _load_lit_checkpoint_resilient(lit_cls, checkpoint: str, backbone, map_locat
         raise
 
 
+def _infer_tabular_classifier_dims_from_checkpoint(checkpoint: str) -> tuple[list[int], int]:
+    """Infer TabularClassifier hidden dims and class count from a checkpoint state dict."""
+    import torch
+
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state_dict = ckpt.get("state_dict", {})
+
+    hidden_1 = state_dict.get("model.net.4.weight")
+    output = state_dict.get("model.net.6.weight")
+    if hidden_1 is None or output is None:
+        raise KeyError(
+            "Could not infer tabular classifier dims from checkpoint: "
+            "expected model.net.4.weight and model.net.6.weight."
+        )
+
+    hidden_dims = [int(hidden_1.shape[1]), int(hidden_1.shape[0])]
+    num_classes = int(output.shape[0])
+    return hidden_dims, num_classes
+
+
 # ---------------------------------------------------------------------------
 # Train subsampling
 # ---------------------------------------------------------------------------
@@ -359,6 +379,22 @@ def _build_certcf_method(
     k_per_class = int(_k_per_class) if _k_per_class is not None else None
     _norm_raw = params.get("norm", 2)
     norm = np.inf if str(_norm_raw).lower() in ("inf", "infinity") else int(_norm_raw)
+    _distance_norm_raw = params.get("distance_norm", None)
+    if _distance_norm_raw is None:
+        distance_norm = norm
+    else:
+        distance_norm = (
+            np.inf if str(_distance_norm_raw).lower() in ("inf", "infinity") else int(_distance_norm_raw)
+        )
+    lirpa_method = str(params.get("lirpa_method", "backward"))
+    delta = float(params.get("delta", 0.0))
+    _robust_norm_raw = params.get("robust_norm", None)
+    if _robust_norm_raw is None:
+        robust_norm = None
+    else:
+        robust_norm = (
+            np.inf if str(_robust_norm_raw).lower() in ("inf", "infinity") else int(_robust_norm_raw)
+        )
     query_method = str(params.get("query_method", "sorted")).lower()
     if query_method not in {"sorted", "bvh"}:
         raise ValueError(
@@ -415,6 +451,10 @@ def _build_certcf_method(
     atlas_method = CertCF(
         model=atlas_model,
         norm=norm,
+        distance_norm=distance_norm,
+        lirpa_method=lirpa_method,
+        delta=delta,
+        robust_norm=robust_norm,
         eps_strategy=eps_strategy,
         batch_size=batch_size,
         ohe_slices=cat_slices,
@@ -438,7 +478,7 @@ def _build_torch_model_from_checkpoint(
     checkpoint: str,
     device: str = "cpu",
     dataset_module: str = "adult",
-    hidden_dims: list = [32, 8],
+    hidden_dims: list | None = None,
     dropout: float = 0.2,
 ) -> 'TorchModelWrapper':
     """Load TabularClassifier from a Lightning checkpoint and return a TorchModelWrapper.
@@ -459,16 +499,35 @@ def _build_torch_model_from_checkpoint(
     if str(requested_device).strip().lower() != device:
         print(f"[INFO] model device normalized: {requested_device!r} -> {device!r}")
 
-    backbone = TabularClassifier(
-        input_types=list(spec.input_types),
-        cardinalities=list(spec.cardinalities),
-        hidden_dims=hidden_dims,
-        num_classes=2,
-        dropout=dropout,
-    )
-    lit = _load_lit_checkpoint_resilient(
-        LitClassifier, checkpoint, backbone, map_location=device
-    )
+    inferred_hidden_dims, inferred_num_classes = _infer_tabular_classifier_dims_from_checkpoint(checkpoint)
+    resolved_hidden_dims = list(hidden_dims) if hidden_dims is not None else inferred_hidden_dims
+
+    def _make_backbone(current_hidden_dims: list[int]) -> TabularClassifier:
+        return TabularClassifier(
+            input_types=list(spec.input_types),
+            cardinalities=list(spec.cardinalities),
+            hidden_dims=current_hidden_dims,
+            num_classes=inferred_num_classes,
+            dropout=dropout,
+        )
+
+    backbone = _make_backbone(resolved_hidden_dims)
+    try:
+        lit = _load_lit_checkpoint_resilient(
+            LitClassifier, checkpoint, backbone, map_location=device
+        )
+    except RuntimeError as exc:
+        if resolved_hidden_dims != inferred_hidden_dims:
+            print(
+                "[INFO] Retrying checkpoint load with hidden_dims inferred from checkpoint: "
+                f"{inferred_hidden_dims}"
+            )
+            backbone = _make_backbone(inferred_hidden_dims)
+            lit = _load_lit_checkpoint_resilient(
+                LitClassifier, checkpoint, backbone, map_location=device
+            )
+        else:
+            raise exc
     net = lit.model.eval().to(device)
     net_no_dropout = torch.nn.Sequential(
         *[m for m in net.net if not isinstance(m, torch.nn.Dropout)]

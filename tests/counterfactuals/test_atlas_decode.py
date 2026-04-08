@@ -7,6 +7,7 @@ from certcf.atlas import CVXPY_AVAILABLE, CertCFAtlas
 def _make_atlas(norm, ohe_slices):
     atlas = CertCFAtlas.__new__(CertCFAtlas)
     atlas.norm = norm
+    atlas.distance_norm = norm
     atlas.ohe_slices = ohe_slices
     atlas.solver_maxiter = 200
     return atlas
@@ -67,7 +68,7 @@ def test_exact_enum_recovers_certified_vertex_missed_by_heuristic(norm):
 
     assert x_cf is not None
     assert np.allclose(x_cf, expected, atol=1e-7)
-    assert np.isclose(dist, np.linalg.norm(expected - x_query), atol=1e-7)
+    assert np.isclose(dist, np.linalg.norm(expected - x_query, ord=atlas.distance_norm), atol=1e-7)
     assert profile["decode_mode"] == "exact_enum"
     assert profile["decode_exact_fallback_used"] is True
     assert profile["decode_heuristic_success"] is False

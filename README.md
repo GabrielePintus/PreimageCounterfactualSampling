@@ -357,6 +357,36 @@ In benchmark configs and output tables, the novel method appears as `certcf`.
 
 See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the full pipeline documentation: config schema, grid expansion, multi-dataset format, and the list of available config files.
 
+### Incremental benchmark databank
+
+If you want to add one new method without rerunning an entire benchmark suite, keep one parquet per method and refresh a derived benchmark family:
+
+```bash
+# 1. Run only the new method into the family folder
+python scripts/benchmark.py \
+  --config configs/benchmarks/benchmark_meeting_all_200q.yaml \
+  --methods certcf \
+  --output results/benchmarks/adult_meeting_all_seed42_v1/methods/certcf.parquet
+
+# 2. Rebuild combined.parquet + summary.json + index.html
+python scripts/benchmark_databank_refresh.py \
+  --family results/benchmarks/adult_meeting_all_seed42_v1
+```
+
+The family directory is expected to contain:
+
+```text
+results/benchmarks/<family_name>/
+  manifest.json
+  methods/
+    <method_or_run_name>.parquet
+  combined.parquet
+  summary.json
+  index.html
+```
+
+`combined.parquet` is a derived cache, not the source of truth. The refresh step validates each method parquet against the family manifest before including it.
+
 ---
 
 ## Notebooks
@@ -369,10 +399,8 @@ See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the ful
 | `3.1 - Spiral counterfactual sampling.ipynb` | Spiral CertCF/CertCF workflow in 2D |
 | `3.3 - MNIST counterfactual sampling.ipynb` | Pixel-space MNIST counterfactual sampling |
 | `3.4 - MNIST-AE counterfactual sampling.ipynb` | Latent-space MNIST counterfactual sampling |
-| `5.0 - Adult counterfactual sampling CertCF.ipynb` | Adult tabular CertCF workflow |
-| `6.1 - Benchmark analysis.ipynb` | Single-dataset benchmark analysis |
-| `6.2 - Multi-dataset benchmark analysis.ipynb` | Combined tabular benchmark analysis |
-| `6.3 - MNIST benchmark analysis.ipynb` | MNIST benchmark analysis |
+| `6.2 - Multi-dataset benchmark analysis.ipynb` | Combined tabular benchmark analysis on the shared-success subset |
+| `6.3 - MNIST benchmark analysis.ipynb` | MNIST benchmark analysis on the shared-success subset |
 
 ---
 

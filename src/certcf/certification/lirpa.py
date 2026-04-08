@@ -19,7 +19,8 @@ def run_lirpa(
     device: torch.device,
     eps: float = 0.1,
     norm: int = 2,
-    dtype: torch.dtype = torch.float32
+    dtype: torch.dtype = torch.float32,
+    lirpa_method: str = "backward",
 ) -> tuple:
     """
     Run LiRPA backward-mode bound propagation for a single class.
@@ -83,7 +84,7 @@ def run_lirpa(
     # Compute bounds using backward mode
     _, _, A_dict = bounded_model.compute_bounds(
         x=(X_bounded,),
-        method='backward',       # CROWN: fast but loose for deep models
+        method=lirpa_method,
         # method='alpha-crown',      # alpha-CROWN: slower but much tighter
         # method='crown-optimized',
         return_A=True,
@@ -181,7 +182,6 @@ class PreimageApproximation:
         if hasattr(dataset, 'tensors'):
             # TensorDataset format
             self.dataset = dataset
-            self.n_classes = len(dataset.tensors[1].unique())
         elif isinstance(dataset, list):
             # List of tuples format - convert to TensorDataset
             X_list, y_list = [], []
@@ -191,11 +191,16 @@ class PreimageApproximation:
             X_tensor = torch.stack(X_list)
             y_tensor = torch.stack(y_list) if isinstance(y_list[0], torch.Tensor) else torch.tensor(y_list)
             self.dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
-            self.n_classes = len(y_tensor.unique())
         else:
             raise ValueError(
                 "Dataset must be a TensorDataset or a list of (X, y) tuples"
             )
+
+        labels_tensor = self.dataset.tensors[1]
+        unique_labels = torch.unique(labels_tensor).detach().cpu().tolist()
+        self.class_labels = [int(label) for label in sorted(unique_labels)]
+        self.label_to_index = {label: idx for idx, label in enumerate(self.class_labels)}
+        self.n_classes = len(self.class_labels)
 
     def estimate_memory_usage(
         self,
@@ -275,6 +280,7 @@ class PreimageApproximation:
         batch_size: int = None,
         dtype: torch.dtype = torch.float32,
         eps_array: np.ndarray = None,
+        lirpa_method: str = "backward",
     ) -> dict:
         """
         Compute LiRPA bounds for all classes.
@@ -317,7 +323,7 @@ class PreimageApproximation:
         all_bounds = {}
         labels_tensor = self.dataset.tensors[1]
 
-        for label in tqdm(range(self.n_classes), desc="Computing bounds"):
+        for label in tqdm(self.class_labels, desc="Computing bounds"):
             label_mask = labels_tensor == label
 
             # Extract samples for this class
@@ -366,8 +372,8 @@ class PreimageApproximation:
 
                         with torch.no_grad():
                             lA, lbias, uA, ubias = run_lirpa(
-                                self.model, label, X_batch, self.n_classes,
-                                self.device, eps=eps_scalar, norm=norm, dtype=dtype
+                                self.model, self.label_to_index[int(label)], X_batch, self.n_classes,
+                                self.device, eps=eps_scalar, norm=norm, dtype=dtype, lirpa_method=lirpa_method
                             )
 
                         lA_list.append(lA)
@@ -397,8 +403,8 @@ class PreimageApproximation:
 
                     with torch.no_grad():
                         lA, lbias, uA, ubias = run_lirpa(
-                            self.model, label, X_dev, self.n_classes,
-                            self.device, eps=eps_scalar, norm=norm, dtype=dtype
+                            self.model, self.label_to_index[int(label)], X_dev, self.n_classes,
+                            self.device, eps=eps_scalar, norm=norm, dtype=dtype, lirpa_method=lirpa_method
                         )
 
                     X_stored = X_dev.cpu().numpy()
@@ -421,8 +427,8 @@ class PreimageApproximation:
 
                     with torch.no_grad():
                         lA_i, lbias_i, uA_i, ubias_i = run_lirpa(
-                            self.model, label, X_single, self.n_classes,
-                            self.device, eps=float(eps_label[i]), norm=norm, dtype=dtype
+                            self.model, self.label_to_index[int(label)], X_single, self.n_classes,
+                            self.device, eps=float(eps_label[i]), norm=norm, dtype=dtype, lirpa_method=lirpa_method
                         )
 
                     lA_list.append(lA_i)

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -38,6 +38,10 @@ class CertCF(BaseCounterfactualMethod):
 
         # Build configuration
         norm: int = 1,
+        distance_norm: Optional[float] = None,
+        lirpa_method: str = "backward",
+        delta: float = 0.0,
+        robust_norm: Optional[Union[int, float, str]] = None,
         eps_strategy: Optional[EpsStrategy] = None,
         batch_size: Optional[int] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
@@ -58,6 +62,10 @@ class CertCF(BaseCounterfactualMethod):
                          k_per_class=k_per_class, subsample_method=subsample_method)
         # Build config — used in _fit()
         self.norm = norm
+        self.distance_norm = distance_norm
+        self.lirpa_method = str(lirpa_method)
+        self.delta = float(delta)
+        self.robust_norm = None if robust_norm is None else CertCFAtlas._normalize_lp_norm(robust_norm)
         self.eps_strategy = eps_strategy
         self.batch_size = batch_size
         self.ohe_slices = ohe_slices
@@ -91,6 +99,8 @@ class CertCF(BaseCounterfactualMethod):
             clean_module, dataset, device,
             cnn=self.cnn,
             norm=self.norm,
+            distance_norm=self.distance_norm,
+            lirpa_method=self.lirpa_method,
             eps_strategy=self.eps_strategy,
             batch_size=self.batch_size,
             ohe_slices=self.ohe_slices,
@@ -109,6 +119,8 @@ class CertCF(BaseCounterfactualMethod):
         result = self.atlas.find_counterfactual(
             x_query=np.asarray(x, dtype=np.float32),
             target_class=int(target_class),
+            delta=self.delta,
+            robust_norm=self.robust_norm,
         )
 
         x_cf = np.asarray(result.x_cf, dtype=np.float32) if result.x_cf is not None else None

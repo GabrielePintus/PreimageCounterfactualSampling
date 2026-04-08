@@ -36,6 +36,48 @@ The benchmark pipeline produces:
 For a multi-dataset config, `benchmark.py` additionally writes one per-dataset parquet
 (`<stem>_<dataset>.parquet`) alongside the combined output file.
 
+### Incremental benchmark databank
+
+For iterative method additions, you can store one parquet per method inside a benchmark family and rebuild a derived catalog:
+
+```text
+results/benchmarks/<family_name>/
+  manifest.json
+  methods/
+    <method_or_run_name>.parquet
+  combined.parquet
+  summary.json
+  index.html
+```
+
+Recommended workflow:
+
+```bash
+# Run one method only
+python scripts/benchmark.py \
+    --config configs/benchmarks/benchmark_meeting_all_200q.yaml \
+    --methods certcf \
+    --output results/benchmarks/adult_meeting_all_seed42_v1/methods/certcf.parquet
+
+# Refresh the databank family
+python scripts/benchmark_databank_refresh.py \
+    --family results/benchmarks/adult_meeting_all_seed42_v1
+```
+
+If `manifest.json` does not exist yet, the refresh script can bootstrap it from an existing parquet:
+
+```bash
+python scripts/benchmark_databank_refresh.py \
+    --family results/benchmarks/adult_meeting_all_seed42_v1 \
+    --init-from-parquet results/benchmark_adult_meeting.parquet \
+    --dataset adult \
+    --config-path configs/benchmarks/benchmark_meeting_all_200q.yaml \
+    --seed 42 \
+    --task-definition meeting_all_200q
+```
+
+The manifest locks the task set (`query_indices`, `y_orig`, `target_class`) and the refresh step validates each method parquet against it before rebuilding `combined.parquet`.
+
 ---
 
 ## Single-Dataset Config Schema
@@ -191,6 +233,7 @@ directly on the dataset block:
 | File | Datasets | Methods | Queries |
 |------|----------|---------|---------|
 | `benchmark_meeting_all.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 50 |
+| `benchmark_meeting_all_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 200 |
 | `benchmark_smoke_all.yaml` | compas, german_credit, heloc, give_me_some_credit, lending_club | nn, gs, certcf | 50 |
 
 ### Single-dataset (run with `benchmark.py`)

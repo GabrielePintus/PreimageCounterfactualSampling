@@ -143,6 +143,7 @@ TABULAR_DATASET_SPECS: dict[str, TabularDatasetSpec] = {
             "native-country",
         ),
         cardinalities=(7, 16, 7, 14, 6, 5, 2, 41),
+        immutable_features=("sex",),
     ),
     "compas": TabularDatasetSpec(
         name="compas",
@@ -164,6 +165,7 @@ TABULAR_DATASET_SPECS: dict[str, TabularDatasetSpec] = {
         ),
         categorical_features=("sex", "race", "c_charge_degree"),
         cardinalities=(2, 6, 2),
+        immutable_features=("sex",),
     ),
     "german_credit": TabularDatasetSpec(
         name="german_credit",

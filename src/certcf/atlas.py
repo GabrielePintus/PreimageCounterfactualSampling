@@ -116,6 +116,8 @@ class CertCFAtlas:
         cnn: bool = False,
         # Build configuration
         norm: int = 2,
+        distance_norm: Optional[Union[int, float]] = None,
+        lirpa_method: str = "backward",
         eps_strategy: Optional[EpsStrategy] = None,
         batch_size: Optional[int] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
@@ -128,7 +130,9 @@ class CertCFAtlas:
         self.cnn = cnn
 
         # Build config — stored here, consumed by build()
-        self.norm = norm
+        self.norm = self._normalize_lp_norm(norm)
+        self.distance_norm = self._normalize_lp_norm(distance_norm if distance_norm is not None else norm)
+        self.lirpa_method = str(lirpa_method)
         self.eps_strategy = eps_strategy
         self.batch_size = batch_size
         self.ohe_slices = ohe_slices
@@ -146,6 +150,15 @@ class CertCFAtlas:
         # Initialize preimage approximation handler
         self._preimage = PreimageApproximation(model, dataset, self.device, cnn=cnn)
         self.n_classes = self._preimage.n_classes
+        self.class_labels = list(self._preimage.class_labels)
+        self.label_to_index = dict(self._preimage.label_to_index)
+        sample_shape = tuple(self._preimage.dataset.tensors[0][0].shape)
+        if self.cnn and len(sample_shape) == 1:
+            flat_dim = int(np.prod(sample_shape))
+            side = int(round(np.sqrt(flat_dim)))
+            self.model_input_shape = (1, side, side) if side * side == flat_dim else sample_shape
+        else:
+            self.model_input_shape = sample_shape
 
         # These are populated by build()
         self.bounds: Optional[Dict] = None
@@ -153,6 +166,18 @@ class CertCFAtlas:
 
         # Optional: Shapely polygon unions (only for 2D visualization)
         self._class_unions: Optional[Dict] = None
+
+    @staticmethod
+    def _normalize_lp_norm(norm_value: Union[int, float, str]) -> Union[int, float]:
+        """Normalize Lp norm values so callers can use ints or inf-like strings."""
+        if norm_value == np.inf:
+            return np.inf
+        if isinstance(norm_value, str):
+            lowered = norm_value.strip().lower()
+            if lowered in {"inf", "infinity"}:
+                return np.inf
+            return int(lowered)
+        return int(norm_value)
 
     def build(self, build_unions: bool = False, verbose: bool = True) -> 'CertCFAtlas':
         """Compute LiRPA bounds and build BVH spatial indices from the dataset."""
@@ -187,6 +212,7 @@ class CertCFAtlas:
             batch_size=self.batch_size,
             dtype=torch.float32,
             eps_array=eps_array,
+            lirpa_method=self.lirpa_method,
         )
 
         # Step 2: Build BVH spatial index for each class
@@ -194,7 +220,7 @@ class CertCFAtlas:
             print("  Building BVH spatial indices...")
 
         self.bvh_indices = {}
-        for label in range(self.n_classes):
+        for label in self.class_labels:
             centers = self.bounds[label]['X']
             eps_class = self.bounds[label]['eps']
             self.bvh_indices[label] = BVHIndex(centers, eps_class)
@@ -206,20 +232,21 @@ class CertCFAtlas:
 
         # Step 3: Optionally build polygon unions (for 2D visualization)
         if build_unions:
-            if self.bounds[0]['X'].shape[1] != 2:
+            first_label = self.class_labels[0]
+            if self.bounds[first_label]['X'].shape[1] != 2:
                 print("  Warning: build_unions=True only works for 2D data, skipping.")
             else:
                 if verbose:
                     print("  Building polygon unions...")
                 self._class_unions = {}
-                for label in range(self.n_classes):
+                for label in self.class_labels:
                     self._class_unions[label] = build_class_union(
                         label, self.bounds, self.bounds[label]['eps']
                     )
 
         if verbose:
             total_polytopes = sum(
-                self.bvh_indices[l].n_polytopes for l in range(self.n_classes)
+                self.bvh_indices[l].n_polytopes for l in self.class_labels
             )
             print(f"Done! Total: {total_polytopes} polytopes across {self.n_classes} classes")
 
@@ -325,12 +352,10 @@ class CertCFAtlas:
             t_region = 0.0 if step_norm <= 1e-15 else min(1.0, box_eps / step_norm)
         elif self.norm == 2:
             ref_norm = float(np.linalg.norm(ref_offset, ord=2))
-            remaining_sq = ball_eps ** 2 - ref_norm ** 2
-            step_norm = float(np.linalg.norm(direction, ord=2))
-            if remaining_sq <= 0.0 or step_norm <= 1e-15:
+            if ref_norm >= ball_eps - 1e-15:
                 t_region = 0.0
             else:
-                t_region = min(1.0, np.sqrt(max(0.0, remaining_sq)) / step_norm)
+                t_region = self._largest_l2_ray_step(ref_offset, direction, ball_eps)
         elif self.norm == 1:
             ref_norm = float(np.linalg.norm(ref_offset, ord=1))
             remaining = ball_eps - ref_norm
@@ -399,6 +424,89 @@ class CertCFAtlas:
             out[s + int(cat_idx)] = 1.0
         return out
 
+    @staticmethod
+    def _largest_l2_ray_step(
+        ref_offset: np.ndarray,
+        direction: np.ndarray,
+        ball_eps: float,
+    ) -> float:
+        """Return the largest t in [0, 1] such that ||ref_offset + t*direction||_2 <= ball_eps."""
+        a = float(np.dot(direction, direction))
+        if a <= 1e-15:
+            return 0.0
+        b = 2.0 * float(np.dot(ref_offset, direction))
+        c = float(np.dot(ref_offset, ref_offset) - ball_eps ** 2)
+        discriminant = b * b - 4.0 * a * c
+        if discriminant <= 0.0:
+            return 0.0
+        root = (-b + np.sqrt(discriminant)) / (2.0 * a)
+        return float(np.clip(root, 0.0, 1.0))
+
+    def _reshape_model_input(self, x: np.ndarray) -> torch.Tensor:
+        """Convert a flat numpy point into the tensor shape expected by the wrapped model."""
+        x_arr = np.asarray(x, dtype=np.float32).reshape(1, -1)
+        x_tensor = torch.from_numpy(x_arr).to(self.device)
+        if not self.cnn:
+            return x_tensor
+        expected_size = int(np.prod(self.model_input_shape))
+        if x_tensor.shape[1] != expected_size:
+            raise ValueError(
+                f"Counterfactual has dim={x_tensor.shape[1]}, but CNN expects flattened dim={expected_size}."
+            )
+        return x_tensor.view((1,) + tuple(self.model_input_shape))
+
+    def _is_ohe_valid(self, x: np.ndarray, tol: float = 1e-6) -> bool:
+        """Check that each configured OHE block is exactly one-hot up to tolerance."""
+        if not self.ohe_slices:
+            return True
+        x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
+        for start, end in self.ohe_slices:
+            block = x_arr[start:end]
+            if np.any(block < -tol) or np.any(block > 1.0 + tol):
+                return False
+            if not np.isclose(np.sum(block), 1.0, atol=tol):
+                return False
+            active = block >= 1.0 - tol
+            if int(np.sum(active)) != 1:
+                return False
+            if np.any(block[~active] > tol):
+                return False
+        return True
+
+    def _polytope_membership_for_anchor(
+        self,
+        x_cf: np.ndarray,
+        bd: Dict[str, np.ndarray],
+        anchor_idx: int,
+        *,
+        delta: float,
+        robust_norm: Union[int, float],
+        tol: float = 1e-6,
+    ) -> Tuple[bool, bool]:
+        """Return nominal and robust membership for one anchor polytope."""
+        center = bd['X'][anchor_idx]
+        eps_i = float(bd['eps'][anchor_idx])
+        d = len(x_cf)
+
+        A_nominal, b_nominal, _, nominal_ball_eps = self._erode_constraints(
+            bd['lA'][anchor_idx], bd['lbias'][anchor_idx], center, d, 0.0, self.norm, eps_i
+        )
+        in_nominal = self._is_certified_candidate(
+            x_cf, A_nominal, b_nominal, center, nominal_ball_eps, tol=tol
+        )
+        if delta <= 0.0:
+            return in_nominal, in_nominal
+
+        A_robust, b_robust, _, robust_ball_eps = self._erode_constraints(
+            bd['lA'][anchor_idx], bd['lbias'][anchor_idx], center, d, delta, robust_norm, eps_i
+        )
+        if A_robust is None:
+            return in_nominal, False
+        robust = self._is_certified_candidate(
+            x_cf, A_robust, b_robust, center, robust_ball_eps, tol=tol
+        )
+        return in_nominal, robust
+
     def _build_decode_profile(
         self,
         *,
@@ -464,7 +572,15 @@ class CertCFAtlas:
             fixed_ohe_assignments=fixed_ohe_assignments,
         )
 
-        objective = cp.Minimize(cp.sum_squares(z - x0))
+        diff = z - x0
+        if self.distance_norm == 1:
+            objective = cp.Minimize(cp.norm(diff, 1))
+        elif self.distance_norm == 2:
+            objective = cp.Minimize(cp.sum_squares(diff))
+        elif self.distance_norm == np.inf:
+            objective = cp.Minimize(cp.norm(diff, np.inf))
+        else:
+            objective = cp.Minimize(cp.norm(diff, self.distance_norm))
 
         constraints = [
             A_full @ z + b_full >= 0,
@@ -497,11 +613,11 @@ class CertCFAtlas:
 
         problem = cp.Problem(objective, constraints)
 
-        # Norm-aware solver ordering: CLARABEL first for L2 (SOCP), OSQP first for L1 (QP-like).
-        if self.norm == 2:
-            solvers = ('CLARABEL', 'OSQP', 'SCS')
-        else:
+        # Norm-aware solver ordering.
+        if self.norm == np.inf and self.distance_norm == 2:
             solvers = ('OSQP', 'CLARABEL', 'SCS')
+        else:
+            solvers = ('CLARABEL', 'SCS', 'OSQP')
         solved = False
         for i, _solver in enumerate(solvers):
             last = (i == len(solvers) - 1)
@@ -518,7 +634,17 @@ class CertCFAtlas:
             return None, np.inf
 
         x_proj = z.value
-        dist = np.linalg.norm(x_proj - x0)
+        if np.min(A_full @ x_proj + b_full) < -1e-7:
+            return None, np.inf
+        if np.any(x_proj < center - box_eps - 1e-7) or np.any(x_proj > center + box_eps + 1e-7):
+            return None, np.inf
+        if self.norm == np.inf:
+            in_ball = np.max(np.abs(x_proj - center)) <= ball_eps + 1e-7
+        else:
+            in_ball = np.linalg.norm(x_proj - center, ord=self.norm) <= ball_eps + 1e-7
+        if not in_ball:
+            return None, np.inf
+        dist = float(np.linalg.norm(x_proj - x0, ord=self.distance_norm))
         return x_proj, dist
 
     def _project_slsqp(
@@ -537,6 +663,11 @@ class CertCFAtlas:
         """
         Project using SLSQP — fast for L∞ (all-linear constraints).
         """
+        if self.distance_norm != 2:
+            raise RuntimeError(
+                "SLSQP fallback only supports L2 distance minimization. "
+                "Install CVXPY to use distance_norm != 2."
+            )
         d = len(x0)
 
         def objective(x):
@@ -613,7 +744,7 @@ class CertCFAtlas:
            np.any(x_proj > center + box_eps + 1e-7):
             return None, np.inf
 
-        dist = np.linalg.norm(x_proj - x0)
+        dist = float(np.linalg.norm(x_proj - x0, ord=self.distance_norm))
         return x_proj, dist
 
     def _solve_projection_subproblem(
@@ -630,7 +761,8 @@ class CertCFAtlas:
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
-        if self.norm in (1, 2) and CVXPY_AVAILABLE:
+        use_cvxpy = CVXPY_AVAILABLE and (self.norm in (1, 2) or self.distance_norm != 2)
+        if use_cvxpy:
             return self._project_cvxpy(
                 x0,
                 A_full,
@@ -700,7 +832,7 @@ class CertCFAtlas:
         best_x, best_dist = None, np.inf
         for cand in candidates:
             if self._is_certified_candidate(cand, A_full, b_full, center, ball_eps, tol=tol):
-                d_cand = float(np.linalg.norm(cand - x_query))
+                d_cand = float(np.linalg.norm(cand - x_query, ord=self.distance_norm))
                 if d_cand < best_dist:
                     best_x, best_dist = cand, d_cand
 
@@ -808,7 +940,7 @@ class CertCFAtlas:
             heuristic_success=False,
         )
 
-        root_dist = float(np.linalg.norm(x_star - x_query))
+        root_dist = float(np.linalg.norm(x_star - x_query, ord=self.distance_norm))
         if root_dist >= incumbent_upper_bound:
             profile["decode_nodes_pruned"] = 1
             return None, np.inf, profile
@@ -877,13 +1009,13 @@ class CertCFAtlas:
 
         block_indices = [i for i, (s, e) in enumerate(ohe_slices) if e - s > 1]
         if not block_indices:
-            root_dist = float(np.linalg.norm(x_star - x_query))
+            root_dist = float(np.linalg.norm(x_star - x_query, ord=self.distance_norm))
             if root_dist >= incumbent_upper_bound:
                 profile["decode_nodes_pruned"] = 1
                 return None, np.inf, profile
             return x_star.copy(), root_dist, profile
 
-        root_dist = float(np.linalg.norm(x_star - x_query))
+        root_dist = float(np.linalg.norm(x_star - x_query, ord=self.distance_norm))
         if root_dist >= incumbent_upper_bound:
             profile["decode_nodes_pruned"] = 1
             return None, np.inf, profile
@@ -967,7 +1099,7 @@ class CertCFAtlas:
         center: np.ndarray,
         eps_i: float,
         delta: float = 0.0,
-        robust_norm: Optional[int] = None,
+        robust_norm: Optional[Union[int, float]] = None,
         maxiter: Optional[int] = None,
         tol: Optional[float] = None,
         fixed_dims: Optional[np.ndarray] = None,
@@ -1136,12 +1268,15 @@ class CertCFAtlas:
         bvh_stats: Dict[str, float] = {}
         bvh = self.bvh_indices[target_class]
         t0 = time.perf_counter()
-        x_cf, dist, anchor_idx, n_qp = bvh.query_nearest(x_query, project_fn, stats_out=bvh_stats)
+        x_cf, dist, anchor_idx, n_qp = bvh.query_nearest(
+            x_query, project_fn, distance_norm=self.distance_norm, stats_out=bvh_stats
+        )
         query_loop_time_s = time.perf_counter() - t0
         profiling = {
             "query_loop_time_ms": 1e3 * query_loop_time_s,
             "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_time_s[0]),
             "projection_time_ms": 1e3 * projection_time_s[0],
+            "distance_norm": float(self.distance_norm) if self.distance_norm == np.inf else int(self.distance_norm),
             "n_nodes_popped": bvh_stats.get("n_nodes_popped", np.nan),
             "n_nodes_pruned": bvh_stats.get("n_nodes_pruned", np.nan),
             "n_leaves_visited": bvh_stats.get("n_leaves_visited", np.nan),
@@ -1160,7 +1295,7 @@ class CertCFAtlas:
         t0 = time.perf_counter()
         x_cf, dist, anchor_idx, n_qp = bvh.query_sorted_lower_bounds(
             x_query, eps_array=bd['eps'], project_fn=project_fn,
-            atlas_norm=self.norm if self.norm is not None else 2,
+            distance_norm=self.distance_norm,
             stats_out=sorted_stats,
         )
         query_loop_time_s = time.perf_counter() - t0
@@ -1168,6 +1303,7 @@ class CertCFAtlas:
             "query_loop_time_ms": 1e3 * query_loop_time_s,
             "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_time_s[0]),
             "projection_time_ms": 1e3 * projection_time_s[0],
+            "distance_norm": float(self.distance_norm) if self.distance_norm == np.inf else int(self.distance_norm),
             "n_candidates_considered": sorted_stats.get("n_candidates_considered", np.nan),
             "n_candidates_total": sorted_stats.get("n_candidates_total", np.nan),
             "n_candidates_pruned_by_bound": sorted_stats.get("n_candidates_pruned_by_bound", np.nan),
@@ -1182,7 +1318,7 @@ class CertCFAtlas:
         target_class: int,
         method: Optional[str] = None,
         delta: float = 0.0,
-        robust_norm: Optional[int] = None,
+        robust_norm: Optional[Union[int, float, str]] = None,
         solver_maxiter: Optional[int] = None,
         fixed_dims: Optional[np.ndarray] = None
     ) -> CounterfactualResult:
@@ -1191,12 +1327,24 @@ class CertCFAtlas:
         if self.bounds is None:
             raise ValueError("Atlas not built. Call build() first.")
 
+        target_class = int(target_class)
+        if target_class not in self.bounds:
+            raise ValueError(
+                f"Unknown target_class {target_class}. Available classes: {self.class_labels}"
+            )
         x_query = np.asarray(x_query).flatten()
+        if robust_norm is not None:
+            robust_norm = self._normalize_lp_norm(robust_norm)
         bd = self.bounds[target_class]
         resolved_method = method or self.default_query_method
         profiling: Dict[str, ProfileValue] = {
             "method": resolved_method,
             "delta": float(delta),
+            "robust_norm": (
+                float(robust_norm) if robust_norm == np.inf else int(robust_norm)
+            ) if robust_norm is not None else (
+                float(self.norm) if self.norm == np.inf else int(self.norm)
+            ),
         }
         t_total_start = time.perf_counter()
 
@@ -1235,7 +1383,7 @@ class CertCFAtlas:
         target_class: int,
         method: Optional[str] = None,
         delta: float = 0.0,
-        robust_norm: Optional[int] = None,
+        robust_norm: Optional[Union[int, float, str]] = None,
         solver_maxiter: Optional[int] = None,
         fixed_dims: Optional[np.ndarray] = None
     ) -> List[CounterfactualResult]:
@@ -1254,10 +1402,14 @@ class CertCFAtlas:
     def verify_counterfactual(
         self,
         x_cf: np.ndarray,
-        target_class: int
+        target_class: int,
+        *,
+        delta: float = 0.0,
+        robust_norm: Optional[Union[int, float]] = None,
+        anchor_idx: Optional[int] = None,
     ) -> Dict:
         """
-        Verify that a counterfactual is correctly classified by the model.
+        Verify model prediction, structural validity, and certified polytope membership.
 
         Parameters
         ----------
@@ -1269,28 +1421,85 @@ class CertCFAtlas:
         Returns
         -------
         dict
-            Dictionary with keys:
-            - 'predicted': int, model's prediction
-            - 'target': int, expected class
-            - 'valid': bool, whether prediction matches target
-            - 'logits': np.ndarray, raw model outputs
+            Dictionary with the model prediction plus certification diagnostics.
         """
-        self.model.eval()
-        x_tensor = torch.tensor(x_cf, dtype=torch.float32).unsqueeze(0).to(self.device)
+        if self.bounds is None:
+            raise ValueError("Atlas not built. Call build() first.")
 
-        if self.cnn:
-            # Reshape for CNN if needed
-            x_tensor = x_tensor.view(-1, 1, 28, 28)
+        target_class = int(target_class)
+        if target_class not in self.bounds:
+            raise ValueError(
+                f"Unknown target_class {target_class}. Available classes: {self.class_labels}"
+            )
+        if robust_norm is None:
+            robust_norm = self.norm
+        else:
+            robust_norm = self._normalize_lp_norm(robust_norm)
+
+        self.model.eval()
+        x_arr = np.asarray(x_cf, dtype=np.float32).reshape(-1)
+        x_tensor = self._reshape_model_input(x_arr)
 
         with torch.no_grad():
             logits = self.model(x_tensor).cpu().numpy()[0]
-            pred = np.argmax(logits)
+            pred_index = int(np.argmax(logits))
+            predicted = int(self.class_labels[pred_index])
+
+        prediction_valid = predicted == target_class
+        ohe_valid = self._is_ohe_valid(x_arr)
+        bd = self.bounds[target_class]
+
+        if anchor_idx is not None:
+            anchor_idx = int(anchor_idx)
+            n_anchors = int(len(bd['X']))
+            if anchor_idx < 0 or anchor_idx >= n_anchors:
+                raise ValueError(
+                    f"anchor_idx={anchor_idx} is out of bounds for target_class {target_class} "
+                    f"(n_anchors={n_anchors})."
+                )
+            in_polytope, robust_polytope = self._polytope_membership_for_anchor(
+                x_arr,
+                bd,
+                anchor_idx,
+                delta=delta,
+                robust_norm=robust_norm,
+            )
+            verified_anchor_idx = anchor_idx if (robust_polytope if delta > 0.0 else in_polytope) else None
+        else:
+            in_polytope = False
+            robust_polytope = False
+            verified_anchor_idx = None
+            for idx in range(len(bd['X'])):
+                nominal_ok, robust_ok = self._polytope_membership_for_anchor(
+                    x_arr,
+                    bd,
+                    idx,
+                    delta=delta,
+                    robust_norm=robust_norm,
+                )
+                if nominal_ok:
+                    in_polytope = True
+                active_ok = robust_ok if delta > 0.0 else nominal_ok
+                if active_ok:
+                    robust_polytope = robust_ok if delta > 0.0 else nominal_ok
+                    verified_anchor_idx = idx
+                    break
+            if delta <= 0.0:
+                robust_polytope = in_polytope
+
+        overall_valid = prediction_valid and ohe_valid and in_polytope and robust_polytope
 
         return {
-            'predicted': int(pred),
+            'predicted': predicted,
             'target': target_class,
-            'valid': pred == target_class,
-            'logits': logits
+            'valid': overall_valid,
+            'logits': logits,
+            'prediction_valid': prediction_valid,
+            'ohe_valid': ohe_valid,
+            'in_certified_polytope': in_polytope,
+            'robustly_certified': robust_polytope,
+            'overall_valid': overall_valid,
+            'verified_anchor_idx': verified_anchor_idx,
         }
 
     def get_class_union(self, label: int):
@@ -1346,7 +1555,7 @@ class CertCFAtlas:
         if self.bounds is None:
             return "CertCFAtlas (not built)"
 
-        all_eps = np.concatenate([self.bounds[l]['eps'] for l in range(self.n_classes)])
+        all_eps = np.concatenate([self.bounds[label]['eps'] for label in self.class_labels])
         eps_desc = (
             f"eps in [{all_eps.min():.4g}, {all_eps.max():.4g}]"
             f" ({type(self.eps_strategy).__name__})"
@@ -1362,7 +1571,7 @@ class CertCFAtlas:
         ]
 
         total_polytopes = 0
-        for label in range(self.n_classes):
+        for label in self.class_labels:
             n = self.bvh_indices[label].n_polytopes
             total_polytopes += n
             depth = self.bvh_indices[label].tree_depth
