@@ -80,9 +80,10 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
     Parameters
     ----------
     alpha : float
-        Safety factor in (0, 0.5).  A value of 0.25 is a reasonable default.
-        At alpha < 0.5 the eps-ball around x_i cannot reach any opposite-class
-        center (it stays strictly within the clearance zone).
+        Clearance scaling factor in (0, 1]. A value of 0.25 is a reasonable
+        default. At alpha < 0.5 the eps-ball around x_i cannot reach any
+        opposite-class center (it stays strictly within the clearance zone).
+        Larger values are allowed for experimentation but lose that guarantee.
 
     Notes
     -----
@@ -93,8 +94,8 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
     """
 
     def __init__(self, alpha: float = 0.25):
-        if not (0 < alpha < 0.5):
-            raise ValueError(f"alpha must be in (0, 0.5), got {alpha}")
+        if not (0 < alpha <= 1.0):
+            raise ValueError(f"alpha must be in (0, 1], got {alpha}")
         self.alpha = alpha
 
     def compute_eps(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:

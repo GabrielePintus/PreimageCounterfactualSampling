@@ -46,6 +46,7 @@ class QueryResult:
     mad_l1_distance: float
     redundancy: float
     target_class: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,9 +79,9 @@ class BenchmarkResult:
     def to_dataframe(self, include_features: bool = True) -> pd.DataFrame:
         """Flatten to a DataFrame matching the legacy parquet column schema.
 
-        Columns produced (identical to the old row-builder output):
-          method, query_idx, space, y_orig, source_class, y_cf, target_class, success,
-          build_time_s, runtime_s, params (JSON string), error,
+        Columns produced (legacy schema plus stable run metadata):
+          dataset, method, run_name, query_idx, space, y_orig, source_class, y_cf, target_class, success,
+          build_time_s, runtime_s, params (JSON string), error, metadata_json,
           l2_distance, l1_distance, l0_sparsity, mad_l1_distance, redundancy
           [x_orig_0 .. x_orig_{d-1}, x_cf_0 .. x_cf_{d-1}]  (if include_features)
         """
@@ -94,7 +95,9 @@ class BenchmarkResult:
                 y_orig_val = int(self.y_orig[pos])
 
                 row: Dict[str, Any] = {
+                    "dataset": self.dataset,
                     "method": mr.run_name,
+                    "run_name": mr.run_name,
                     "query_idx": int(qr.query_idx),
                     "space": mr.space,
                     "y_orig": y_orig_val,
@@ -106,12 +109,17 @@ class BenchmarkResult:
                     "runtime_s": float(qr.runtime_s),
                     "params": params_json,
                     "error": qr.error,
+                    "metadata_json": json.dumps(
+                        self._json_safe_value(qr.metadata),
+                        sort_keys=True,
+                    ),
                     "l2_distance": float(qr.l2_distance),
                     "l1_distance": float(qr.l1_distance),
                     "l0_sparsity": float(qr.l0_sparsity),
                     "mad_l1_distance": float(qr.mad_l1_distance),
                     "redundancy": float(qr.redundancy),
                 }
+                row.update(self._flatten_metadata(qr.metadata))
                 if self.y_true is not None:
                     row["y_true"] = int(self.y_true[pos])
 
@@ -128,6 +136,44 @@ class BenchmarkResult:
                 rows.append(row)
 
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def _json_safe_value(value: Any) -> Any:
+        """Convert numpy/scalar containers into JSON-serializable Python values."""
+        if isinstance(value, dict):
+            return {str(k): BenchmarkResult._json_safe_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [BenchmarkResult._json_safe_value(v) for v in value]
+        if isinstance(value, np.ndarray):
+            return [BenchmarkResult._json_safe_value(v) for v in value.tolist()]
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    @classmethod
+    def _flatten_metadata(
+        cls,
+        metadata: Dict[str, Any],
+        *,
+        prefix: str = "meta",
+    ) -> Dict[str, Any]:
+        """Flatten scalar metadata fields into notebook-friendly dataframe columns."""
+        flat: Dict[str, Any] = {}
+
+        def visit(path: List[str], value: Any) -> None:
+            safe = cls._json_safe_value(value)
+            if isinstance(safe, dict):
+                for key, child in safe.items():
+                    visit(path + [str(key)], child)
+                return
+            if isinstance(safe, list):
+                return
+            column = "__".join([prefix, *path]) if path else prefix
+            flat[column] = safe
+
+        for key, value in (metadata or {}).items():
+            visit([str(key)], value)
+        return flat
 
     # ---------------------------------------------------------------------------
     # Summary
@@ -245,6 +291,11 @@ class BenchmarkResult:
                         int(row["target_class"])
                         if "target_class" in row and not pd.isna(row.get("target_class"))
                         else None
+                    ),
+                    metadata=(
+                        json.loads(row.get("metadata_json"))
+                        if "metadata_json" in row and isinstance(row.get("metadata_json"), str)
+                        else {}
                     ),
                 ))
 

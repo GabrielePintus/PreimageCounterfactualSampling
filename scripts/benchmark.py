@@ -269,6 +269,7 @@ def _make_failure_query_result(
     runtime_s: float,
     error: str,
     target_class: Optional[int],
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> QueryResult:
     return QueryResult(
         query_idx=int(q_idx),
@@ -283,6 +284,7 @@ def _make_failure_query_result(
         mad_l1_distance=float("nan"),
         redundancy=float("nan"),
         target_class=(None if target_class is None else int(target_class)),
+        metadata=dict(metadata or {}),
     )
 
 
@@ -985,6 +987,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                         runtime_s=runtime_s,
                         error=reason,
                         target_class=target_class,
+                        metadata=result.metadata,
                     ))
                     n_failed += 1
                     pbar.set_postfix(valid=n_ok, failed=n_failed)
@@ -1035,6 +1038,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     mad_l1_distance=mad_l1,
                     redundancy=redundancy_val,
                     target_class=target_class,
+                    metadata=dict(result.metadata or {}),
                 ))
                 n_ok += int(cf_success)
             except TimeoutError:
@@ -1044,6 +1048,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     runtime_s=runtime_s,
                     error="timeout",
                     target_class=target_class,
+                    metadata={"reason": "timeout"},
                 ))
                 n_failed += 1
             except Exception as exc:
@@ -1053,6 +1058,10 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     runtime_s=runtime_s,
                     error=str(exc),
                     target_class=target_class,
+                    metadata={
+                        "reason": "exception",
+                        "exception_type": type(exc).__name__,
+                    },
                 ))
                 n_failed += 1
 

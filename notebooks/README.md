@@ -25,6 +25,8 @@ Interactive notebooks for training evaluation and counterfactual generation demo
 - `6.7 - CertCF latent anchor selection diagnostics.ipynb`: Adult-only notebook comparing input-space and penultimate-space `k`-medoids anchor selection under the same CertCF atlas/query pipeline.
 - `6.8 - CertCF density-bias evaluation diagnostics.ipynb`: Adult-only notebook comparing input/latent/density-stratified anchor selectors and weighted coverage diagnostics to probe density bias in CertCF atlas evaluation.
 - `6.9 - CertCF proximity metric diagnostics.ipynb`: Adult-only notebook isolating the effect of density-aware proximity summaries while keeping the atlas fixed to input-space `k`-medoids.
+- `6.10 - CertCF input vs latent benchmark analysis.ipynb`: benchmark-results notebook for the latest input-vs-latent CertCF comparison, with dataset-level summaries, delta tables, and per-query scatter views from the combined parquet.
+- `6.11 - CertCF boundary-biased latent anchor diagnostics.ipynb`: Adult-only exploratory notebook comparing input `k`-medoids, latent `k`-medoids, and a notebook-only boundary-weighted latent `k`-medoids heuristic before codebase integration.
 
 ## Benchmark Notebook Helpers
 

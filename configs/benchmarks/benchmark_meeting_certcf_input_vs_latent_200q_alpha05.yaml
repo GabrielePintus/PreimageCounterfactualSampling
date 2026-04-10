@@ -1,5 +1,5 @@
 seed: 42
-output: results/benchmark_meeting_certcf_input_vs_latent_200q.parquet
+output: results/benchmark_meeting_certcf_input_vs_latent_200q_alpha05.parquet
 timeout_per_sample: 60   # seconds per (method, query)
 
 # ---------------------------------------------------------------------------
@@ -13,22 +13,22 @@ methods:
     params:
       device: cuda
       norm: 1
-      eps_alpha: 0.45
+      eps_alpha: 0.5
       batch_size: 256
       atlas_subsample_method: kmedoids
       atlas_subsample_space: input
-      k_per_class: 200
+      k_per_class: 500
 
   - name: certcf
     run_name: certcf_latent_kmedoids
     params:
       device: cuda
       norm: 1
-      eps_alpha: 0.45
+      eps_alpha: 0.5
       batch_size: 256
       atlas_subsample_method: kmedoids
       atlas_subsample_space: latent
-      k_per_class: 200
+      k_per_class: 500
 
 # ---------------------------------------------------------------------------
 # Datasets

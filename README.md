@@ -120,7 +120,7 @@ eps = strategy.compute_eps(X, y)   # shape (N,) — one value per training point
 | `ConstantEpsStrategy(eps)` | $\varepsilon_i = \varepsilon$ | Baseline, backward-compatible |
 | `NearestOppositeClassClearanceStrategy(alpha)` | $\varepsilon_i = \alpha \cdot \min_{j:\, y_j \neq y_i} \|\mathbf{x}_i - \mathbf{x}_j\|_\infty$ | Adaptive; recommended for tabular data |
 
-**NearestOppositeClassClearanceStrategy** sets each point's ε to a fraction $\alpha \in (0, 0.5)$ of its L∞ distance to the nearest opposite-class training point. At $\alpha < 0.5$ the certification ball never crosses a class boundary, guaranteeing feasibility. The default $\alpha = 0.25$ leaves a comfortable 50% safety margin. The O(N²) pairwise Chebyshev distance computation runs once offline via `scipy.spatial.distance.cdist`.
+**NearestOppositeClassClearanceStrategy** sets each point's ε to a fraction $\alpha \in (0, 1]$ of its L∞ distance to the nearest opposite-class training point. At $\alpha < 0.5$ the certification ball never crosses a class boundary, guaranteeing feasibility. Larger values are allowed for experimentation, but they lose that safety guarantee. The default $\alpha = 0.25$ leaves a comfortable 50% safety margin. The O(N²) pairwise Chebyshev distance computation runs once offline via `scipy.spatial.distance.cdist`.
 
 ---
 
