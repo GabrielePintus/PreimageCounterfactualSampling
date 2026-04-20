@@ -18,6 +18,8 @@ Interactive notebooks for training evaluation, benchmark analysis, and CertCF di
   Analysis notebook for the random/boundary-random anchor budget sweeps.
 - `6.15 - Method comparison KDE analysis.ipynb`
   Main current comparison notebook for CertCF, NN, GS, and DiCE, including KDE plots, shared-success summaries, and manifoldness diagnostics.
+- `6.16 - CertCF 2D Gaussian mixture coverage diagnostics.ipynb`
+  Visual diagnostic notebook built around a hard 2D Gaussian mixture so we can inspect decision regions, atlas coverage, and query behavior directly.
 
 ## Archived Notebooks
 
