@@ -168,6 +168,11 @@ def evaluate_empirical_robustness_curves(
     applied to numerical dimensions only; categorical one-hot blocks remain fixed.
     A counterfactual counts as robust for a given radius if all sampled
     perturbations preserve the target prediction.
+
+    The input dataframe must contain the full dataset-shaped counterfactual
+    feature schema (`x_cf_0` ... `x_cf_{n_features-1}`) for each dataset under
+    analysis. This helper is intended for real benchmark outputs rather than
+    partial toy frames.
     """
     data = df[df["success"]].copy()
     if data.empty:

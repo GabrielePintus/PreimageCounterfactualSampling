@@ -31,8 +31,19 @@ class BaseCounterfactualMethod(ABC):
         k_per_class: Optional[int] = None,
         subsample_method: str = "kmedoids",
     ):
-        if subsample_method not in {"kmedoids", "bandit_kmedoids", "kmeans", "fps", "density_flat_kmedoids"}:
-            raise ValueError("subsample_method must be one of {'kmedoids', 'bandit_kmedoids', 'kmeans', 'fps', 'density_flat_kmedoids'}")
+        allowed_subsample_methods = {
+            "random",
+            "kmedoids",
+            "bandit_kmedoids",
+            "kmeans",
+            "fps",
+            "density_flat_kmedoids",
+        }
+        if subsample_method not in allowed_subsample_methods:
+            raise ValueError(
+                "subsample_method must be one of "
+                f"{sorted(allowed_subsample_methods)}"
+            )
         self.model = model
         self.random_seed = random_seed
         self.k_per_class = k_per_class
@@ -43,7 +54,13 @@ class BaseCounterfactualMethod(ABC):
         self._is_fitted = False
 
     def fit(self, x_train: np.ndarray, y_train: np.ndarray) -> None:
-        """Store training data, apply optional clustering downsampling, then call _fit()."""
+        """Store training data, apply optional subsampling, then call ``_fit()``.
+
+        The labels used for class-wise subsampling are exactly the labels passed
+        into ``fit(...)``. In benchmark runs those labels may be model
+        predictions; outside the benchmark the caller remains free to choose
+        whichever support labels are semantically appropriate.
+        """
         self._x_train = np.asarray(x_train, dtype=np.float32)
         self._y_train = np.asarray(y_train, dtype=np.int64)
         if self._x_train.shape[0] != self._y_train.shape[0]:

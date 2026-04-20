@@ -16,21 +16,21 @@ Classifier and autoencoder training configs for `python train.py fit --config co
 - `heloc_classifier.yaml`
 - `give_me_some_credit_classifier.yaml`
 - `lending_club_classifier.yaml`
+- `wisconsin_breast_cancer_classifier.yaml`
 
 ## Benchmarks (`configs/benchmarks/`)
 
 Benchmark config details live in `configs/benchmarks/README.md`.
+Historical / superseded benchmark configs live in `archive/configs/benchmarks/`.
 
 ### Benchmarks (`scripts/benchmark.py`)
 
-- `benchmark_adult.yaml`
-- `benchmark_adult_main.yaml`
-- `benchmark_adult_certcf.yaml`
-- `benchmark_mnist.yaml`
-- `benchmark_meeting_all.yaml`
+- `benchmark_meeting_all_200q.yaml`
+- `benchmark_full_all_200q.yaml`
 - `benchmark_smoke_all.yaml`
-
-### CertCF query benchmarks (`scripts/certcf_query_benchmark.py`)
-
-- `certcf_query_benchmark_adult.yaml`
-- `certcf_query_benchmark_adult_smoke.yaml`
+- `benchmark_meeting_certcf_input_vs_latent_200q.yaml`
+- `benchmark_meeting_certcf_random_k_sweep_adult.yaml`
+- `benchmark_meeting_certcf_boundary_random_k_sweep_adult.yaml`
+- `benchmark_meeting_certcf_boundary_random_nearest_anchor_top3_200q.yaml`
+- `benchmark_meeting_certcf_boundary_random_top3_plus_nn_gs_200q.yaml`
+- `benchmark_mnist.yaml`

@@ -107,6 +107,119 @@ def runtime_summary(
     return summary
 
 
+def method_comparison_summary(
+    df: pd.DataFrame,
+    *,
+    dataset_col: str = "dataset",
+    method_col: str = "method_label",
+    order: list[str] | None = None,
+) -> pd.DataFrame:
+    """Return a compact benchmark comparison table by dataset and method."""
+    rows = []
+    if dataset_col in df.columns:
+        grouped = df.groupby([dataset_col, method_col], dropna=False, sort=False)
+    else:
+        grouped = df.groupby([method_col], dropna=False, sort=False)
+
+    for group_key, group_df in grouped:
+        if dataset_col in df.columns:
+            dataset_name, method_name = group_key
+        else:
+            dataset_name, method_name = None, group_key
+        success_df = group_df[group_df["success"]]
+        rows.append(
+            {
+                dataset_col: dataset_name,
+                method_col: method_name,
+                "n": int(len(group_df)),
+                "valid_pct": float(100.0 * group_df["success"].mean()),
+                "l1_mean": float(success_df["l1_distance"].mean()) if len(success_df) else np.nan,
+                "l1_median": float(success_df["l1_distance"].median()) if len(success_df) else np.nan,
+                "l2_mean": float(success_df["l2_distance"].mean()) if len(success_df) else np.nan,
+                "l2_median": float(success_df["l2_distance"].median()) if len(success_df) else np.nan,
+                "runtime_mean_s": float(group_df["runtime_s"].mean()),
+                "runtime_median_s": float(group_df["runtime_s"].median()),
+            }
+        )
+
+    summary = pd.DataFrame(rows)
+    if summary.empty:
+        return summary
+    if order is not None and method_col in summary.columns:
+        summary[method_col] = pd.Categorical(summary[method_col], categories=order, ordered=True)
+        sort_cols = [dataset_col, method_col] if dataset_col in summary.columns else [method_col]
+        summary = summary.sort_values(sort_cols).reset_index(drop=True)
+    return summary
+
+
+def matched_success_summary(
+    df: pd.DataFrame,
+    *,
+    dataset_col: str = "dataset",
+    method_col: str = "method_label",
+    query_col: str = "query_idx",
+    order: list[str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return matched-success task counts and summary table by dataset/method."""
+    count_rows: list[dict[str, object]] = []
+    summary_rows: list[dict[str, object]] = []
+
+    if dataset_col in df.columns:
+        dataset_groups = df.groupby(dataset_col, dropna=False, sort=False)
+    else:
+        dataset_groups = [(None, df)]
+
+    for dataset_name, dataset_df in dataset_groups:
+        success_grid = (
+            dataset_df.pivot_table(
+                index=query_col,
+                columns=method_col,
+                values="success",
+                aggfunc="first",
+            )
+        )
+        if order is not None:
+            success_grid = success_grid.reindex(columns=order)
+        common_query_idx = success_grid.index[
+            success_grid.notna().all(axis=1) & success_grid.fillna(False).all(axis=1)
+        ]
+        count_rows.append(
+            {
+                dataset_col: dataset_name,
+                "n_common_queries": int(len(common_query_idx)),
+            }
+        )
+
+        common_df = dataset_df[
+            dataset_df[query_col].isin(common_query_idx) & dataset_df["success"].fillna(False)
+        ].copy()
+        for method_name, method_df in common_df.groupby(method_col, dropna=False, sort=False):
+            summary_rows.append(
+                {
+                    dataset_col: dataset_name,
+                    method_col: method_name,
+                    "n_common_queries": int(len(common_query_idx)),
+                    "l1_mean": float(method_df["l1_distance"].mean()),
+                    "l1_median": float(method_df["l1_distance"].median()),
+                    "l2_mean": float(method_df["l2_distance"].mean()),
+                    "l2_median": float(method_df["l2_distance"].median()),
+                    "runtime_mean_s": float(method_df["runtime_s"].mean()),
+                    "runtime_median_s": float(method_df["runtime_s"].median()),
+                }
+            )
+
+    counts_df = pd.DataFrame(count_rows)
+    matched_df = pd.DataFrame(summary_rows)
+
+    if not counts_df.empty and dataset_col in counts_df.columns:
+        counts_df = counts_df.sort_values([dataset_col]).reset_index(drop=True)
+    if not matched_df.empty and order is not None:
+        matched_df[method_col] = pd.Categorical(matched_df[method_col], categories=order, ordered=True)
+        sort_cols = [dataset_col, method_col] if dataset_col in matched_df.columns else [method_col]
+        matched_df = matched_df.sort_values(sort_cols).reset_index(drop=True)
+    return counts_df, matched_df
+
+
 def metric_table(
     df: pd.DataFrame,
     value_col: str,
@@ -347,3 +460,38 @@ def validity_closeness_score(distances: np.ndarray, budget: float) -> float:
     values = np.asarray(distances, dtype=float)
     values = np.where(np.isfinite(values), values, np.inf)
     return float(np.mean(np.maximum(1.0 - values / budget, 0.0)))
+
+
+def manifoldness_summary(
+    df: pd.DataFrame,
+    *,
+    dataset_col: str = "dataset",
+    method_col: str = "method_label",
+    metric_map: dict[str, str] | None = None,
+    order: list[str] | None = None,
+) -> pd.DataFrame:
+    """Aggregate mean/median manifoldness metrics by dataset and method."""
+    metric_map = metric_map or {
+        "manifold_knn5_all": "knn5_all",
+        "manifold_knn5_target_pred": "knn5_target",
+        "manifold_neg_lof_all": "neg_lof_all",
+    }
+    available = {source: label for source, label in metric_map.items() if source in df.columns}
+    if not available:
+        return pd.DataFrame()
+
+    agg_spec: dict[str, tuple[str, str]] = {"n": ("query_idx", "size")}
+    for source, label in available.items():
+        agg_spec[f"{label}_mean"] = (source, "mean")
+        agg_spec[f"{label}_median"] = (source, "median")
+
+    if dataset_col in df.columns:
+        summary = df.groupby([dataset_col, method_col], dropna=False).agg(**agg_spec).reset_index()
+    else:
+        summary = df.groupby([method_col], dropna=False).agg(**agg_spec).reset_index()
+
+    if order is not None and method_col in summary.columns:
+        summary[method_col] = pd.Categorical(summary[method_col], categories=order, ordered=True)
+        sort_cols = [dataset_col, method_col] if dataset_col in summary.columns else [method_col]
+        summary = summary.sort_values(sort_cols).reset_index(drop=True)
+    return summary

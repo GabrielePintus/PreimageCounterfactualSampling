@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
@@ -47,6 +48,7 @@ def normalize_benchmark_df(
     *,
     dataset: str | None = None,
     method_labels: dict[str, str] | None = None,
+    method_label_fn: Callable[[pd.DataFrame], pd.Series] | None = None,
 ) -> pd.DataFrame:
     """Attach standard display columns without mutating the raw schema."""
     labels = dict(DEFAULT_METHOD_LABELS)
@@ -56,7 +58,20 @@ def normalize_benchmark_df(
     out = df.copy()
     if dataset is not None and "dataset" not in out.columns:
         out["dataset"] = dataset
-    out["method_label"] = out["method"].map(labels).fillna(out["method"])
+    if "run_name" not in out.columns and "method" in out.columns:
+        out["run_name"] = out["method"]
+    if method_label_fn is not None:
+        out["method_label"] = pd.Series(method_label_fn(out), index=out.index, dtype="object")
+    elif "method" in out.columns:
+        method_values = out["method"].astype(str)
+        run_values = out["run_name"].astype(str) if "run_name" in out.columns else method_values
+        method_pretty = method_values.map(labels).fillna(method_values)
+        run_pretty = run_values.map(labels)
+
+        out["method_label"] = run_pretty
+        variant_mask = run_values != method_values
+        out.loc[variant_mask & out["method_label"].isna(), "method_label"] = run_values[variant_mask]
+        out.loc[~variant_mask & out["method_label"].isna(), "method_label"] = method_pretty[~variant_mask]
 
     if "source_class" not in out.columns and "y_orig" in out.columns:
         out["source_class"] = out["y_orig"]
@@ -75,19 +90,26 @@ def load_result(
     *,
     dataset: str | None = None,
     method_labels: dict[str, str] | None = None,
+    method_label_fn: Callable[[pd.DataFrame], pd.Series] | None = None,
 ) -> pd.DataFrame:
     """Load one parquet file and normalize notebook-facing columns."""
     result_path = _resolve_existing_path(path)
     if result_path is None:
         raise FileNotFoundError(f"Missing benchmark file: {path}")
     df = pd.read_parquet(result_path)
-    return normalize_benchmark_df(df, dataset=dataset, method_labels=method_labels)
+    return normalize_benchmark_df(
+        df,
+        dataset=dataset,
+        method_labels=method_labels,
+        method_label_fn=method_label_fn,
+    )
 
 
 def load_result_set(
     mapping: dict[str, str | Path],
     *,
     method_labels: dict[str, str] | None = None,
+    method_label_fn: Callable[[pd.DataFrame], pd.Series] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load multiple parquet files and attach dataset names."""
     frames: list[pd.DataFrame] = []
@@ -105,13 +127,52 @@ def load_result_set(
             }
         )
         if exists:
-            frames.append(load_result(resolved, dataset=dataset_name, method_labels=method_labels))
+            frames.append(
+                load_result(
+                    resolved,
+                    dataset=dataset_name,
+                    method_labels=method_labels,
+                    method_label_fn=method_label_fn,
+                )
+            )
 
     status_df = pd.DataFrame(status_rows)
     if not frames:
         raise RuntimeError("No benchmark parquet files were found.")
 
     return pd.concat(frames, ignore_index=True), status_df
+
+
+def prepare_benchmark_df(
+    df: pd.DataFrame,
+    *,
+    methods: list[str] | None = None,
+    datasets: list[str] | None = None,
+    method_col: str = "method_label",
+    dataset_col: str = "dataset",
+    method_order: list[str] | None = None,
+    dataset_order: list[str] | None = None,
+    success_only_rows: bool = False,
+) -> pd.DataFrame:
+    """Apply standard benchmark dataframe filtering and categorical ordering."""
+    out = df.copy()
+    if methods:
+        out = out[out[method_col].isin(methods)].copy()
+    if datasets and dataset_col in out.columns:
+        out = out[out[dataset_col].isin(datasets)].copy()
+    if success_only_rows and "success" in out.columns:
+        out = out[out["success"]].copy()
+    if dataset_order is not None and dataset_col in out.columns:
+        out[dataset_col] = pd.Categorical(out[dataset_col], categories=dataset_order, ordered=True)
+    if method_order is not None and method_col in out.columns:
+        out[method_col] = pd.Categorical(out[method_col], categories=method_order, ordered=True)
+    if dataset_order is not None and method_order is not None and dataset_col in out.columns and method_col in out.columns:
+        out = out.sort_values([dataset_col, method_col], ignore_index=True)
+    elif dataset_order is not None and dataset_col in out.columns:
+        out = out.sort_values([dataset_col], ignore_index=True)
+    elif method_order is not None and method_col in out.columns:
+        out = out.sort_values([method_col], ignore_index=True)
+    return out
 
 
 def feature_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:

@@ -6,6 +6,7 @@ Dataset-specific LightningDataModule implementations.
 - `mnist.py`: MNIST pipeline.
 - `spiral.py`: synthetic spiral pipeline.
 - `adult.py`: Adult tabular pipeline.
+- `wisconsin_breast_cancer.py`: Wisconsin Breast Cancer tabular pipeline.
 
 ## Example
 ```python

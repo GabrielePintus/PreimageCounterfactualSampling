@@ -13,6 +13,7 @@ from counterfactuals.datasets.loaders import (
     HELOCDataset,
     LendingClubDataset,
     MNISTDataset,
+    WisconsinBreastCancerDataset,
 )
 from counterfactuals.methods.certcf import CertCF
 from counterfactuals.methods.dice import DiceMethod
@@ -48,6 +49,7 @@ def create_default_registries() -> Dict[str, Registry]:
     dataset_registry.register("heloc", HELOCDataset)
     dataset_registry.register("give_me_some_credit", GiveMeSomeCreditDataset)
     dataset_registry.register("lending_club", LendingClubDataset)
+    dataset_registry.register("wisconsin_breast_cancer", WisconsinBreastCancerDataset)
     dataset_registry.register("mnist", MNISTDataset)
 
     model_registry.register("sklearn_model", SklearnModelWrapper)

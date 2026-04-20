@@ -1,7 +1,0 @@
-\beamer@sectionintoc {1}{Motivation \& Background}{3}{0}{1}
-\beamer@sectionintoc {2}{The CPP Method}{5}{0}{2}
-\beamer@sectionintoc {3}{LiRPA Certification}{7}{0}{3}
-\beamer@sectionintoc {4}{Efficient Search with BVH}{9}{0}{4}
-\beamer@sectionintoc {5}{$\delta $-Robust Counterfactuals}{11}{0}{5}
-\beamer@sectionintoc {6}{Experimental Results}{15}{0}{6}
-\beamer@sectionintoc {7}{Summary \& Next Steps}{19}{0}{7}

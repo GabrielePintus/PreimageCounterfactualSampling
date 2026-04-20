@@ -4,7 +4,7 @@ Dataset adapters used by the benchmark runner.
 
 ## Contents
 - `base_dataset.py`: in-memory dataset abstractions.
-- `loaders.py`: concrete loaders (for example, Adult dataset adapter).
+- `loaders.py`: concrete loaders (for example, Adult and Wisconsin Breast Cancer adapters).
 
 ## Example
 ```python

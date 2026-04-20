@@ -284,10 +284,11 @@ class BVHIndex:
     def query_k_nearest_candidates(
         self,
         x: np.ndarray,
-        k: int
+        k: int,
+        distance_norm: int | float = 2,
     ) -> List[int]:
         """
-        Find k polytopes whose bounding boxes are closest to x.
+        Find k polytopes whose anchors/centers are closest to x.
 
         This is a fast heuristic that doesn't require projections,
         useful for quick candidate selection.
@@ -298,16 +299,25 @@ class BVHIndex:
             Query point, shape (d,).
         k : int
             Number of candidates to return.
+        distance_norm : int or float
+            Norm used to rank anchor/center distances.
 
         Returns
         -------
         list[int]
-            Indices of the k nearest polytopes by bounding box distance.
+            Indices of the k nearest polytopes by anchor/center distance.
         """
-        # Simple implementation: compute distances to all centers
-        # For small k, this is efficient enough
-        dists = np.linalg.norm(self.centers - x, axis=1)
-        return list(np.argsort(dists)[:k])
+        k = int(k)
+        if k <= 0:
+            return []
+        diff = self.centers - x[None, :]
+        if distance_norm == 1:
+            dists = np.sum(np.abs(diff), axis=1)
+        elif distance_norm == np.inf:
+            dists = np.max(np.abs(diff), axis=1)
+        else:
+            dists = np.linalg.norm(diff, ord=distance_norm, axis=1)
+        return list(np.argsort(dists)[:min(k, self.n_polytopes)])
 
     def query_sorted_lower_bounds(
         self,

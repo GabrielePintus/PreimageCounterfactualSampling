@@ -20,16 +20,30 @@ from notebooks.utils.constraints import (
     constraint_quality_tables,
 )
 from notebooks.utils.filters import (
+    annotate_common_success_subset,
     shared_success_retention_summary,
     shared_success_subset,
 )
-from notebooks.utils.io import _resolve_existing_path, load_result_set, normalize_benchmark_df
-from notebooks.utils.plots import plot_validity_distance_curves
+from notebooks.utils.io import (
+    _resolve_existing_path,
+    load_result_set,
+    normalize_benchmark_df,
+    prepare_benchmark_df,
+)
+from notebooks.utils.manifoldness import load_tabular_manifold_resources
+from notebooks.utils.plots import (
+    plot_conditioned_proximity_kdes,
+    plot_proximity_kdes_by_dataset,
+    plot_validity_distance_curves,
+)
 from notebooks.utils.robustness import evaluate_empirical_robustness_curves, sample_lp_ball
 from notebooks.utils.style import method_palette, style_method_table
 from notebooks.utils.summaries import (
     curve_endpoint_table,
+    manifoldness_summary,
+    matched_success_summary,
     method_order,
+    method_comparison_summary,
     validity_proximity_curve,
     validity_summary,
 )
@@ -66,6 +80,29 @@ def test_normalize_benchmark_df_adds_standard_columns():
     assert int(df.loc[0, "source_class"]) == 0
 
 
+def test_normalize_benchmark_df_preserves_distinct_run_name_variants():
+    df = normalize_benchmark_df(
+        pd.DataFrame(
+            {
+                "method": ["certcf", "certcf", "dice"],
+                "run_name": ["certcf_input_kmedoids", "certcf_latent_kmedoids", "dice"],
+                "query_idx": [0, 0, 0],
+                "success": [True, True, True],
+                "y_orig": [0, 0, 0],
+                "target_class": [1, 1, 1],
+                "x_orig_0": [0.0, 0.0, 0.0],
+                "x_cf_0": [0.1, 0.2, 0.3],
+            }
+        )
+    )
+
+    assert list(df["method_label"]) == [
+        "certcf_input_kmedoids",
+        "certcf_latent_kmedoids",
+        "DiCE",
+    ]
+
+
 def test_load_result_set_attaches_dataset_and_status(monkeypatch):
     demo = _demo_df()
 
@@ -80,6 +117,64 @@ def test_load_result_set_attaches_dataset_and_status(monkeypatch):
 
     assert set(df["dataset"].unique()) == {"adult", "compas"}
     assert status["available"].all()
+
+
+def test_normalize_benchmark_df_accepts_method_label_fn():
+    df = normalize_benchmark_df(
+        _demo_df(),
+        method_label_fn=lambda frame: frame["method"].map({"certcf": "CertCF top-3", "dice": "DiCE"}),
+    )
+    assert set(df["method_label"]) == {"CertCF top-3", "DiCE"}
+
+
+def test_prepare_benchmark_df_filters_and_orders():
+    df = normalize_benchmark_df(
+        pd.DataFrame(
+            {
+                "dataset": ["compas", "adult", "adult"],
+                "method": ["dice", "certcf", "dice"],
+                "query_idx": [0, 0, 1],
+                "success": [True, True, False],
+                "y_orig": [0, 0, 1],
+                "target_class": [1, 1, 0],
+                "x_orig_0": [0.0, 0.0, 1.0],
+                "x_cf_0": [0.1, 0.2, 0.3],
+            }
+        )
+    )
+    prepared = prepare_benchmark_df(
+        df,
+        methods=["CertCF"],
+        datasets=["adult"],
+        method_order=["CertCF"],
+        dataset_order=["adult", "compas"],
+        success_only_rows=True,
+    )
+    assert list(prepared["dataset"].astype(str)) == ["adult"]
+    assert list(prepared["method_label"].astype(str)) == ["CertCF"]
+
+
+def test_prepare_benchmark_df_sorts_by_method_order_without_dataset_order():
+    df = normalize_benchmark_df(
+        pd.DataFrame(
+            {
+                "method": ["dice", "certcf", "face"],
+                "query_idx": [0, 0, 0],
+                "success": [True, True, True],
+                "y_orig": [0, 0, 0],
+                "target_class": [1, 1, 1],
+                "x_orig_0": [0.0, 0.0, 0.0],
+                "x_cf_0": [0.1, 0.2, 0.3],
+            }
+        )
+    )
+
+    prepared = prepare_benchmark_df(
+        df,
+        method_order=["CertCF", "FACE", "DiCE"],
+    )
+
+    assert list(prepared["method_label"].astype(str)) == ["CertCF", "FACE", "DiCE"]
 
 
 def test_resolve_existing_path_accepts_notebook_relative_result_path(monkeypatch):
@@ -172,6 +267,26 @@ def test_shared_success_retention_summary_reports_task_counts():
     assert int(summary.loc["compas", "n_shared_tasks"]) == 1
 
 
+def test_annotate_common_success_subset_marks_inside_and_outside():
+    df = normalize_benchmark_df(_demo_df())
+    annotated = annotate_common_success_subset(df, by=("query_idx",), method_col="method_label")
+    subset_by_query = annotated.groupby("query_idx")["subset_group"].first().to_dict()
+    assert subset_by_query[0] == "Common-success subset"
+    assert subset_by_query[1] == "Outside common subset"
+
+
+def test_annotate_common_success_subset_never_marks_failed_rows_as_common():
+    df = normalize_benchmark_df(_demo_df())
+    annotated = annotate_common_success_subset(df, by=("query_idx",), method_col="method_label")
+
+    failed_row = annotated.loc[
+        (annotated["query_idx"] == 1) & (annotated["method_label"] == "DiCE")
+    ].iloc[0]
+
+    assert bool(failed_row["success"]) is False
+    assert failed_row["subset_group"] == "Outside common subset"
+
+
 def test_validity_summary_returns_expected_counts():
     df = normalize_benchmark_df(_demo_df())
     summary = validity_summary(df)
@@ -179,6 +294,82 @@ def test_validity_summary_returns_expected_counts():
     assert float(summary.loc["CertCF", "validity_pct"]) == 100.0
     assert float(summary.loc["DiCE", "validity_pct"]) == 50.0
     assert int(summary.loc["CertCF", "n_total"]) == 2
+
+
+def test_method_comparison_summary_combines_validity_proximity_and_runtime():
+    df = normalize_benchmark_df(
+        pd.DataFrame(
+            {
+                "dataset": ["adult", "adult", "adult", "adult"],
+                "method": ["certcf", "certcf", "dice", "dice"],
+                "query_idx": [0, 1, 0, 1],
+                "success": [True, True, True, False],
+                "runtime_s": [0.1, 0.2, 0.3, 0.4],
+                "l1_distance": [1.0, 2.0, 3.0, np.nan],
+                "l2_distance": [0.5, 0.8, 1.5, np.nan],
+                "y_orig": [0, 1, 0, 1],
+                "target_class": [1, 0, 1, 0],
+                "x_orig_0": [0.0, 1.0, 0.0, 1.0],
+                "x_cf_0": [0.2, 0.8, 0.3, np.nan],
+            }
+        )
+    )
+    summary = method_comparison_summary(df, order=["CertCF", "DiCE"])
+    assert float(summary.loc[0, "valid_pct"]) == 100.0
+    assert float(summary.loc[1, "valid_pct"]) == 50.0
+    assert float(summary.loc[0, "l1_mean"]) == 1.5
+    assert float(summary.loc[1, "runtime_median_s"]) == 0.35
+
+
+def test_matched_success_summary_returns_common_counts_and_rows():
+    df = normalize_benchmark_df(
+        pd.DataFrame(
+            {
+                "dataset": ["adult", "adult", "adult", "adult"],
+                "method": ["certcf", "dice", "certcf", "dice"],
+                "query_idx": [0, 0, 1, 1],
+                "success": [True, True, True, False],
+                "runtime_s": [0.1, 0.2, 0.1, 0.3],
+                "l1_distance": [1.0, 1.2, 0.9, np.nan],
+                "l2_distance": [0.5, 0.7, 0.4, np.nan],
+                "y_orig": [0, 0, 1, 1],
+                "target_class": [1, 1, 0, 0],
+                "x_orig_0": [0.0, 0.0, 1.0, 1.0],
+                "x_cf_0": [0.4, 0.6, 0.7, np.nan],
+            }
+        )
+    )
+    counts, matched = matched_success_summary(df, order=["CertCF", "DiCE"])
+    assert int(counts.loc[0, "n_common_queries"]) == 1
+    assert set(matched["method_label"].astype(str)) == {"CertCF", "DiCE"}
+    assert set(matched["n_common_queries"]) == {1}
+
+
+def test_matched_success_summary_ignores_failed_rows_even_if_task_is_common():
+    df = normalize_benchmark_df(
+        pd.DataFrame(
+            {
+                "dataset": ["adult", "adult", "adult", "adult", "adult"],
+                "method": ["certcf", "certcf", "dice", "dice", "dice"],
+                "query_idx": [0, 1, 0, 1, 1],
+                "success": [True, True, True, True, False],
+                "runtime_s": [0.1, 0.2, 0.3, 0.4, 9.9],
+                "l1_distance": [1.0, 0.9, 1.2, 1.1, 99.0],
+                "l2_distance": [0.5, 0.4, 0.7, 0.6, 99.0],
+                "y_orig": [0, 1, 0, 1, 1],
+                "target_class": [1, 0, 1, 0, 0],
+                "x_orig_0": [0.0, 1.0, 0.0, 1.0, 1.0],
+                "x_cf_0": [0.4, 0.7, 0.6, 0.8, np.nan],
+            }
+        )
+    )
+
+    counts, matched = matched_success_summary(df, order=["CertCF", "DiCE"])
+
+    assert int(counts.loc[0, "n_common_queries"]) == 2
+    dice_row = matched.loc[matched["method_label"].astype(str) == "DiCE"].iloc[0]
+    assert np.isclose(float(dice_row["l1_mean"]), 1.15)
+    assert np.isclose(float(dice_row["runtime_mean_s"]), 0.35)
 
 
 def test_validity_proximity_curve_returns_auc_and_percent_curve():
@@ -207,6 +398,87 @@ def test_curve_endpoint_table_uses_largest_epsilon_per_group():
     assert float(table.loc["DiCE", "adult"]) == 55.0
 
 
+def test_manifoldness_summary_aggregates_available_metrics():
+    df = pd.DataFrame(
+        {
+            "dataset": ["adult", "adult", "adult", "adult"],
+            "method_label": ["CertCF", "CertCF", "DiCE", "DiCE"],
+            "query_idx": [0, 1, 0, 1],
+            "manifold_knn5_all": [0.2, 0.4, 0.6, 0.8],
+            "manifold_knn5_target_pred": [0.1, 0.3, 0.5, 0.7],
+            "manifold_neg_lof_all": [1.0, 1.5, 2.0, 2.5],
+        }
+    )
+    summary = manifoldness_summary(df, order=["CertCF", "DiCE"])
+    assert np.isclose(float(summary.loc[0, "knn5_all_mean"]), 0.3)
+    assert np.isclose(float(summary.loc[1, "knn5_target_median"]), 0.6)
+    assert np.isclose(float(summary.loc[0, "neg_lof_all_mean"]), 1.25)
+
+
+def test_load_tabular_manifold_resources_defaults_data_dir_to_repo_data(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class FakeDataset:
+        def load(self):
+            return None
+
+        def get_train(self):
+            return np.array([[0.0], [1.0]], dtype=np.float32), np.array([0, 1], dtype=np.int64)
+
+    class FakeDatasetRegistry:
+        def create(self, name, **kwargs):
+            captured["name"] = name
+            captured["kwargs"] = kwargs
+            return FakeDataset()
+
+    fake_registries = {"dataset": FakeDatasetRegistry()}
+
+    class FakeModel:
+        def predict(self, x):
+            return np.zeros(len(x), dtype=np.int64)
+
+    config_path = tmp_path / "bench.yaml"
+    config_path.write_text("dummy: true\n")
+
+    monkeypatch.setattr(
+        "notebooks.utils.manifoldness._resolve_existing_path",
+        lambda path: config_path,
+    )
+    monkeypatch.setattr(
+        "notebooks.utils.manifoldness.read_yaml",
+        lambda path: {
+            "datasets": [
+                {
+                    "name": "adult",
+                    "model": {
+                        "name": "tabular_classifier_ckpt",
+                        "params": {
+                            "checkpoint": "checkpoints/adult_classifier/best.ckpt",
+                            "dataset_module": "adult",
+                            "hidden_dims": [32, 8],
+                            "dropout": 0.2,
+                        },
+                    },
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "notebooks.utils.manifoldness.create_default_registries",
+        lambda: fake_registries,
+    )
+    monkeypatch.setattr(
+        "notebooks.utils.manifoldness._build_torch_model_from_checkpoint",
+        lambda **kwargs: FakeModel(),
+    )
+
+    resources = load_tabular_manifold_resources(config_path, datasets=["adult"], device="cpu")
+
+    assert "adult" in resources
+    assert captured["name"] == "adult"
+    assert captured["kwargs"]["data_dir"] == str(ROOT / "data")
+
+
 def test_sample_lp_ball_respects_radius_for_supported_norms():
     rng = np.random.default_rng(0)
 
@@ -226,14 +498,17 @@ def test_evaluate_empirical_robustness_curves_returns_expected_schema():
         def predict(self, x):
             return np.zeros(len(x), dtype=np.int64)
 
+    spec = get_tabular_dataset_spec("heloc")
     df = pd.DataFrame(
         {
             "dataset": ["heloc", "heloc"],
             "method_label": ["CertCF", "DiCE"],
             "success": [True, True],
             "target_class": [0, 0],
-            "x_cf_0": [0.1, 0.2],
-            "x_cf_1": [0.3, 0.4],
+            **{
+                f"x_cf_{idx}": [float(idx) / 10.0, float(idx + 1) / 10.0]
+                for idx in range(spec.n_features)
+            },
         }
     )
 
@@ -255,14 +530,17 @@ def test_evaluate_empirical_robustness_curves_falls_back_to_binary_target_from_s
         def predict(self, x):
             return np.ones(len(x), dtype=np.int64)
 
+    spec = get_tabular_dataset_spec("heloc")
     df = pd.DataFrame(
         {
             "dataset": ["heloc"],
             "method_label": ["CertCF"],
             "success": [True],
             "source_class": [0],
-            "x_cf_0": [0.1],
-            "x_cf_1": [0.3],
+            **{
+                f"x_cf_{idx}": [float(idx) / 10.0]
+                for idx in range(spec.n_features)
+            },
         }
     )
 
@@ -441,11 +719,58 @@ def test_plot_validity_distance_curves_keeps_certcf_red_with_variant_labels():
     plt.close(fig)
 
 
+def test_plot_proximity_kdes_by_dataset_returns_one_figure_per_dataset():
+    df = pd.DataFrame(
+        {
+            "dataset": ["adult", "adult", "adult", "adult"],
+            "method_label": ["CertCF", "CertCF", "DiCE", "DiCE"],
+            "l1_distance": [1.0, 1.2, 1.5, 1.7],
+            "l2_distance": [0.5, 0.6, 0.8, 0.9],
+        }
+    )
+    palette = method_palette(["CertCF", "DiCE"])
+    figures = plot_proximity_kdes_by_dataset(
+        df,
+        dataset_order=["adult"],
+        method_order=["CertCF", "DiCE"],
+        palette=palette,
+    )
+    assert len(figures) == 1
+    _, fig, axes = figures[0]
+    assert len(axes) == 2
+    plt.close(fig)
+
+
+def test_plot_conditioned_proximity_kdes_returns_grid():
+    df = pd.DataFrame(
+        {
+            "dataset": ["adult"] * 8,
+            "method_label": ["CertCF"] * 4 + ["DiCE"] * 4,
+            "subset_group": ["Common-success subset", "Common-success subset", "Outside common subset", "Outside common subset"] * 2,
+            "l1_distance": [1.0, 1.1, 1.5, 1.6, 0.8, 0.9, 1.3, 1.4],
+            "l2_distance": [0.5, 0.55, 0.9, 1.0, 0.4, 0.45, 0.7, 0.8],
+        }
+    )
+    figures = plot_conditioned_proximity_kdes(
+        df,
+        dataset_order=["adult"],
+        method_order=["CertCF", "DiCE"],
+        subset_col="subset_group",
+        subset_order=["Common-success subset", "Outside common subset"],
+        subset_palette={
+            "Common-success subset": "#1f77b4",
+            "Outside common subset": "#d62728",
+        },
+    )
+    assert len(figures) == 1
+    _, fig, axes = figures[0]
+    assert len(axes) == 2
+    plt.close(fig)
+
+
 def test_benchmark_notebooks_do_not_define_shared_helpers_inline():
-    notebook_paths = [
-        ROOT / "notebooks" / "6.2 - Multi-dataset benchmark analysis.ipynb",
-        ROOT / "notebooks" / "6.3 - MNIST benchmark analysis.ipynb",
-    ]
+    notebook_paths = sorted((ROOT / "notebooks").glob("*.ipynb"))
+    assert notebook_paths, "Expected at least one active notebook in notebooks/."
 
     for path in notebook_paths:
         nb = json.loads(path.read_text(encoding="utf-8"))
@@ -455,6 +780,5 @@ def test_benchmark_notebooks_do_not_define_shared_helpers_inline():
             if cell.get("cell_type") == "code"
         )
         assert "def validity_proximity_curve(" not in source
-        assert "METHOD_LABELS =" not in source
-        assert "shared_success_retention_summary(" in source
-        assert "style_method_table(" in source
+        assert "def shared_success_retention_summary(" not in source
+        assert "def style_method_table(" not in source

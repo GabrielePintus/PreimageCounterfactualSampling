@@ -139,7 +139,7 @@ class CertCFAtlas:
 
         self.solver_maxiter = solver_maxiter
 
-        allowed_methods = {"sorted", "bvh"}
+        allowed_methods = {"sorted", "bvh", "nearest_anchor"}
         if default_query_method not in allowed_methods:
             raise ValueError(
                 f"default_query_method must be one of {allowed_methods}, got {default_query_method!r}"
@@ -1312,6 +1312,83 @@ class CertCFAtlas:
         profiling.update(best_decode_profile[0])
         return x_cf, dist, anchor_idx, n_qp, profiling
 
+    def _search_nearest_anchor(
+        self,
+        x_query,
+        bd,
+        target_class,
+        delta,
+        robust_norm,
+        solver_maxiter,
+        fixed_dims,
+        query_k_candidates: int,
+    ):
+        """Project only onto the top-k nearest target-class anchors.
+
+        This is an approximate, fixed-budget query strategy. It preserves
+        certified validity for any returned point because projection is still
+        performed against certified target-class polytopes, but it does not
+        guarantee the closest point over the full atlas.
+        """
+        project_fn, projection_time_s, best_decode_profile = self._make_project_fn(
+            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims)
+        bvh = self.bvh_indices[target_class]
+        k = int(query_k_candidates)
+        if k <= 0:
+            raise ValueError("query_k_candidates must be positive for method='nearest_anchor'.")
+
+        t0 = time.perf_counter()
+        sorted_candidate_indices = bvh.query_k_nearest_candidates(
+            x_query,
+            k=bvh.n_polytopes,
+            distance_norm=self.distance_norm,
+        )
+        primary_indices = sorted_candidate_indices[:k]
+        fallback_indices = sorted_candidate_indices[k:]
+
+        best_point: Optional[np.ndarray] = None
+        best_dist = np.inf
+        best_idx: Optional[int] = None
+        n_qp = 0
+        fallback_used = False
+        for idx in primary_indices:
+            point, dist = project_fn(int(idx), best_dist)
+            n_qp += 1
+            if dist < best_dist:
+                best_point = point
+                best_dist = dist
+                best_idx = int(idx)
+
+        # If the fixed top-k budget finds no feasible certified projection,
+        # keep the method useful by scanning remaining anchors in nearest-anchor
+        # order until the first feasible projection is found. This fallback is
+        # only paid on failures; successful top-k queries keep a fixed QP budget.
+        if best_point is None:
+            fallback_used = True
+            for idx in fallback_indices:
+                point, dist = project_fn(int(idx), best_dist)
+                n_qp += 1
+                if point is not None and np.isfinite(dist):
+                    best_point = point
+                    best_dist = dist
+                    best_idx = int(idx)
+                    break
+
+        query_loop_time_s = time.perf_counter() - t0
+        profiling = {
+            "query_loop_time_ms": 1e3 * query_loop_time_s,
+            "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_time_s[0]),
+            "projection_time_ms": 1e3 * projection_time_s[0],
+            "distance_norm": float(self.distance_norm) if self.distance_norm == np.inf else int(self.distance_norm),
+            "query_k_candidates": float(k),
+            "nearest_anchor_fallback_used": float(fallback_used),
+            "n_candidates_considered": float(n_qp),
+            "n_candidates_total": float(bvh.n_polytopes),
+            "n_candidates_pruned_by_top_k": float(max(0, bvh.n_polytopes - n_qp)),
+        }
+        profiling.update(best_decode_profile[0])
+        return best_point, best_dist, best_idx, n_qp, profiling
+
     def find_counterfactual(
         self,
         x_query: np.ndarray,
@@ -1320,7 +1397,8 @@ class CertCFAtlas:
         delta: float = 0.0,
         robust_norm: Optional[Union[int, float, str]] = None,
         solver_maxiter: Optional[int] = None,
-        fixed_dims: Optional[np.ndarray] = None
+        fixed_dims: Optional[np.ndarray] = None,
+        query_k_candidates: int = 1,
     ) -> CounterfactualResult:
         """Find the closest counterfactual for a query point."""
 
@@ -1354,8 +1432,12 @@ class CertCFAtlas:
         elif resolved_method == 'sorted':
             x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_sorted(
                 x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims)
+        elif resolved_method == 'nearest_anchor':
+            x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_nearest_anchor(
+                x_query, bd, target_class, delta, robust_norm, solver_maxiter,
+                fixed_dims, query_k_candidates)
         else:
-            raise ValueError(f"Unknown method: {resolved_method}. Use 'sorted' or 'bvh'.")
+            raise ValueError(f"Unknown method: {resolved_method}. Use 'sorted', 'bvh', or 'nearest_anchor'.")
 
         profiling.update(search_profiling)
 
@@ -1385,7 +1467,8 @@ class CertCFAtlas:
         delta: float = 0.0,
         robust_norm: Optional[Union[int, float, str]] = None,
         solver_maxiter: Optional[int] = None,
-        fixed_dims: Optional[np.ndarray] = None
+        fixed_dims: Optional[np.ndarray] = None,
+        query_k_candidates: int = 1,
     ) -> List[CounterfactualResult]:
         """Find counterfactuals for a batch of query points."""
         results = []
@@ -1395,7 +1478,8 @@ class CertCFAtlas:
                 delta=delta,
                 robust_norm=robust_norm,
                 solver_maxiter=solver_maxiter,
-                fixed_dims=fixed_dims
+                fixed_dims=fixed_dims,
+                query_k_candidates=query_k_candidates,
             ))
         return results
 

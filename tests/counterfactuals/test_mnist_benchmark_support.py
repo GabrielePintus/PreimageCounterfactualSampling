@@ -7,9 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from counterfactuals.benchmarks.results import BenchmarkResult, MethodResult, QueryResult
+from counterfactuals.core.base_classes import CounterfactualResult
+from counterfactuals.core.registry import Registry
 from counterfactuals.datasets.loaders import MNISTDataset
 from counterfactuals.methods.certcf import _strip_dropout_modules
 from counterfactuals.models.torch_model import TorchModelWrapper
@@ -137,16 +140,18 @@ def test_benchmark_result_dataframe_includes_multiclass_columns():
                     QueryResult(
                         query_idx=11,
                         x_cf=np.array([1.0, 0.0], dtype=np.float32),
-                        y_cf=8,
-                        success=True,
-                        runtime_s=0.1,
-                        error=None,
-                        l2_distance=1.0,
-                        l1_distance=2.0,
-                        l0_sparsity=0.5,
-                        mad_l1_distance=2.0,
-                        redundancy=0.0,
-                        target_class=8,
+                    y_cf=8,
+                    success=True,
+                    runtime_s=0.1,
+                    error=None,
+                    l2_distance=1.0,
+                    l1_distance=2.0,
+                    l0_sparsity=0.5,
+                    mad_l1_distance=2.0,
+                    redundancy=0.0,
+                    method_success=True,
+                    target_reached=True,
+                    target_class=8,
                     )
                 ],
             )
@@ -158,6 +163,48 @@ def test_benchmark_result_dataframe_includes_multiclass_columns():
     assert int(df.loc[0, "source_class"]) == 3
     assert int(df.loc[0, "target_class"]) == 8
     assert int(df.loc[0, "y_true"]) == 3
+
+
+def test_benchmark_result_dataframe_preserves_method_and_run_name():
+    result = BenchmarkResult(
+        dataset="adult",
+        seed=7,
+        x_queries=np.array([[0.0, 1.0]], dtype=np.float32),
+        y_orig=np.array([0], dtype=np.int64),
+        method_results=[
+            MethodResult(
+                method="certcf",
+                run_name="certcf_variant_a",
+                params={},
+                build_time_s=1.2,
+                space="raw",
+                query_results=[
+                    QueryResult(
+                        query_idx=5,
+                        x_cf=np.array([1.0, 0.0], dtype=np.float32),
+                        y_cf=1,
+                        success=True,
+                        runtime_s=0.1,
+                        error=None,
+                        l2_distance=1.0,
+                        l1_distance=1.0,
+                        l0_sparsity=0.5,
+                        mad_l1_distance=1.0,
+                        redundancy=0.0,
+                        method_success=True,
+                        target_reached=True,
+                        target_class=1,
+                    )
+                ],
+            )
+        ],
+    )
+
+    df = result.to_dataframe()
+    assert df.loc[0, "method"] == "certcf"
+    assert df.loc[0, "run_name"] == "certcf_variant_a"
+    assert bool(df.loc[0, "method_success"]) is True
+    assert bool(df.loc[0, "target_reached"]) is True
 
 
 def test_strip_dropout_modules_preserves_custom_forward():
@@ -217,12 +264,13 @@ def test_build_certcf_method_forwards_atlas_subsample_space(monkeypatch):
     monkeypatch.setattr(benchmark, "_load_lit_checkpoint_resilient", lambda *args, **kwargs: SimpleNamespace(model=FakeLitModel()))
     monkeypatch.setattr("counterfactuals.methods.certcf.CertCF", FakeCertCF)
 
-    benchmark._build_certcf_method(
+    atlas_method, *_ = benchmark._build_certcf_method(
         params={
             "checkpoint": "checkpoints/adult_classifier/best.ckpt",
             "device": "cpu",
             "atlas_subsample_method": "kmedoids",
             "atlas_subsample_space": "latent",
+            "atlas_boundary_beta": 0.7,
             "k_per_class": 10,
         },
         model_params={
@@ -232,10 +280,257 @@ def test_build_certcf_method_forwards_atlas_subsample_space(monkeypatch):
         },
         dataset_name="adult",
         x_train=np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
-        y_train=np.array([0, 1], dtype=np.int64),
+        y_train=np.array([1, 0], dtype=np.int64),
         x_queries=np.array([[0.5, 0.5]], dtype=np.float32),
         seed=7,
     )
 
     assert init_calls
     assert init_calls[0]["subsample_space"] == "latent"
+    assert np.isclose(float(init_calls[0]["boundary_beta"]), 0.7)
+    assert np.array_equal(atlas_method.y_train, np.array([1, 0], dtype=np.int64))
+
+
+class _TinyToyDataset:
+    spec = None
+
+    def load(self):
+        return None
+
+    def get_train(self):
+        x = np.array([[-1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+        y = np.array([0, 1], dtype=np.int64)
+        return x, y
+
+    def get_test(self):
+        x = np.array([[-0.5, 0.0]], dtype=np.float32)
+        y = np.array([0], dtype=np.int64)
+        return x, y
+
+
+class _ToyModel:
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float32)
+        if x.ndim == 1:
+            x = x[None, :]
+        return (x[:, 0] > 0.0).astype(np.int64)
+
+    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+        pred = self.predict(x)
+        proba = np.full((pred.shape[0], 2), 0.1, dtype=np.float32)
+        proba[:, 1] = np.where(pred == 1, 0.9, 0.1)
+        proba[:, 0] = 1.0 - proba[:, 1]
+        return proba
+
+
+class _ToyMethod:
+    last_fit_labels = None
+
+    def __init__(self, model, random_seed=0, mode="reported_failure"):
+        self.model = model
+        self.mode = mode
+
+    def fit(self, x_train, y_train):
+        self.x_train = x_train
+        self.y_train = y_train
+        type(self).last_fit_labels = np.array(y_train, copy=True)
+
+    def generate(self, x, target_class=None):
+        del x, target_class
+        if self.mode == "reported_failure":
+            return CounterfactualResult(
+                x_cf=np.array([0.75, 0.0], dtype=np.float32),
+                success=False,
+                distance=1.0,
+                metadata={"reason": "toy_reported_failure"},
+            )
+        return CounterfactualResult(
+            x_cf=np.array([-0.25, 0.0], dtype=np.float32),
+            success=True,
+            distance=1.0,
+            metadata={},
+        )
+
+
+def _toy_registries():
+    dataset_registry = Registry("dataset")
+    dataset_registry.register("toy", _TinyToyDataset)
+    model_registry = Registry("model")
+    model_registry.register("toy_model", _ToyModel)
+    method_registry = Registry("method")
+    method_registry.register("toy_method", _ToyMethod)
+    return {
+        "dataset": dataset_registry,
+        "model": model_registry,
+        "method": method_registry,
+        "metric": Registry("metric"),
+        "preprocessing": Registry("preprocessing"),
+    }
+
+
+def test_run_single_dataset_preserves_method_reported_failure_semantics(monkeypatch, tmp_path):
+    benchmark = _load_benchmark_module()
+    monkeypatch.setattr(benchmark, "create_default_registries", _toy_registries)
+
+    result = benchmark.run_single_dataset(
+        {
+            "seed": 0,
+            "dataset": {"name": "toy", "params": {}},
+            "model": {"name": "toy_model", "params": {}},
+            "sampling": {"n_queries": 1},
+            "output": {"path": str(tmp_path / "toy_failure.parquet")},
+            "methods": [
+                {
+                    "name": "toy_method",
+                    "run_name": "toy_reported_failure_variant",
+                    "params": {"mode": "reported_failure"},
+                }
+            ],
+        }
+    )
+
+    df = result.to_dataframe()
+    assert df.loc[0, "method"] == "toy_method"
+    assert df.loc[0, "run_name"] == "toy_reported_failure_variant"
+    assert bool(df.loc[0, "method_success"]) is False
+    assert bool(df.loc[0, "target_reached"]) is True
+    assert bool(df.loc[0, "success"]) is False
+    assert df.loc[0, "error"] == "toy_reported_failure"
+
+
+def test_run_single_dataset_requires_target_reached_for_benchmark_success(monkeypatch, tmp_path):
+    benchmark = _load_benchmark_module()
+    monkeypatch.setattr(benchmark, "create_default_registries", _toy_registries)
+
+    result = benchmark.run_single_dataset(
+        {
+            "seed": 0,
+            "dataset": {"name": "toy", "params": {}},
+            "model": {"name": "toy_model", "params": {}},
+            "sampling": {"n_queries": 1},
+            "output": {"path": str(tmp_path / "toy_target_not_reached.parquet")},
+            "methods": [
+                {
+                    "name": "toy_method",
+                    "run_name": "toy_target_not_reached_variant",
+                    "params": {"mode": "wrong_target"},
+                }
+            ],
+        }
+    )
+
+    df = result.to_dataframe()
+    assert bool(df.loc[0, "method_success"]) is True
+    assert bool(df.loc[0, "target_reached"]) is False
+    assert bool(df.loc[0, "success"]) is False
+    assert pd.isna(df.loc[0, "error"]) or df.loc[0, "error"] is None
+
+
+def test_run_single_dataset_passes_prediction_aligned_labels_to_generic_methods(monkeypatch, tmp_path):
+    benchmark = _load_benchmark_module()
+
+    class DisagreeingToyDataset(_TinyToyDataset):
+        def get_train(self):
+            x = np.array([[-1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+            y = np.array([1, 0], dtype=np.int64)
+            return x, y
+
+    def _registries_with_disagreeing_dataset():
+        regs = _toy_registries()
+        regs["dataset"] = Registry("dataset")
+        regs["dataset"].register("toy", DisagreeingToyDataset)
+        return regs
+
+    monkeypatch.setattr(benchmark, "create_default_registries", _registries_with_disagreeing_dataset)
+    _ToyMethod.last_fit_labels = None
+
+    result = benchmark.run_single_dataset(
+        {
+            "seed": 0,
+            "dataset": {"name": "toy", "params": {}},
+            "model": {"name": "toy_model", "params": {}},
+            "sampling": {"n_queries": 1},
+            "output": {"path": str(tmp_path / "toy_predicted_support_generic.parquet")},
+            "methods": [
+                {
+                    "name": "toy_method",
+                    "run_name": "toy_predicted_support_generic",
+                    "params": {"mode": "reported_failure"},
+                }
+            ],
+        }
+    )
+
+    method_result = result.method_results[0]
+    assert method_result.run_name == "toy_predicted_support_generic"
+    assert np.array_equal(_ToyMethod.last_fit_labels, np.array([0, 1], dtype=np.int64))
+    assert method_result.query_results[0].metadata["train_label_source"] == "predicted"
+    assert method_result.query_results[0].metadata["train_label_space"] == "generation"
+    assert np.isclose(method_result.query_results[0].metadata["train_label_agreement_true"], 0.0)
+
+
+def test_run_single_dataset_passes_prediction_aligned_labels_to_certcf(monkeypatch, tmp_path):
+    benchmark = _load_benchmark_module()
+    captured = {}
+
+    class DisagreeingToyDataset(_TinyToyDataset):
+        def get_train(self):
+            x = np.array([[-1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+            y = np.array([1, 0], dtype=np.int64)
+            return x, y
+
+    class CapturingCertCF:
+        def __init__(self, **kwargs):
+            captured["init_kwargs"] = kwargs
+
+        def fit(self, x_train, y_train):
+            self.x_train = x_train
+            self.y_train = y_train
+
+        def generate(self, x, target_class=None):
+            del x, target_class
+            return CounterfactualResult(
+                x_cf=np.array([0.75, 0.0], dtype=np.float32),
+                success=False,
+                distance=1.0,
+                metadata={"reason": "toy_reported_failure"},
+            )
+
+    def _registries_with_certcf():
+        regs = _toy_registries()
+        regs["dataset"] = Registry("dataset")
+        regs["dataset"].register("toy", DisagreeingToyDataset)
+        return regs
+
+    monkeypatch.setattr(benchmark, "create_default_registries", _registries_with_certcf)
+
+    def fake_build_certcf_method(**kwargs):
+        captured["fit_labels"] = np.array(kwargs["y_train"], copy=True)
+        method = CapturingCertCF()
+        method.fit(kwargs["x_train"], kwargs["y_train"])
+        return method, _ToyModel(), None, None, kwargs["x_queries"], None
+
+    monkeypatch.setattr(benchmark, "_build_certcf_method", fake_build_certcf_method)
+
+    result = benchmark.run_single_dataset(
+        {
+            "seed": 0,
+            "dataset": {"name": "toy", "params": {}},
+            "model": {"name": "toy_model", "params": {}},
+            "sampling": {"n_queries": 1},
+            "output": {"path": str(tmp_path / "toy_predicted_support_certcf.parquet")},
+            "methods": [
+                {
+                    "name": "certcf",
+                    "run_name": "toy_predicted_support_certcf",
+                    "params": {},
+                }
+            ],
+        }
+    )
+
+    qr = result.method_results[0].query_results[0]
+    assert np.array_equal(captured["fit_labels"], np.array([0, 1], dtype=np.int64))
+    assert qr.metadata["train_label_source"] == "predicted"
+    assert qr.metadata["train_label_space"] == "raw"
+    assert np.isclose(qr.metadata["train_label_agreement_true"], 0.0)

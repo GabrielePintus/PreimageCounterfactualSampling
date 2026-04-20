@@ -9,20 +9,20 @@ It accepts both single-dataset and multi-dataset config schemas.
 ## Quick Start
 
 ```bash
-# Single dataset
-python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
+# Smoke benchmark
+python scripts/benchmark.py --config configs/benchmarks/benchmark_smoke_all.yaml
 
-# All tabular datasets (meeting benchmark)
-python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all.yaml
+# Main multi-dataset benchmark
+python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all_200q.yaml
 
 # Subset of datasets
 python scripts/benchmark.py \
-    --config configs/benchmarks/benchmark_meeting_all.yaml \
+    --config configs/benchmarks/benchmark_meeting_all_200q.yaml \
     --datasets adult compas
 
 # Override output path
 python scripts/benchmark.py \
-    --config configs/benchmarks/benchmark_meeting_all.yaml \
+    --config configs/benchmarks/benchmark_meeting_all_200q.yaml \
     --output results/my_run.parquet
 ```
 
@@ -90,7 +90,8 @@ timeout_per_sample: 60        # seconds per (method, query); 0 = no limit
 
 dataset:
   name: adult                 # registry key: adult | compas | german_credit |
-                              #   heloc | give_me_some_credit | lending_club | mnist
+                              #   heloc | give_me_some_credit | lending_club |
+                              #   wisconsin_breast_cancer | mnist
   params:
     data_dir: data/
 
@@ -132,6 +133,12 @@ methods:
       atlas_subsample_space: input
       k_per_class: 200
 ```
+
+Result semantics:
+- `method` in the saved parquet is the implementation key, for example `certcf` or `dice`
+- `run_name` is the configured variant label used in benchmark tables and plots
+- benchmark `success` is strict: the method must report success and the returned point must reach the requested target class
+- `method_success` and `target_reached` are also stored explicitly for failure analysis
 
 ### Grid expansion
 
@@ -230,6 +237,16 @@ CertCF supports selecting atlas anchors in either raw input space or penultimate
 
 `atlas_subsample_space: latent` is currently supported for tabular torch classifiers used by the CertCF benchmark path. The atlas itself is still built and queried in input space; only anchor selection changes.
 
+`atlas_subsample_method: boundary_random` is supported only by `certcf`. Generic benchmark methods do not implement boundary-aware subsampling and now fail explicitly if configured with that value.
+
+During benchmark runs, method fitting is now prediction-aligned for **all** methods:
+
+- the benchmark computes model-predicted training labels once per run
+- generic methods receive those predicted labels in `fit(x_train, y_train_pred)`
+- `CertCF.fit(...)` also receives predicted support labels and treats them as authoritative
+- dataset ground-truth training labels are kept only for diagnostics and analysis
+- `atlas_subsample_space` still controls whether CertCF chooses anchors in raw input space or penultimate latent space
+
 ### `method_overrides`
 
 A dict keyed by `run_name` (or `name`). Values are **shallow-merged** on top of the shared
@@ -250,30 +267,27 @@ directly on the dataset block:
 
 ## Available Config Files
 
+Active benchmark configs live in `configs/benchmarks/`.
+Historical or superseded configs have been moved to `archive/configs/benchmarks/`.
+
 ### Multi-dataset (run with `benchmark.py`)
 
 | File | Datasets | Methods | Queries |
 |------|----------|---------|---------|
-| `benchmark_meeting_all.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 50 |
 | `benchmark_meeting_all_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 200 |
-| `benchmark_meeting_certcf_input_vs_latent_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | certcf input kmedoids, certcf latent kmedoids | 200 |
+| `benchmark_full_all_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club, wisconsin_breast_cancer | nn, wachter, dice, gs, face, certcf | 200 |
 | `benchmark_smoke_all.yaml` | compas, german_credit, heloc, give_me_some_credit, lending_club | nn, gs, certcf | 50 |
+| `benchmark_meeting_certcf_input_vs_latent_200q.yaml` | adult, compas, german_credit | certcf input kmedoids, certcf latent kmedoids | 200 |
+| `benchmark_meeting_certcf_random_k_sweep_adult.yaml` | adult, compas, german_credit | certcf random anchors, k sweep | 200 |
+| `benchmark_meeting_certcf_boundary_random_k_sweep_adult.yaml` | adult, compas, german_credit | certcf boundary-random anchors, k sweep | 200 |
+| `benchmark_meeting_certcf_boundary_random_nearest_anchor_top3_200q.yaml` | adult, compas, german_credit | certcf boundary-random + nearest-anchor (`k=[3,5]`) | 200 |
+| `benchmark_meeting_certcf_boundary_random_top3_plus_nn_gs_200q.yaml` | adult, compas, german_credit | certcf boundary-random top-3, nn, dice, gs | 200 |
 
 ### Single-dataset (run with `benchmark.py`)
 
 | File | Dataset | Purpose |
 |------|---------|---------|
-| `benchmark_adult.yaml` | adult | CertCF grid search (eps_alpha × k_per_class), 200 queries |
-| `benchmark_adult_main.yaml` | adult | All-methods comparison with grid expansion, 20 queries |
-| `benchmark_adult_certcf.yaml` | adult | CertCF-only grid search, 20 queries |
 | `benchmark_mnist.yaml` | mnist | Full benchmark on MNIST (balanced per-class sampling) |
-
-### Other schemas
-
-| File | Script | Purpose |
-|------|--------|---------|
-| `certcf_query_benchmark_adult.yaml` | `scripts/certcf_query_benchmark.py` | BVH vs sorted query method comparison |
-| `certcf_query_benchmark_adult_smoke.yaml` | `scripts/certcf_query_benchmark.py` | Smoke version of the above |
 
 ---
 

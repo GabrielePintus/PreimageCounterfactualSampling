@@ -15,6 +15,7 @@ from counterfactuals.datasets.loaders import (
     GiveMeSomeCreditDataset,
     HELOCDataset,
     LendingClubDataset,
+    WisconsinBreastCancerDataset,
 )
 from counterfactuals.preprocessing import snap_ohe_blocks
 from dataset_specs import OHEBlockSpec, TABULAR_DATASET_SPECS, get_tabular_dataset_spec
@@ -27,6 +28,7 @@ DATASET_MODULES = {
     "lending_club": "training.datamodules.lending_club",
     "heloc": "training.datamodules.heloc",
     "give_me_some_credit": "training.datamodules.give_me_some_credit",
+    "wisconsin_breast_cancer": "training.datamodules.wisconsin_breast_cancer",
 }
 
 DATASET_ADAPTERS = {
@@ -36,6 +38,7 @@ DATASET_ADAPTERS = {
     "lending_club": LendingClubDataset,
     "heloc": HELOCDataset,
     "give_me_some_credit": GiveMeSomeCreditDataset,
+    "wisconsin_breast_cancer": WisconsinBreastCancerDataset,
 }
 
 
@@ -135,8 +138,6 @@ def test_no_counterfactual_code_imports_datamodule_constants():
 
     checked_paths = list((root / "src" / "counterfactuals").rglob("*.py"))
     checked_paths.append(root / "scripts" / "benchmark.py")
-    checked_paths.append(root / "scripts" / "certcf_query_benchmark.py")
-
     for path in checked_paths:
         text = path.read_text(encoding="utf-8")
         assert forbidden.search(text) is None, f"Datamodule constants import leaked into {path}"

@@ -15,13 +15,13 @@ Counterfactual benchmark entrypoint is `scripts/benchmark.py`.
 ## Fast Navigation
 
 Read these in order when working on the main project:
-1. `agent_docs/00-repository-map.md`
-2. `agent_docs/01-training-playbook.md`
-3. `agent_docs/02-certified-atlas-playbook.md`
-4. `agent_docs/04-agent-operating-guidelines.md`
+1. `ops/00-repository-map.md`
+2. `ops/01-training-playbook.md`
+3. `ops/02-certified-atlas-playbook.md`
+4. `ops/04-agent-operating-guidelines.md`
 
 Read this for dependencies and subproject notes:
-- `agent_docs/03-subprojects-and-dependencies.md`
+- `ops/03-subprojects-and-dependencies.md`
 
 ## Setup Commands
 
@@ -78,5 +78,5 @@ Automated tests currently available:
 
 ## Documentation Pattern
 
-This repo now includes agent-focused docs in `agent_docs/`.
-The structure is intentionally concise and indexable, following cross-agent conventions similar to AGENTS.md and LLM-oriented context-map practices.
+This repo now includes operational docs in `ops/`.
+The structure is intentionally concise and indexable for both humans and LLM agents, following cross-agent conventions similar to AGENTS.md and LLM-oriented context-map practices.

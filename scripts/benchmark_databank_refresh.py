@@ -136,7 +136,8 @@ def _infer_target_class_if_missing(df: pd.DataFrame, manifest_tasks: pd.DataFram
 
 
 def _group_task_frame(df: pd.DataFrame, method_name: str) -> pd.DataFrame:
-    return _normalize_task_frame(df[df["method"] == method_name])
+    group_column = "run_name" if "run_name" in df.columns else "method"
+    return _normalize_task_frame(df[df[group_column] == method_name])
 
 
 def _feature_dim_from_df(df: pd.DataFrame) -> int | None:
@@ -179,7 +180,12 @@ def _validate_method_file(
                 FileValidationResult(
                     path=path,
                     status="rejected",
-                    methods=sorted(df["method"].astype(str).unique().tolist()),
+                    methods=sorted(
+                        df[("run_name" if "run_name" in df.columns else "method")]
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    ),
                     n_rows=len(df),
                     message=f"dataset mismatch: parquet has {datasets}, manifest expects {manifest['dataset']!r}",
                 ),
@@ -194,7 +200,12 @@ def _validate_method_file(
                 FileValidationResult(
                     path=path,
                     status="rejected",
-                    methods=sorted(df["method"].astype(str).unique().tolist()),
+                    methods=sorted(
+                        df[("run_name" if "run_name" in df.columns else "method")]
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    ),
                     n_rows=len(df),
                     message=f"feature_dim mismatch: parquet has {df_feature_dim}, manifest expects {feature_dim}",
                 ),
@@ -202,7 +213,8 @@ def _validate_method_file(
             )
 
     normalized_manifest = _normalize_task_frame(manifest_tasks)
-    methods = sorted(df["method"].astype(str).unique().tolist())
+    method_column = "run_name" if "run_name" in df.columns else "method"
+    methods = sorted(df[method_column].astype(str).unique().tolist())
     for method_name in methods:
         task_df = _group_task_frame(df, method_name)
         if len(task_df) != len(normalized_manifest):
@@ -249,13 +261,15 @@ def _validate_method_file(
 
 def _summary_rows(combined: pd.DataFrame) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for method_name, group in combined.groupby("method", sort=True):
+    group_column = "run_name" if "run_name" in combined.columns else "method"
+    for run_name, group in combined.groupby(group_column, sort=True):
         success_mask = group["success"].astype(bool)
         success_group = group[success_mask]
         build_values = group["build_time_s"].dropna()
         rows.append(
             {
-                "method": str(method_name),
+                "method": str(group["method"].iloc[0]) if "method" in group.columns else str(run_name),
+                "run_name": str(run_name),
                 "n_rows": int(len(group)),
                 "n_queries": int(group["query_idx"].nunique()),
                 "n_success": int(success_mask.sum()),
@@ -298,7 +312,7 @@ def _render_html(summary: dict[str, Any]) -> str:
     method_rows = "\n".join(
         (
             "<tr>"
-            f"<td>{escape(str(row['method']))}</td>"
+            f"<td>{escape(str(row['run_name']))}</td>"
             f"<td>{row['n_rows']}</td>"
             f"<td>{row['n_queries']}</td>"
             f"<td>{row['n_success']}</td>"
@@ -356,7 +370,7 @@ def _render_html(summary: dict[str, Any]) -> str:
   <table id="method-summary">
     <thead>
       <tr>
-        <th>method</th>
+        <th>run_name</th>
         <th>n_rows</th>
         <th>n_queries</th>
         <th>n_success</th>

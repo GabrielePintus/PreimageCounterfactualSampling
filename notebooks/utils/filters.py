@@ -84,3 +84,33 @@ def shared_success_retention_summary(
         )
     summary["retention_pct"] = 100.0 * summary["n_shared_tasks"] / summary["n_total_tasks"]
     return summary
+
+
+def annotate_common_success_subset(
+    df: pd.DataFrame,
+    *,
+    by: tuple[str, ...] = ("query_idx",),
+    method_col: str = "method_label",
+    label_col: str = "subset_group",
+    common_label: str = "Common-success subset",
+    outside_label: str = "Outside common subset",
+) -> pd.DataFrame:
+    """Annotate successful rows as inside the common-success subset and all others as outside.
+
+    A row belongs to the common-success subset only if:
+    - its task key is shared-success across all compared methods, and
+    - the row itself is successful.
+    """
+    status_df = _shared_success_status(df, by=by, method_col=method_col)
+    if status_df.empty:
+        out = df.copy()
+        out[label_col] = outside_label
+        return out
+
+    merged = df.merge(status_df, on=list(by), how="left")
+    out = merged.copy()
+    row_in_common_subset = out["success"].fillna(False) & out["shared_success"].fillna(False)
+    out[label_col] = row_in_common_subset.map(
+        {True: common_label, False: outside_label}
+    )
+    return out.drop(columns="shared_success")

@@ -1,6 +1,0 @@
-\beamer@sectionintoc {1}{Motivation}{3}{0}{1}
-\beamer@sectionintoc {2}{The CPP Method}{5}{0}{2}
-\beamer@sectionintoc {3}{How It Works}{7}{0}{3}
-\beamer@sectionintoc {4}{Robust Counterfactuals}{9}{0}{4}
-\beamer@sectionintoc {5}{Results}{11}{0}{5}
-\beamer@sectionintoc {6}{Summary}{12}{0}{6}

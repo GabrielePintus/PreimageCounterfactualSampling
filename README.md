@@ -12,6 +12,9 @@ The repository has two main roles:
 - implement the CertCF method and its lower-level certification/query engine in `src/certcf/`
 - benchmark CertCF against baselines such as DiCE, FACE, nearest-neighbor, and Growing Spheres via `scripts/benchmark.py`
 
+Operational documentation for contributors and coding agents lives in `ops/`.
+This `README.md` remains the main welcome page for the repository.
+
 Given a classifier $f: \mathbb{R}^d \to \mathbb{R}^K$ and a query input $\mathbf{x}_0$ classified as class $l$, a **counterfactual explanation** is the closest point $\mathbf{x}'$ that the model classifies as a different target class $t$:
 
 $$\mathbf{x}' = \arg\min_{\mathbf{z}} \|\mathbf{x}_0 - \mathbf{z}\|_2 \quad \text{s.t.} \quad f(\mathbf{z}) = t$$
@@ -345,11 +348,11 @@ A single config file specifies the dataset(s), model checkpoint, methods, and hy
 The official benchmark entrypoint is `scripts/benchmark.py`.
 
 ```bash
-# Single dataset
-python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
+# Smoke benchmark
+python scripts/benchmark.py --config configs/benchmarks/benchmark_smoke_all.yaml
 
-# Multiple datasets → one combined parquet
-python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all.yaml
+# Main multi-dataset benchmark
+python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all_200q.yaml
 ```
 
 Results are written as `.parquet` files and loaded directly by the `notebooks/6.x` analysis notebooks.

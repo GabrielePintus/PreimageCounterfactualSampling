@@ -270,6 +270,8 @@ def _make_failure_query_result(
     error: str,
     target_class: Optional[int],
     metadata: Optional[Dict[str, Any]] = None,
+    method_success: Optional[bool] = None,
+    target_reached: Optional[bool] = None,
 ) -> QueryResult:
     return QueryResult(
         query_idx=int(q_idx),
@@ -283,6 +285,8 @@ def _make_failure_query_result(
         l0_sparsity=float("nan"),
         mad_l1_distance=float("nan"),
         redundancy=float("nan"),
+        method_success=method_success,
+        target_reached=target_reached,
         target_class=(None if target_class is None else int(target_class)),
         metadata=dict(metadata or {}),
     )
@@ -398,19 +402,25 @@ def _build_certcf_method(
             np.inf if str(_robust_norm_raw).lower() in ("inf", "infinity") else int(_robust_norm_raw)
         )
     query_method = str(params.get("query_method", "sorted")).lower()
-    if query_method not in {"sorted", "bvh"}:
+    if query_method not in {"sorted", "bvh", "nearest_anchor"}:
         raise ValueError(
-            f"certcf.query_method must be one of {{'sorted', 'bvh'}}, got {query_method!r}"
+            f"certcf.query_method must be one of {{'sorted', 'bvh', 'nearest_anchor'}}, got {query_method!r}"
         )
+    query_k_candidates = int(params.get("query_k_candidates", 1))
+    if query_k_candidates <= 0:
+        raise ValueError("certcf.query_k_candidates must be positive")
     batch_size = int(params.get("batch_size", 256))
     atlas_subsample_method = str(
         params.get("atlas_subsample_method", params.get("subsample_method", "kmedoids"))
     ).lower()
-    if atlas_subsample_method not in {"kmedoids", "bandit_kmedoids", "fps", "kmeans", "density_flat_kmedoids"}:
+    if atlas_subsample_method not in {"random", "boundary_random", "kmedoids", "bandit_kmedoids", "fps", "kmeans", "density_flat_kmedoids"}:
         raise ValueError(
-            f"certcf.atlas_subsample_method must be one of {{'kmedoids', 'bandit_kmedoids', 'fps', 'kmeans', 'density_flat_kmedoids'}}, "
+            f"certcf.atlas_subsample_method must be one of {{'random', 'boundary_random', 'kmedoids', 'bandit_kmedoids', 'fps', 'kmeans', 'density_flat_kmedoids'}}, "
             f"got {atlas_subsample_method!r}"
         )
+    boundary_beta = float(params.get("atlas_boundary_beta", params.get("boundary_beta", 0.5)))
+    if not (0.0 <= boundary_beta <= 1.0):
+        raise ValueError(f"certcf.boundary_beta must be in [0, 1], got {boundary_beta!r}")
     atlas_subsample_space = str(params.get("atlas_subsample_space", "input")).lower()
     if atlas_subsample_space not in {"input", "latent"}:
         raise ValueError(
@@ -470,10 +480,12 @@ def _build_certcf_method(
         ohe_slices=cat_slices,
         cnn=cnn,
         default_query_method=query_method,
+        query_k_candidates=query_k_candidates,
         solver_maxiter=solver_maxiter,
         k_per_class=k_per_class,
         subsample_method=atlas_subsample_method,
         subsample_space=atlas_subsample_space,
+        boundary_beta=boundary_beta,
         random_seed=seed,
     )
     atlas_method.fit(x_train=z_train, y_train=y_train)
@@ -841,6 +853,10 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             print(f"[INFO] Train accuracy: {acc:.3f}")
 
     model_for_methods = InverseTransformModel(base_model=model, transform=transform, ohe_blocks=ohe_blocks)
+    y_train_true = np.asarray(y_train, dtype=np.int64)
+    y_train_pred_raw = np.asarray(model.predict(x_train), dtype=np.int64)
+    y_train_pred_gen = np.asarray(model_for_methods.predict(x_train_gen), dtype=np.int64)
+    train_label_agreement = float(np.mean(y_train_pred_raw == y_train_true)) if len(y_train_true) else float("nan")
 
     # --- Test task selection (fixed set, shared across methods) ---
     query_indices, y_true_all, y_orig_all, target_classes_all = _build_query_tasks(
@@ -886,6 +902,10 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         embed_model = None   # full TabularClassifier (has .decode()); set for certcf only
         embed_device = "cpu"
         build_time_s = 0.0
+        fit_label_metadata = {
+            "train_label_source": "predicted",
+            "train_label_agreement_true": train_label_agreement,
+        }
         if method_name == "certcf":
             try:
                 _t_build = time.perf_counter()
@@ -894,7 +914,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     model_params=model_cfg.get("params", {}),
                     dataset_name=ds_cfg["name"],
                     x_train=x_train,
-                    y_train=y_train,
+                    y_train=y_train_pred_raw,
                     x_queries=x_queries,
                     seed=seed,
                 )
@@ -902,6 +922,8 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                 embed_device = method_params.get("device", "cpu")
                 active_y_orig = y_orig_all
                 space = "raw"  # CFs are decoded back to raw feature space
+                fit_label_metadata["train_label_space"] = "raw"
+                fit_label_metadata["train_label_n_classes"] = int(np.unique(y_train_pred_raw).size)
             except Exception as exc:
                 print(f"  [ERROR] build failed: {exc}")
                 qrs = [
@@ -914,6 +936,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                             if target_classes_all is not None
                             else 1 - int(y_orig_all[pos])
                         ),
+                        metadata=dict(fit_label_metadata),
                     )
                     for pos, q_idx in enumerate(query_indices)
                 ]
@@ -926,8 +949,10 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             try:
                 method = registries["method"].create(method_name, model=model_for_methods, random_seed=seed, **method_params)
                 _t_build = time.perf_counter()
-                method.fit(x_train=x_train_gen, y_train=y_train)
+                method.fit(x_train=x_train_gen, y_train=y_train_pred_gen)
                 build_time_s = time.perf_counter() - _t_build
+                fit_label_metadata["train_label_space"] = "generation"
+                fit_label_metadata["train_label_n_classes"] = int(np.unique(y_train_pred_gen).size)
             except Exception as exc:
                 print(f"  [ERROR] fit() failed: {exc}")
                 qrs = [
@@ -940,6 +965,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                             if target_classes_all is not None
                             else 1 - int(y_orig_all[pos])
                         ),
+                        metadata=dict(fit_label_metadata),
                     )
                     for pos, q_idx in enumerate(query_indices)
                 ]
@@ -988,6 +1014,8 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                         error=reason,
                         target_class=target_class,
                         metadata=result.metadata,
+                        method_success=bool(result.success),
+                        target_reached=False,
                     ))
                     n_failed += 1
                     pbar.set_postfix(valid=n_ok, failed=n_failed)
@@ -1004,9 +1032,21 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                         x_cf_row = np.asarray(snap_ohe_blocks(x_cf_row, ohe_blocks), dtype=np.float32)
                     y_cf = int(model.predict(x_cf_row[None, :])[0])
 
-                # All methods are evaluated the same way:
-                # success means the returned CF flips the original model prediction.
-                cf_success = (y_cf == target_class)
+                method_success = bool(result.success)
+                target_reached = (y_cf == target_class)
+                cf_success = method_success and target_reached
+                result_metadata = dict(result.metadata or {})
+                result_metadata.update(fit_label_metadata)
+                result_metadata["method_success"] = method_success
+                result_metadata["target_reached"] = target_reached
+                result_metadata["benchmark_success"] = cf_success
+                error = None
+                if not method_success:
+                    error = str(
+                        result_metadata.get("reason")
+                        or result_metadata.get("error")
+                        or "method_reported_failure"
+                    )
 
                 # Redundancy: fraction of changed features that can be individually
                 # reverted without flipping the CF out of the target class.
@@ -1030,15 +1070,17 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     x_cf=x_cf_row,
                     y_cf=y_cf,
                     success=cf_success,
+                    method_success=method_success,
+                    target_reached=target_reached,
                     runtime_s=runtime_s,
-                    error=None,
+                    error=error,
                     l2_distance=l2,
                     l1_distance=l1,
                     l0_sparsity=l0,
                     mad_l1_distance=mad_l1,
                     redundancy=redundancy_val,
                     target_class=target_class,
-                    metadata=dict(result.metadata or {}),
+                    metadata=result_metadata,
                 ))
                 n_ok += int(cf_success)
             except TimeoutError:
@@ -1048,7 +1090,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     runtime_s=runtime_s,
                     error="timeout",
                     target_class=target_class,
-                    metadata={"reason": "timeout"},
+                    metadata={**fit_label_metadata, "reason": "timeout"},
                 ))
                 n_failed += 1
             except Exception as exc:
@@ -1059,6 +1101,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     error=str(exc),
                     target_class=target_class,
                     metadata={
+                        **fit_label_metadata,
                         "reason": "exception",
                         "exception_type": type(exc).__name__,
                     },
@@ -1121,7 +1164,7 @@ def run_multi_dataset(
 
     print("\n[SUMMARY PER DATASET]")
     summary = (
-        combined.groupby(["dataset", "method"])["success"]
+        combined.groupby(["dataset", "run_name"])["success"]
         .agg(["sum", "count"])
         .rename(columns={"sum": "valid", "count": "total"})
     )

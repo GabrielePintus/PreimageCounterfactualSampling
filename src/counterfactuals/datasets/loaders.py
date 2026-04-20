@@ -258,6 +258,47 @@ class AdultDataset(BaseDataset):
         return self._x_test, self._y_test
 
 
+class WisconsinBreastCancerDataset(BaseDataset):
+    """Adapter that wraps the Wisconsin Breast Cancer LightningDataModule."""
+
+    spec = get_tabular_dataset_spec("wisconsin_breast_cancer")
+
+    def __init__(self, data_dir: str = "data/", seed: int = 42):
+        super().__init__()
+        self.data_dir = data_dir
+        self.seed = seed
+        self._x_train: np.ndarray
+        self._y_train: np.ndarray
+        self._x_test: np.ndarray
+        self._y_test: np.ndarray
+
+    def load(self) -> None:
+        from training.datamodules.wisconsin_breast_cancer import WisconsinBreastCancerDataModule
+
+        dm = WisconsinBreastCancerDataModule(
+            filepath=str(Path(self.data_dir) / "WisconsinBreastCancer" / "raw.parquet"),
+            batch_size=256,
+            num_workers=0,
+            seed=self.seed,
+        )
+        dm.setup()
+        x_train, y_train = dm.train_ds.tensors
+        x_test, y_test = dm.test_ds.tensors
+        self._x_train = x_train.cpu().numpy().astype(np.float32)
+        self._y_train = y_train.cpu().numpy().astype(np.int64)
+        self._x_test = x_test.cpu().numpy().astype(np.float32)
+        self._y_test = y_test.cpu().numpy().astype(np.int64)
+        self._loaded = True
+
+    def get_train(self) -> tuple[np.ndarray, np.ndarray]:
+        self._check_loaded()
+        return self._x_train, self._y_train
+
+    def get_test(self) -> tuple[np.ndarray, np.ndarray]:
+        self._check_loaded()
+        return self._x_test, self._y_test
+
+
 class MNISTDataset(BaseDataset):
     """Adapter that wraps the MNIST LightningDataModule and flattens images."""
 

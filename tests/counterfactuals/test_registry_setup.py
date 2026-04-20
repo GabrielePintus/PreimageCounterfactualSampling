@@ -7,6 +7,7 @@ def test_create_default_registries_exposes_benchmark_components():
     assert set(registries) == {"method", "dataset", "model", "metric", "preprocessing"}
     assert "certcf" in registries["method"].names()
     assert "adult" in registries["dataset"].names()
+    assert "wisconsin_breast_cancer" in registries["dataset"].names()
     assert "sklearn_mlp" in registries["model"].names()
     assert "proximity" in registries["metric"].names()
     assert "pca" in registries["preprocessing"].names()

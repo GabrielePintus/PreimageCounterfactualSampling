@@ -1,38 +1,78 @@
 # Notebooks
 
-Interactive notebooks for training evaluation and counterfactual generation demos.
+Interactive notebooks for training evaluation, benchmark analysis, and CertCF diagnostics.
 
-## Naming Convention
+## Current Layout
 
-- `1.x`: model evaluation notebooks (MNIST classifier/autoencoder).
-- `2`: preimage approximation and sampling walkthrough.
-- `3.x`: spiral/MNIST sampling experiments.
-- `6.x`: benchmark analysis notebooks.
+- `notebooks/`: active notebooks only
+- `archive/notebooks/`: historical notebooks kept for reference
+- `notebooks/utils/`: shared plotting and dataframe helpers for benchmark analysis
+
+## Active Notebooks
+
+- `6.12 - CertCF boundary-biased latent anchor diagnostics.ipynb`
+  Prediction-aligned boundary-biased anchor notebook used during the latent-anchor investigation.
+- `6.13 - CertCF proximity distribution histograms.ipynb`
+  Distribution-focused proximity analysis from saved benchmark results.
+- `6.14 - CertCF random anchor k-sweep analysis.ipynb`
+  Analysis notebook for the random/boundary-random anchor budget sweeps.
+- `6.15 - Method comparison KDE analysis.ipynb`
+  Main current comparison notebook for CertCF, NN, GS, and DiCE, including KDE plots, shared-success summaries, and manifoldness diagnostics.
+
+## Archived Notebooks
+
+The following notebooks were moved to `archive/notebooks/` to reduce clutter in the active workspace:
+
+- early MNIST / spiral / preimage exploration (`1.x`, `2`, `3.x`)
+- older benchmark analysis notebooks (`6.0`, `6.2`–`6.10`)
+
+They are still available in git history and in the archive directory, but they are no longer treated as part of the active research surface.
 
 ## Usage Notes
 
 - Run cells top-to-bottom in a fresh kernel.
-- Some notebooks expect checkpoints under `../checkpoints/`.
-- For k-medoids cells, install `scikit-learn-extra`.
-
-## Benchmark Analysis
-
-- `6.2 - Multi-dataset benchmark analysis.ipynb`: multi-dataset tabular benchmark analysis on the shared-success subset.
-- `6.3 - MNIST benchmark analysis.ipynb`: MNIST-specific benchmark analysis on the shared-success subset.
-- `6.4 - CertCF atlas subsampling diagnostics.ipynb`: manual diagnostics notebook for choosing `k_per_class` before larger CertCF benchmark runs.
-- `6.5 - CertCF atlas anchor selection diagnostics.ipynb`: manual diagnostics notebook for comparing atlas anchor-selection rules at fixed budget.
-- `6.6 - CertCF adult atlas visualization.ipynb`: Adult-specific 2D visualization notebook for the `k`-medoids atlas, including PCA/t-SNE projections and sampled continuous certified polytope points.
-- `6.7 - CertCF latent anchor selection diagnostics.ipynb`: Adult-only notebook comparing input-space and penultimate-space `k`-medoids anchor selection under the same CertCF atlas/query pipeline.
-- `6.8 - CertCF density-bias evaluation diagnostics.ipynb`: Adult-only notebook comparing input/latent/density-stratified anchor selectors and weighted coverage diagnostics to probe density bias in CertCF atlas evaluation.
-- `6.9 - CertCF proximity metric diagnostics.ipynb`: Adult-only notebook isolating the effect of density-aware proximity summaries while keeping the atlas fixed to input-space `k`-medoids.
-- `6.10 - CertCF input vs latent benchmark analysis.ipynb`: benchmark-results notebook for the latest input-vs-latent CertCF comparison, with dataset-level summaries, delta tables, and per-query scatter views from the combined parquet.
-- `6.11 - CertCF boundary-biased latent anchor diagnostics.ipynb`: Adult-only exploratory notebook comparing input `k`-medoids, latent `k`-medoids, and a notebook-only boundary-weighted latent `k`-medoids heuristic before codebase integration.
+- Some notebooks expect benchmark outputs under `../results/` when launched from the `notebooks/` directory.
+- Some older archived notebooks may expect checkpoints under `../checkpoints/`.
+- For k-medoids experiments, install `scikit-learn-extra`.
 
 ## Benchmark Notebook Helpers
 
-- Reusable benchmark-analysis helpers now live in `notebooks/utils/`.
+- Reusable benchmark-analysis helpers live in `notebooks/utils/`.
 - Keep benchmark notebooks thin: configure paths/options, load results through helpers, then compose summaries and plots.
-- Benchmark notebooks now filter to the shared-success task set by default, so all comparisons use the same per-dataset query subset across methods.
-- Use the retention summary at the top of each notebook to see how many tasks remain after the fair shared-success restriction.
-- `6.2` also includes diagnostic OHE constraint-quality checks and immutable-feature change checks where dataset metadata is available; treat these as debugging/ablation views rather than headline benchmark metrics.
-- Add shared benchmark plots or dataframe wrangling to `notebooks/utils/` before duplicating code across notebooks.
+- Shared-success filtering is useful for fair per-query method comparisons, but keep an eye on retention counts so hard queries do not disappear silently.
+- Add shared plots or dataframe wrangling to `notebooks/utils/` before duplicating code across notebooks.
+- Treat `method_label` as a normalized display field produced by the helper layer.
+- Prefer `run_name`-aware comparisons whenever multiple variants of the same implementation appear in one result file.
+
+## Recommended Notebook Skeleton
+
+```python
+from notebooks.utils import (
+    load_result,
+    prepare_benchmark_df,
+    method_comparison_summary,
+    plot_proximity_kdes_by_dataset,
+    setup_notebook_style,
+)
+
+setup_notebook_style()
+
+df = load_result(RESULT_PATH)
+comparison_df = prepare_benchmark_df(df, dataset_order=DATASET_ORDER, method_order=METHOD_ORDER)
+success_df = prepare_benchmark_df(
+    df,
+    dataset_order=DATASET_ORDER,
+    method_order=METHOD_ORDER,
+    success_only_rows=True,
+)
+
+display(method_comparison_summary(comparison_df, order=METHOD_ORDER))
+plot_proximity_kdes_by_dataset(
+    success_df,
+    dataset_order=DATASET_ORDER,
+    method_order=METHOD_ORDER,
+    palette=PALETTE,
+)
+```
+
+Use inline notebook code only for experiment-specific glue or one-off diagnostics that are not yet reusable.

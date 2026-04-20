@@ -231,3 +231,132 @@ def plot_feature_change_heatmap(
     ax.set_ylabel("Method")
     fig.tight_layout()
     return fig, ax
+
+
+def plot_proximity_kdes_by_dataset(
+    df: pd.DataFrame,
+    *,
+    dataset_order: list[str],
+    method_order: list[str],
+    palette: dict[str, tuple[float, float, float]],
+    method_labels: dict[str, str] | None = None,
+    method_col: str = "method_label",
+    dataset_col: str = "dataset",
+    metrics: list[tuple[str, str]] | None = None,
+    fill: bool = False,
+):
+    """Plot per-dataset KDE panels for proximity metrics."""
+    metrics = metrics or [
+        ("l1_distance", "L1 proximity"),
+        ("l2_distance", "L2 proximity"),
+    ]
+    figures: list[tuple[str, plt.Figure, list]] = []
+    labels = method_labels or {}
+
+    for dataset in dataset_order:
+        ds = df[df[dataset_col] == dataset]
+        if ds.empty:
+            continue
+
+        fig, axes = plt.subplots(1, len(metrics), figsize=(7 * len(metrics), 4.8))
+        if len(metrics) == 1:
+            axes = [axes]
+        fig.suptitle(f"{dataset} - Proximity KDE by Method", y=1.03)
+
+        for ax, (metric, xlabel) in zip(axes, metrics):
+            for method in method_order:
+                cur = ds[ds[method_col] == method]
+                if cur.empty:
+                    continue
+                sns.kdeplot(
+                    data=cur,
+                    x=metric,
+                    fill=fill,
+                    common_norm=False,
+                    linewidth=2.2,
+                    color=method_color(method, palette),
+                    label=labels.get(method, method),
+                    ax=ax,
+                )
+                ax.set_xlim(left=0)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel("Density")
+            ax.legend(frameon=True, fontsize=10)
+
+        fig.tight_layout()
+        figures.append((str(dataset), fig, axes))
+    return figures
+
+
+def plot_conditioned_proximity_kdes(
+    df: pd.DataFrame,
+    *,
+    dataset_order: list[str],
+    method_order: list[str],
+    subset_col: str,
+    subset_order: list[str],
+    subset_palette: dict[str, str | tuple[float, float, float]],
+    method_titles: dict[str, str] | None = None,
+    method_col: str = "method_label",
+    dataset_col: str = "dataset",
+    metrics: list[tuple[str, str]] | None = None,
+):
+    """Plot proximity KDEs conditioned on a subset label, per dataset and method."""
+    metrics = metrics or [
+        ("l1_distance", "L1 proximity"),
+        ("l2_distance", "L2 proximity"),
+    ]
+    figures: list[tuple[str, plt.Figure, list]] = []
+    titles = method_titles or {}
+
+    for dataset in dataset_order:
+        ds = df[df[dataset_col] == dataset].copy()
+        if ds.empty:
+            continue
+
+        fig, axes = plt.subplots(
+            nrows=len(method_order),
+            ncols=len(metrics),
+            figsize=(7 * len(metrics), 4 * len(method_order)),
+            squeeze=False,
+        )
+
+        for row_idx, method in enumerate(method_order):
+            cur = ds[ds[method_col] == method].copy()
+            for col_idx, (metric, metric_title) in enumerate(metrics):
+                ax = axes[row_idx, col_idx]
+                plotted = False
+                for subset_name in subset_order:
+                    vals = cur.loc[cur[subset_col] == subset_name, metric].dropna()
+                    if len(vals) >= 2 and vals.nunique() > 1:
+                        sns.kdeplot(
+                            data=cur[cur[subset_col] == subset_name],
+                            x=metric,
+                            ax=ax,
+                            color=subset_palette[subset_name],
+                            linewidth=2.5,
+                            fill=False,
+                            label=f"{subset_name} (n={len(vals)})",
+                        )
+                        plotted = True
+                    elif len(vals) > 0:
+                        ax.axvline(
+                            vals.iloc[0],
+                            color=subset_palette[subset_name],
+                            linestyle="--",
+                            linewidth=2,
+                            label=f"{subset_name} (n={len(vals)})",
+                        )
+                        plotted = True
+                ax.set_title(f"{titles.get(method, method)} | {metric_title}")
+                ax.set_xlabel(metric_title)
+                ax.set_ylabel("Density")
+                if plotted:
+                    ax.legend(frameon=True)
+                else:
+                    ax.text(0.5, 0.5, "No successful samples", ha="center", va="center", transform=ax.transAxes)
+
+        fig.suptitle(f"{dataset}: conditioned proximity distributions", y=1.02, fontsize=18)
+        fig.tight_layout()
+        figures.append((str(dataset), fig, axes))
+    return figures

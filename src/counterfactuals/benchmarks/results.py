@@ -45,6 +45,8 @@ class QueryResult:
     l0_sparsity: float
     mad_l1_distance: float
     redundancy: float
+    method_success: Optional[bool] = None
+    target_reached: Optional[bool] = None
     target_class: Optional[int] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -81,6 +83,7 @@ class BenchmarkResult:
 
         Columns produced (legacy schema plus stable run metadata):
           dataset, method, run_name, query_idx, space, y_orig, source_class, y_cf, target_class, success,
+          method_success, target_reached,
           build_time_s, runtime_s, params (JSON string), error, metadata_json,
           l2_distance, l1_distance, l0_sparsity, mad_l1_distance, redundancy
           [x_orig_0 .. x_orig_{d-1}, x_cf_0 .. x_cf_{d-1}]  (if include_features)
@@ -96,7 +99,7 @@ class BenchmarkResult:
 
                 row: Dict[str, Any] = {
                     "dataset": self.dataset,
-                    "method": mr.run_name,
+                    "method": mr.method,
                     "run_name": mr.run_name,
                     "query_idx": int(qr.query_idx),
                     "space": mr.space,
@@ -105,6 +108,12 @@ class BenchmarkResult:
                     "y_cf": int(qr.y_cf) if qr.y_cf is not None else float("nan"),
                     "target_class": int(qr.target_class) if qr.target_class is not None else float("nan"),
                     "success": bool(qr.success),
+                    "method_success": (
+                        bool(qr.method_success) if qr.method_success is not None else float("nan")
+                    ),
+                    "target_reached": (
+                        bool(qr.target_reached) if qr.target_reached is not None else float("nan")
+                    ),
                     "build_time_s": float(mr.build_time_s),
                     "runtime_s": float(qr.runtime_s),
                     "params": params_json,
@@ -244,8 +253,9 @@ class BenchmarkResult:
 
         # Recover shared query set from the first method group.
         # All methods share the same query set so any group works.
-        first_method = df["method"].iloc[0]
-        first_grp = df[df["method"] == first_method].sort_values("query_idx")
+        run_column = "run_name" if "run_name" in df.columns else "method"
+        first_run_name = df[run_column].iloc[0]
+        first_grp = df[df[run_column] == first_run_name].sort_values("query_idx")
         x_queries = first_grp[orig_cols].to_numpy(dtype=np.float32)
         y_orig = first_grp["y_orig"].to_numpy(dtype=np.int64)
         y_true = first_grp["y_true"].to_numpy(dtype=np.int64) if "y_true" in first_grp.columns else None
@@ -255,10 +265,11 @@ class BenchmarkResult:
         idx_to_pos = {q: pos for pos, q in enumerate(query_idx_order)}
 
         method_results: List[MethodResult] = []
-        for run_name, grp in df.groupby("method", sort=False):
+        for run_name, grp in df.groupby(run_column, sort=False):
             grp = grp.sort_values("query_idx")
             build_time_s = float(grp["build_time_s"].iloc[0]) if "build_time_s" in grp.columns else 0.0
             space = str(grp["space"].iloc[0]) if "space" in grp.columns else "raw"
+            method_name = str(grp["method"].iloc[0]) if "method" in grp.columns else str(run_name)
             params_raw = grp["params"].iloc[0] if "params" in grp.columns else "{}"
             try:
                 params = json.loads(params_raw) if isinstance(params_raw, str) else {}
@@ -270,7 +281,7 @@ class BenchmarkResult:
                 q_idx = int(row["query_idx"])
                 success = bool(row["success"])
                 x_cf_arr = None
-                if success and cf_cols:
+                if cf_cols:
                     cf_vals = row[cf_cols].to_numpy(dtype=np.float32)
                     if not np.any(np.isnan(cf_vals)):
                         x_cf_arr = cf_vals
@@ -278,7 +289,7 @@ class BenchmarkResult:
                 query_results.append(QueryResult(
                     query_idx=q_idx,
                     x_cf=x_cf_arr,
-                    y_cf=int(row["y_cf"]) if success and not pd.isna(row.get("y_cf")) else None,
+                    y_cf=int(row["y_cf"]) if not pd.isna(row.get("y_cf")) else None,
                     success=success,
                     runtime_s=float(row.get("runtime_s", 0.0)),
                     error=row.get("error") if not success else None,
@@ -287,6 +298,16 @@ class BenchmarkResult:
                     l0_sparsity=float(row.get("l0_sparsity", float("nan"))),
                     mad_l1_distance=float(row.get("mad_l1_distance", float("nan"))),
                     redundancy=float(row.get("redundancy", float("nan"))),
+                    method_success=(
+                        bool(row["method_success"])
+                        if "method_success" in row and not pd.isna(row.get("method_success"))
+                        else success
+                    ),
+                    target_reached=(
+                        bool(row["target_reached"])
+                        if "target_reached" in row and not pd.isna(row.get("target_reached"))
+                        else success
+                    ),
                     target_class=(
                         int(row["target_class"])
                         if "target_class" in row and not pd.isna(row.get("target_class"))
@@ -303,7 +324,7 @@ class BenchmarkResult:
             query_results.sort(key=lambda qr: idx_to_pos.get(qr.query_idx, 0))
 
             method_results.append(MethodResult(
-                method=str(run_name),
+                method=method_name,
                 run_name=str(run_name),
                 params=params,
                 build_time_s=build_time_s,

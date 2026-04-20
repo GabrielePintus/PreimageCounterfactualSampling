@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualResult
 from counterfactuals.density import EpsilonBallEstimator, KDEEstimator, KNNEstimator
 from counterfactuals.methods.dice import DiceMethod
 from counterfactuals.methods.face import FACEMethod
@@ -219,3 +220,41 @@ def test_face_start_node_respects_query_label():
 
 def test_nearest_neighbor_method_contract():
     _assert_method_works(NearestNeighborMethod(model=ThresholdModel(), random_seed=10))
+
+
+def test_generic_methods_reject_boundary_random_subsampling():
+    with pytest.raises(ValueError, match="subsample_method must be one of"):
+        NearestNeighborMethod(
+            model=ThresholdModel(),
+            random_seed=10,
+            k_per_class=2,
+            subsample_method="boundary_random",
+        )
+
+
+def test_base_counterfactual_method_fit_uses_labels_as_provided():
+    class RecordingMethod(BaseCounterfactualMethod):
+        def _fit(self) -> None:
+            self.fit_labels = self._y_train.copy()
+
+        def generate(self, x: np.ndarray, target_class=None) -> CounterfactualResult:
+            del x, target_class
+            return CounterfactualResult(
+                x_cf=np.zeros(2, dtype=np.float32),
+                success=False,
+                distance=0.0,
+                metadata={},
+            )
+
+    method = RecordingMethod(
+        model=ThresholdModel(),
+        random_seed=10,
+        k_per_class=1,
+        subsample_method="random",
+    )
+    x_train = np.array([[-1.0, 0.0], [-0.5, 0.1], [0.6, -0.2], [1.1, 0.3]], dtype=np.float32)
+    supplied_labels = np.array([1, 1, 0, 0], dtype=np.int64)
+
+    method.fit(x_train=x_train, y_train=supplied_labels)
+
+    assert set(method.fit_labels.tolist()) == {0, 1}

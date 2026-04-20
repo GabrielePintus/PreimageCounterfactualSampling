@@ -5,6 +5,19 @@ from __future__ import annotations
 import numpy as np
 
 
+def _random_indices(
+    X: np.ndarray,
+    k: int,
+    random_state: int = 42,
+) -> np.ndarray:
+    """Select k prototype indices uniformly without replacement."""
+    rng = np.random.default_rng(random_state)
+    k = min(k, len(X))
+    if k == len(X):
+        return np.arange(len(X))
+    return rng.choice(len(X), size=k, replace=False)
+
+
 def _fps_indices(
     X: np.ndarray,
     k: int,
@@ -117,6 +130,7 @@ def _density_flat_kmedoids_indices(
 
 
 _PROTOTYPE_SELECTION_METHODS = {
+    "random": _random_indices,
     "fps": _fps_indices,
     "kmeans": _kmeans_indices,
     "kmedoids": _kmedoids_indices,
@@ -137,7 +151,7 @@ def select_prototype_indices(
     ----------
     X : (N, d) array
     k : number of prototypes to select (capped at len(X))
-    method : one of {"kmedoids", "bandit_kmedoids", "kmeans", "fps", "density_flat_kmedoids"}
+    method : one of {"random", "kmedoids", "bandit_kmedoids", "kmeans", "fps", "density_flat_kmedoids"}
     random_state : RNG seed (ignored by fps)
     """
     k = min(k, len(X))

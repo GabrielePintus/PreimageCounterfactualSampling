@@ -1,0 +1,68 @@
+seed: 42
+output: results/benchmark_meeting_certcf_boundary_random_nearest_anchor_top3_200q.parquet
+timeout_per_sample: 120
+
+# ---------------------------------------------------------------------------
+# CertCF boundary-random-anchor nearest-anchor benchmark.
+#
+# Same setup as the random top-L run, but atlas anchor selection is now
+# boundary-weighted random sampling with beta=0.5.
+# ---------------------------------------------------------------------------
+methods:
+
+  - name: certcf
+    run_name: certcf_input_boundary_random_topL_anchor
+    params:
+      device: cuda
+      norm: 1
+      distance_norm: 1
+      eps_alpha: 0.45
+      batch_size: 256
+      atlas_subsample_method: boundary_random
+      atlas_boundary_beta: 0.5
+      atlas_subsample_space: input
+      k_per_class: 5000
+      query_method: nearest_anchor
+      query_k_candidates: [3, 5]
+
+# ---------------------------------------------------------------------------
+# Datasets
+# ---------------------------------------------------------------------------
+datasets:
+
+  - name: adult
+    sampling:
+      n_queries: 200
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/adult_classifier/best.ckpt
+        device: cuda
+        dataset_module: adult
+        hidden_dims: [32, 8]
+        dropout: 0.2
+
+  - name: compas
+    sampling:
+      n_queries: 200
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/compas_classifier/best.ckpt
+        device: cuda
+        dataset_module: compas
+        hidden_dims: [64, 32]
+        dropout: 0.1
+
+  - name: german_credit
+    sampling:
+      n_queries: 200
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/german_credit_classifier/best.ckpt
+        device: cuda
+        dataset_module: german_credit
+        hidden_dims: [64, 32]
+        dropout: 0.1
+

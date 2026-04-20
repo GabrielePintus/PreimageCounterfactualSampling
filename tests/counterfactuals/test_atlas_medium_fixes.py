@@ -52,6 +52,15 @@ class TinyTabularTorchModel:
         self.device = "cpu"
 
 
+class ConstantPredictionTorchModel:
+    def __init__(self):
+        self.model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+        with torch.no_grad():
+            self.model[0].weight.zero_()
+            self.model[0].bias.copy_(torch.tensor([1.0, -1.0], dtype=torch.float32))
+        self.device = "cpu"
+
+
 class _DummyBVH:
     def __init__(self, x_cf: np.ndarray):
         self.n_polytopes = 1
@@ -72,6 +81,10 @@ class _DummyBVH:
         stats_out["max_queue_size"] = 1
         stats_out["n_candidates_considered"] = 1
         return self._x_cf.copy(), 0.0, 0, 0
+
+    def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
+        del x_query, distance_norm
+        return [0][:int(k)]
 
 
 def _manual_atlas(
@@ -132,7 +145,7 @@ def test_certcf_method_forwards_delta_and_robust_norm():
                 profiling={"ok": True},
             )
 
-    method = CertCF(model=object(), delta=0.3, robust_norm="inf", random_seed=7)
+    method = CertCF(model=object(), delta=0.3, robust_norm="inf", query_k_candidates=3, random_seed=7)
     method._is_fitted = True
     method.atlas = FakeAtlas()
 
@@ -142,6 +155,7 @@ def test_certcf_method_forwards_delta_and_robust_norm():
     assert calls[0]["target_class"] == 5
     assert np.isclose(calls[0]["delta"], 0.3)
     assert calls[0]["robust_norm"] == np.inf
+    assert calls[0]["query_k_candidates"] == 3
 
 
 def test_certcf_rejects_invalid_subsample_space():
@@ -176,8 +190,12 @@ def test_certcf_fit_uses_input_space_for_subsampling(monkeypatch):
 
     assert len(seen_spaces) == 2
     assert all(space.shape[1] == x_train.shape[1] for space in seen_spaces)
+    assert np.array_equal(seen_spaces[0], x_train[[0, 1]])
+    assert np.array_equal(seen_spaces[1], x_train[[2, 3]])
     assert np.allclose(method._x_train, np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float32))
     assert np.array_equal(method._y_train, np.array([0, 1], dtype=np.int64))
+    assert np.array_equal(method._y_train_support, np.array([0, 1], dtype=np.int64))
+    assert np.array_equal(method._y_train_support_full, y_train)
 
 
 def test_certcf_fit_uses_penultimate_latent_space_for_subsampling(monkeypatch):
@@ -207,16 +225,38 @@ def test_certcf_fit_uses_penultimate_latent_space_for_subsampling(monkeypatch):
 
     assert len(seen_spaces) == 2
     assert all(space.shape[1] == 3 for space in seen_spaces)
-    assert seen_spaces[0].shape != x_train[y_train == 0].shape
-    assert seen_spaces[1].shape != x_train[y_train == 1].shape
+    assert np.array_equal(
+        seen_spaces[0],
+        np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    assert np.array_equal(
+        seen_spaces[1],
+        np.array(
+            [
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 2.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
     assert np.allclose(method._x_train, np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float32))
     assert np.array_equal(method._y_train, np.array([0, 1], dtype=np.int64))
+    assert np.array_equal(method._y_train_support, np.array([0, 1], dtype=np.int64))
 
 
 def test_certcf_fit_rejects_latent_subsampling_for_unsupported_models(monkeypatch):
     class UnsupportedTorchModel:
         def __init__(self):
             self.model = torch.nn.Linear(2, 2)
+            with torch.no_grad():
+                self.model.weight.copy_(torch.tensor([[1.0, -1.0], [-1.0, 1.0]], dtype=torch.float32))
+                self.model.bias.zero_()
             self.device = "cpu"
 
     monkeypatch.setattr(CertCF, "_fit", lambda self: None)
@@ -228,6 +268,81 @@ def test_certcf_fit_rejects_latent_subsampling_for_unsupported_models(monkeypatc
             x_train=np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
             y_train=np.array([0, 1], dtype=np.int64),
         )
+
+
+def test_certcf_fit_rejects_single_class_support_labels(monkeypatch):
+    monkeypatch.setattr(CertCF, "_fit", lambda self: None)
+
+    method = CertCF(model=TinyTabularTorchModel(), k_per_class=1, subsample_space="input")
+
+    with pytest.raises(ValueError, match="collapsed to fewer than 2 classes"):
+        method.fit(
+            x_train=np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+            y_train=np.array([0, 0], dtype=np.int64),
+        )
+
+
+def test_certcf_rejects_invalid_boundary_beta():
+    with pytest.raises(ValueError, match="boundary_beta must be in \\[0, 1\\]"):
+        CertCF(model=TinyTabularTorchModel(), subsample_method="boundary_random", boundary_beta=1.1)
+
+
+def test_certcf_fit_boundary_random_prefers_high_boundary_scores(monkeypatch):
+    monkeypatch.setattr(CertCF, "_fit", lambda self: None)
+
+    method = CertCF(
+        model=TinyTabularTorchModel(),
+        k_per_class=1,
+        subsample_method="boundary_random",
+        subsample_space="latent",
+        boundary_beta=1.0,
+        random_seed=7,
+    )
+
+    monkeypatch.setattr(
+        CertCF,
+        "_predict_training_boundary_scores",
+        lambda self, x, batch_size=None: np.array([0.1, 0.9, 0.2, 0.3], dtype=np.float64),
+    )
+
+    x_train = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 0, 1, 1], dtype=np.int64)
+
+    method.fit(x_train=x_train, y_train=y_train)
+
+    # With beta=1.0, class-0 should pick index 1 (score=0.9), class-1 index 3 (score=0.3).
+    assert np.array_equal(method._y_train, np.array([0, 1], dtype=np.int64))
+    assert np.allclose(method._x_train, np.array([[1.0, 0.0], [1.0, 1.0]], dtype=np.float32))
+
+
+def test_certcf_fit_uses_provided_support_labels_without_relabeling(monkeypatch):
+    monkeypatch.setattr(CertCF, "_fit", lambda self: None)
+
+    method = CertCF(model=TinyTabularTorchModel(), k_per_class=None, subsample_space="input")
+    x_train = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    support_labels = np.array([1, 1, 0, 0], dtype=np.int64)
+
+    method.fit(x_train=x_train, y_train=support_labels)
+
+    assert np.array_equal(method._y_train, support_labels)
+    assert np.array_equal(method._y_train_support, support_labels)
+    assert np.array_equal(method._y_train_support_full, support_labels)
 
 
 def test_l2_ray_step_stays_inside_ball():
@@ -384,6 +499,9 @@ def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
     class TinyTorchModel:
         def __init__(self):
             self.model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+            with torch.no_grad():
+                self.model[0].weight.copy_(torch.tensor([[1.0, -1.0], [-1.0, 1.0]], dtype=torch.float32))
+                self.model[0].bias.zero_()
             self.device = "cpu"
 
     method = CertCF(model=TinyTorchModel(), lirpa_method="alpha-crown", random_seed=7)
@@ -408,6 +526,125 @@ def test_find_counterfactual_supports_non_contiguous_target_labels():
     assert result.success is True
     assert result.target_class == 5
     assert np.allclose(result.x_cf, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+
+
+def test_find_counterfactual_nearest_anchor_limits_projection_budget(monkeypatch):
+    atlas = _manual_atlas(
+        centers_by_label={
+            2: np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
+            5: np.array(
+                [
+                    [0.0, 1.0, 0.0],
+                    [10.0, 10.0, 0.0],
+                    [0.5, 0.8, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+        }
+    )
+
+    class FakeCandidateIndex:
+        n_polytopes = 3
+
+        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
+            assert np.allclose(x_query, np.array([0.2, 0.8, 0.0], dtype=np.float32))
+            assert k == 3
+            assert distance_norm == 2
+            return [2, 0, 1]
+
+    atlas.bvh_indices[5] = FakeCandidateIndex()
+    calls = []
+
+    def fake_make_project_fn(x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
+        del x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims
+        projection_time_s = [0.0]
+        best_decode_profile = [{}]
+        distances = {0: 1.0, 1: 0.1, 2: 5.0}
+
+        def project_fn(idx, incumbent):
+            calls.append((idx, incumbent))
+            return np.full(3, float(idx), dtype=np.float64), distances[idx]
+
+        return project_fn, projection_time_s, best_decode_profile
+
+    monkeypatch.setattr(atlas, "_make_project_fn", fake_make_project_fn)
+
+    result = atlas.find_counterfactual(
+        x_query=np.array([0.2, 0.8, 0.0], dtype=np.float32),
+        target_class=5,
+        method="nearest_anchor",
+        query_k_candidates=2,
+    )
+
+    assert result.success is True
+    assert result.anchor_idx == 0
+    assert result.n_qp_solved == 2
+    assert np.isclose(result.distance, 1.0)
+    assert [idx for idx, _ in calls] == [2, 0]
+    assert result.profiling["method"] == "nearest_anchor"
+    assert result.profiling["query_k_candidates"] == 2.0
+    assert result.profiling["n_candidates_total"] == 3.0
+    assert result.profiling["n_candidates_considered"] == 2.0
+    assert result.profiling["n_candidates_pruned_by_top_k"] == 1.0
+    assert result.profiling["nearest_anchor_fallback_used"] == 0.0
+
+
+def test_find_counterfactual_nearest_anchor_falls_back_after_topk_failure(monkeypatch):
+    atlas = _manual_atlas(
+        centers_by_label={
+            2: np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
+            5: np.array(
+                [
+                    [0.0, 1.0, 0.0],
+                    [10.0, 10.0, 0.0],
+                    [0.5, 0.8, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+        }
+    )
+
+    class FakeCandidateIndex:
+        n_polytopes = 3
+
+        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
+            del x_query, distance_norm
+            assert k == 3
+            return [2, 0, 1]
+
+    atlas.bvh_indices[5] = FakeCandidateIndex()
+    calls = []
+
+    def fake_make_project_fn(x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
+        del x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims
+        projection_time_s = [0.0]
+        best_decode_profile = [{}]
+
+        def project_fn(idx, incumbent):
+            calls.append((idx, incumbent))
+            if idx in {2, 0}:
+                return None, np.inf
+            return np.full(3, float(idx), dtype=np.float64), 4.0
+
+        return project_fn, projection_time_s, best_decode_profile
+
+    monkeypatch.setattr(atlas, "_make_project_fn", fake_make_project_fn)
+
+    result = atlas.find_counterfactual(
+        x_query=np.array([0.2, 0.8, 0.0], dtype=np.float32),
+        target_class=5,
+        method="nearest_anchor",
+        query_k_candidates=2,
+    )
+
+    assert result.success is True
+    assert result.anchor_idx == 1
+    assert result.n_qp_solved == 3
+    assert np.isclose(result.distance, 4.0)
+    assert [idx for idx, _ in calls] == [2, 0, 1]
+    assert result.profiling["nearest_anchor_fallback_used"] == 1.0
+    assert result.profiling["n_candidates_considered"] == 3.0
+    assert result.profiling["n_candidates_pruned_by_top_k"] == 0.0
 
 
 def test_find_counterfactual_rejects_unknown_target_label():
