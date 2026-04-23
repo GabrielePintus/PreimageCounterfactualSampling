@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import os
 import signal
 import sys
+import threading
 import time
 import warnings
 from copy import deepcopy
@@ -30,6 +32,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+import psutil
 from tqdm import tqdm
 
 # Suppress noisy DeprecationWarning from sklearn_extra (distutils.LooseVersion).
@@ -233,6 +236,70 @@ def _compute_query_metrics(
     else:
         mad_l1 = float("nan")
     return l2, l1, l0, mad_l1
+
+
+class ResourceMonitor:
+    """Background process RSS sampler for benchmark instrumentation."""
+
+    def __init__(self, enabled: bool = False, interval_s: float = 1.0):
+        self.enabled = bool(enabled)
+        self.interval_s = float(interval_s)
+        self.samples: List[Dict[str, float]] = []
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._process = psutil.Process(os.getpid()) if self.enabled else None
+        self._start_t: Optional[float] = None
+
+    def _sample_once(self) -> None:
+        if not self.enabled or self._process is None:
+            return
+        rss_mb = float(self._process.memory_info().rss) / (1024.0 ** 2)
+        t_s = 0.0 if self._start_t is None else float(time.monotonic() - self._start_t)
+        self.samples.append({
+            "t_s": round(t_s, 6),
+            "rss_mb": round(rss_mb, 6),
+        })
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval_s):
+            self._sample_once()
+
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        self._stop_event.clear()
+        self._start_t = time.monotonic()
+        self._sample_once()
+        self._thread = threading.Thread(target=self._run, name="benchmark-resource-monitor", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if not self.enabled:
+            return
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(self.interval_s * 2.0, 0.1))
+            self._thread = None
+        self._sample_once()
+
+    def summarize(self) -> Dict[str, Any]:
+        if not self.enabled:
+            return {"ram_monitor_enabled": False}
+        if not self.samples:
+            self._sample_once()
+
+        rss = np.asarray([sample["rss_mb"] for sample in self.samples], dtype=np.float64)
+        return {
+            "ram_monitor_enabled": True,
+            "ram_monitor_interval_s": float(self.interval_s),
+            "ram_rss_mb_start": float(rss[0]),
+            "ram_rss_mb_end": float(rss[-1]),
+            "ram_rss_mb_peak": float(np.max(rss)),
+            "ram_rss_mb_mean": float(np.mean(rss)),
+            "ram_rss_mb_min": float(np.min(rss)),
+            "ram_rss_mb_n_samples": int(len(self.samples)),
+            "ram_trace": list(self.samples),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -743,6 +810,7 @@ def _build_dataset_cfg(
         "timeout_per_sample": ds_cfg.get(
             "timeout_per_sample", global_cfg.get("timeout_per_sample", 0)
         ),
+        "resource_monitor": deepcopy(global_cfg.get("resource_monitor", {})),
         "output": {"path": str(per_ds_output)},
         "methods": merged_methods,
     }
@@ -878,6 +946,9 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
     timeout_s = int(cfg.get("timeout_per_sample", 0))
     output_path = Path(cfg.get("output", {}).get("path", "results/benchmark.parquet"))
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    resource_cfg = cfg.get("resource_monitor") or {}
+    ram_monitor_enabled = bool(resource_cfg.get("enabled", False))
+    ram_monitor_interval_s = float(resource_cfg.get("interval_s", 1.0))
 
     methods_cfg = _expand_grid(cfg.get("methods", []))
     print(f"[INFO] {len(methods_cfg)} method runs after grid expansion.")
@@ -895,6 +966,16 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         run_name: str = method_cfg.get("run_name", method_name)  # label used in results
         method_params: Dict[str, Any] = method_cfg.get("params") or {}
         print(f"\n[METHOD] {run_name}" + (f" (impl: {method_name})" if run_name != method_name else ""))
+        resource_monitor = ResourceMonitor(
+            enabled=ram_monitor_enabled,
+            interval_s=ram_monitor_interval_s,
+        )
+        method_metadata: Dict[str, Any] = {
+            "ram_monitor_enabled": ram_monitor_enabled,
+        }
+        if ram_monitor_enabled:
+            method_metadata["ram_monitor_interval_s"] = ram_monitor_interval_s
+        resource_monitor.start()
 
         # --- Fit / Build ---
         # certcf (CertCFAtlas) operates in embedding space internally but
@@ -940,9 +1021,11 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     )
                     for pos, q_idx in enumerate(query_indices)
                 ]
+                resource_monitor.stop()
+                method_metadata.update(resource_monitor.summarize())
                 benchmark_result.method_results.append(MethodResult(
                     method=method_name, run_name=run_name, params=method_params,
-                    build_time_s=0.0, space="raw", query_results=qrs,
+                    build_time_s=0.0, space="raw", metadata=method_metadata, query_results=qrs,
                 ))
                 continue
         else:
@@ -969,9 +1052,11 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     )
                     for pos, q_idx in enumerate(query_indices)
                 ]
+                resource_monitor.stop()
+                method_metadata.update(resource_monitor.summarize())
                 benchmark_result.method_results.append(MethodResult(
                     method=method_name, run_name=run_name, params=method_params,
-                    build_time_s=0.0, space="gen", query_results=qrs,
+                    build_time_s=0.0, space="gen", metadata=method_metadata, query_results=qrs,
                 ))
                 continue
             active_model = model_for_methods
@@ -1110,12 +1195,15 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
 
             pbar.set_postfix(valid=n_ok, failed=n_failed)
 
+        resource_monitor.stop()
+        method_metadata.update(resource_monitor.summarize())
         benchmark_result.method_results.append(MethodResult(
             method=method_name,
             run_name=run_name,
             params=method_params,
             build_time_s=build_time_s,
             space=space,
+            metadata=method_metadata,
             query_results=query_results,
         ))
 

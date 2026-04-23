@@ -16,9 +16,9 @@ def ball_box_constraints(center: np.ndarray, eps: float) -> tuple[np.ndarray, np
     """
     Return halfspace constraints for axis-aligned box [center-eps, center+eps].
 
-    This box is a conservative (larger) approximation of the Lp ball
-    B(center, eps) and is used to clip certified polytopes to their
-    validity region.
+    This helper is used by the projection/search code as an outer box around
+    the true trust region. It must not be used to define certified 2D
+    visualization geometry for norms whose balls are not axis-aligned boxes.
 
     Convention: A x + b >= 0
 
@@ -46,19 +46,82 @@ def ball_box_constraints(center: np.ndarray, eps: float) -> tuple[np.ndarray, np
     return A_box, b_box
 
 
+def exact_2d_ball_constraints(
+    center: np.ndarray,
+    eps: float,
+    norm: int | float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Return the exact 2D halfspace representation of the certified trust region.
+
+    Supported norms are:
+    - L-infinity: axis-aligned box
+    - L1: diamond defined by the four sign combinations
+
+    Parameters
+    ----------
+    center : np.ndarray
+        Center point of the trust region, shape (2,).
+    eps : float
+        Radius of the trust region.
+    norm : int or float
+        Lp norm defining the certified trust region.
+
+    Returns
+    -------
+    A_ball : np.ndarray
+        Constraint matrix in the convention A x + b >= 0.
+    b_ball : np.ndarray
+        Bias vector in the convention A x + b >= 0.
+
+    Raises
+    ------
+    ValueError
+        If the input is not 2D or the norm is unsupported for exact 2D
+        polygonization.
+    """
+    center = np.asarray(center, dtype=np.float64).reshape(-1)
+    if center.shape[0] != 2:
+        raise ValueError(
+            f"Exact certified 2D trust-region constraints require a 2D center, got dim={center.shape[0]}."
+        )
+
+    if norm == np.inf:
+        return ball_box_constraints(center, eps)
+
+    if int(norm) == 1:
+        sign_rows = np.array(
+            [
+                [1.0, 1.0],
+                [1.0, -1.0],
+                [-1.0, 1.0],
+                [-1.0, -1.0],
+            ],
+            dtype=np.float64,
+        )
+        A_ball = -sign_rows
+        b_ball = eps + sign_rows @ center
+        return A_ball, b_ball
+
+    raise ValueError(
+        f"Exact certified 2D polygon construction only supports L1 and L-inf norms, got norm={norm}."
+    )
+
+
 def make_polygon(
     A_i: np.ndarray,
     b_i: np.ndarray,
     x0: np.ndarray,
     eps: float,
+    norm: int | float,
     tol: float = 1e-7
 ) -> Polygon | None:
     """
     Build a certified inner polytope for one sample.
 
-    Intersects the LiRPA halfspaces {A_i x + b_i >= 0} with the
-    epsilon-ball bounding box around x0. This ensures the polytope
-    is only valid within the region where the LiRPA bounds hold.
+    Intersects the LiRPA halfspaces {A_i x + b_i >= 0} with the exact 2D
+    trust region for the chosen norm. This ensures the polygon is only valid
+    within the region where the LiRPA bounds hold.
 
     Parameters
     ----------
@@ -70,6 +133,8 @@ def make_polygon(
         Nominal point (center of the eps-ball), shape (d,).
     eps : float
         Perturbation radius defining the validity region.
+    norm : int or float
+        Lp norm defining the certified trust region.
     tol : float, optional
         Tolerance for feasibility check (default: 1e-7).
 
@@ -82,12 +147,17 @@ def make_polygon(
     if Polygon is None:
         raise ImportError("shapely is required for polygon construction utilities.")
 
-    # Get box constraints for the epsilon ball
-    A_box, b_box = ball_box_constraints(x0, eps)
+    x0 = np.asarray(x0, dtype=np.float64).reshape(-1)
+    if x0.shape[0] != 2:
+        raise ValueError(
+            f"Certified polygon construction only supports 2D inputs, got dim={x0.shape[0]}."
+        )
 
-    # Combine LiRPA constraints with box constraints
-    A_full = np.vstack([A_i, A_box])
-    b_full = np.concatenate([b_i, b_box])
+    A_ball, b_ball = exact_2d_ball_constraints(x0, eps, norm)
+
+    # Combine LiRPA constraints with exact trust-region constraints
+    A_full = np.vstack([A_i, A_ball])
+    b_full = np.concatenate([b_i, b_ball])
 
     # Convert halfspace representation to vertices
     verts = halfspace_to_vertices(A_full, b_full, x0, tol=tol)

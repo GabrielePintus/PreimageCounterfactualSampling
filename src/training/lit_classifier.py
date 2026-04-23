@@ -2,9 +2,10 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import lightning as L
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 class LitClassifier(L.LightningModule):
@@ -12,9 +13,7 @@ class LitClassifier(L.LightningModule):
     LightningModule wrapping any PyTorch classifier.
 
     Handles training and validation with CrossEntropyLoss, AdamW optimizer,
-    linear LR warmup followed by CosineAnnealingLR.
-
-    LR schedule: ~0 → (linear, warmup_steps) → initial_lr → (cosine) → final_lr
+    and CosineAnnealingLR.
 
     Parameters
     ----------
@@ -24,8 +23,6 @@ class LitClassifier(L.LightningModule):
         Peak learning rate reached after warmup; starting point of cosine decay.
     weight_decay : float
         L2 regularization coefficient for AdamW.
-    warmup_steps : int
-        Number of optimizer steps for linear LR warmup.
     final_lr : float
         Minimum learning rate at the end of cosine annealing.
     """
@@ -33,21 +30,47 @@ class LitClassifier(L.LightningModule):
     def __init__(
         self,
         model: nn.Module,
-        initial_lr: float = 1e-2,
+        initial_lr: float = 5e-3,
         weight_decay: float = 1e-4,
-        warmup_steps: int = 500,
         final_lr: float = 1e-6,
         class_weights: list[float] | None = None,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
         self.model = model
-        weight_tensor = None
-        if class_weights is not None:
-            weight_tensor = torch.tensor(class_weights, dtype=torch.float32)
-            if weight_tensor.ndim != 1:
-                raise ValueError("class_weights must be a 1D sequence of per-class weights")
-        self.criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+        self._class_weights_loaded = False
+        weight_tensor = self._build_weight_tensor(class_weights)
+        self.register_buffer(
+            "class_weight_tensor",
+            weight_tensor if weight_tensor is not None else torch.empty(0, dtype=torch.float32),
+            persistent=False,
+        )
+
+    @staticmethod
+    def _build_weight_tensor(class_weights: list[float] | None) -> torch.Tensor | None:
+        if class_weights is None:
+            return None
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32)
+        if weight_tensor.ndim != 1:
+            raise ValueError("class_weights must be a 1D sequence of per-class weights")
+        return weight_tensor
+
+    def setup(self, stage: str | None = None) -> None:
+        del stage
+        if self._class_weights_loaded:
+            return
+        if self.hparams.class_weights is not None:
+            self._class_weights_loaded = True
+            return
+
+        datamodule = getattr(self.trainer, "datamodule", None)
+        class_weights = getattr(datamodule, "class_weights", None)
+        if class_weights is None:
+            return
+
+        weight_tensor = self._build_weight_tensor(class_weights)
+        self.class_weight_tensor = weight_tensor
+        self._class_weights_loaded = True
 
     def forward(self, x):
         return self.model(x)
@@ -55,7 +78,8 @@ class LitClassifier(L.LightningModule):
     def shared_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
-        loss = self.criterion(logits, y)
+        weight = self.class_weight_tensor if self.class_weight_tensor.numel() else None
+        loss = F.cross_entropy(logits, y, weight=weight)
         acc = (logits.argmax(dim=1) == y).float().mean()
         return {"loss": loss, "acc": acc}, loss
 
@@ -80,20 +104,9 @@ class LitClassifier(L.LightningModule):
             weight_decay=self.hparams.weight_decay,
         )
         total_steps = self.trainer.estimated_stepping_batches
-        warmup = LinearLR(
-            optimizer,
-            start_factor=1e-6,
-            end_factor=1.0,
-            total_iters=self.hparams.warmup_steps,
-        )
         cosine = CosineAnnealingLR(
             optimizer,
-            T_max=total_steps - self.hparams.warmup_steps,
+            T_max=max(1, total_steps),
             eta_min=self.hparams.final_lr,
         )
-        scheduler = SequentialLR(
-            optimizer,
-            schedulers=[warmup, cosine],
-            milestones=[self.hparams.warmup_steps],
-        )
-        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": cosine, "interval": "step"}}

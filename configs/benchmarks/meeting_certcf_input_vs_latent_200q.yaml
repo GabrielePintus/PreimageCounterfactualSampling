@@ -44,7 +44,7 @@ datasets:
         checkpoint: checkpoints/adult_classifier/best.ckpt
         device: cuda
         dataset_module: adult
-        hidden_dims: [32, 8]
+        hidden_dims: [64, 32]
         dropout: 0.2
 
   - name: compas
@@ -57,7 +57,7 @@ datasets:
         device: cuda
         dataset_module: compas
         hidden_dims: [64, 32]
-        dropout: 0.1
+        dropout: 0.2
 
   - name: german_credit
     sampling:
@@ -69,7 +69,7 @@ datasets:
         device: cuda
         dataset_module: german_credit
         hidden_dims: [64, 32]
-        dropout: 0.1
+        dropout: 0.2
 
   # - name: heloc
   #   sampling:
@@ -81,7 +81,7 @@ datasets:
   #       device: cuda
   #       dataset_module: heloc
   #       hidden_dims: [64, 32]
-  #       dropout: 0.1
+  #       dropout: 0.2
 
   # - name: give_me_some_credit
   #   sampling:
@@ -93,7 +93,7 @@ datasets:
   #       device: cuda
   #       dataset_module: give_me_some_credit
   #       hidden_dims: [64, 32]
-  #       dropout: 0.1
+  #       dropout: 0.2
 
   # - name: lending_club
   #   sampling:
@@ -105,4 +105,4 @@ datasets:
   #       device: cuda
   #       dataset_module: lending_club
   #       hidden_dims: [64, 32]
-  #       dropout: 0.1
+  #       dropout: 0.2

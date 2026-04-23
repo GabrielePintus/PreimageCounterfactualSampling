@@ -10,6 +10,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from dataset_specs import get_tabular_dataset_spec
+from training.datamodules._tabular_utils import compute_inverse_frequency_class_weights
 
 _SPEC = get_tabular_dataset_spec("adult")
 _ALL_COLS = list(_SPEC.feature_names)
@@ -164,6 +165,7 @@ class AdultDataModule(L.LightningDataModule):
 
         self.n_features_out = int(X_train.shape[1])
         y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
+        self.class_weights = compute_inverse_frequency_class_weights(y_train)
 
         self.train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
         self.val_ds = TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))

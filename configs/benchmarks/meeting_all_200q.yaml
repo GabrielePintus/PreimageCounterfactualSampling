@@ -1,11 +1,11 @@
 seed: 42
-output: results/benchmark_smoke_all.parquet
+output: results/benchmark_meeting_all_200q.parquet
 timeout_per_sample: 60   # seconds per (method, query)
 
 # ---------------------------------------------------------------------------
 # Shared methods — applied to every dataset below.
 # certcf.checkpoint is auto-inherited from each dataset's model.params.checkpoint.
-# Use dataset.method_overrides to override individual params per dataset.
+# Use dataset.method_overrides to change individual params for a specific dataset.
 # ---------------------------------------------------------------------------
 methods:
 
@@ -13,6 +13,16 @@ methods:
     run_name: nn
     params:
       norm: 1
+      subsample_method: kmedoids
+      k_per_class: 200
+
+  - name: dice
+    run_name: dice
+    params:
+      total_cfs: 1
+      diversity_weight: 0.0
+      proximity_weight: 1.0
+      min_iter: 50
 
   - name: growing_spheres
     run_name: gs
@@ -20,6 +30,16 @@ methods:
       max_radius: 5.0
       radius_step: 0.15
       n_in_layer: 512
+
+  - name: face
+    run_name: face
+    params:
+      density_estimator:
+        name: kde
+      tp: 0.5
+      epsilon: 2.0
+      subsample_method: kmedoids
+      k_per_class: 200
 
   - name: certcf
     run_name: certcf
@@ -37,9 +57,21 @@ methods:
 # ---------------------------------------------------------------------------
 datasets:
 
+  - name: adult
+    sampling:
+      n_queries: 200
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/adult_classifier/best.ckpt
+        device: cuda
+        dataset_module: adult
+        hidden_dims: [64, 32]
+        dropout: 0.2
+
   - name: compas
     sampling:
-      n_queries: 50
+      n_queries: 200
     model:
       name: tabular_classifier_ckpt
       params:
@@ -47,11 +79,11 @@ datasets:
         device: cuda
         dataset_module: compas
         hidden_dims: [64, 32]
-        dropout: 0.1
+        dropout: 0.2
 
   - name: german_credit
     sampling:
-      n_queries: 50
+      n_queries: 200
     model:
       name: tabular_classifier_ckpt
       params:
@@ -59,12 +91,11 @@ datasets:
         device: cuda
         dataset_module: german_credit
         hidden_dims: [64, 32]
-        dropout: 0.1
+        dropout: 0.2
 
   - name: heloc
     sampling:
-      n_queries: 50
-    dataset_params: {}      # heloc does not require data_dir
+      n_queries: 200
     model:
       name: tabular_classifier_ckpt
       params:
@@ -72,14 +103,11 @@ datasets:
         device: cuda
         dataset_module: heloc
         hidden_dims: [64, 32]
-        dropout: 0.1
-    method_overrides:
-      certcf:
-        eps_alpha: 0.35     # heloc needs a slightly larger margin
+        dropout: 0.2
 
   - name: give_me_some_credit
     sampling:
-      n_queries: 50
+      n_queries: 200
     model:
       name: tabular_classifier_ckpt
       params:
@@ -87,15 +115,11 @@ datasets:
         device: cuda
         dataset_module: give_me_some_credit
         hidden_dims: [64, 32]
-        dropout: 0.1
-    method_overrides:
-      certcf:
-        batch_size: 16      # smaller batch to avoid OOM on this dataset
-        k_per_class: 100
+        dropout: 0.2
 
   - name: lending_club
     sampling:
-      n_queries: 50
+      n_queries: 200
     model:
       name: tabular_classifier_ckpt
       params:
@@ -103,4 +127,4 @@ datasets:
         device: cuda
         dataset_module: lending_club
         hidden_dims: [64, 32]
-        dropout: 0.1
+        dropout: 0.2

@@ -1,5 +1,5 @@
 trainer:
-  max_epochs: 50
+  max_epochs: 100
   accelerator: auto
   callbacks:
   - class_path: lightning.pytorch.callbacks.ModelCheckpoint
@@ -63,18 +63,17 @@ model:
         cardinalities: []
         hidden_dims: [64, 32]
         num_classes: 2
-        dropout: 0.1
+        dropout: 0.2
 
-    initial_lr: 1e-3
+    initial_lr: 5e-3
     final_lr: 1e-6
     weight_decay: 1e-4
-    warmup_steps: 10
 
 data:
   class_path: training.datamodules.wisconsin_breast_cancer.WisconsinBreastCancerDataModule
   init_args:
     filepath: data/WisconsinBreastCancer/raw.parquet
-    batch_size: 64
+    batch_size: 128
     val_fraction: 0.1
     test_fraction: 0.1
     seed: 42

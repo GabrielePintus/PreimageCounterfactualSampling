@@ -42,18 +42,17 @@ model:
         cardinalities: [2, 6, 2]  # sex (2), race (6), c_charge_degree (2)
         hidden_dims: [64, 32]
         num_classes: 2
-        dropout: 0.1
+        dropout: 0.2
 
-    initial_lr: 1e-3
+    initial_lr: 5e-3
     final_lr: 1e-6
     weight_decay: 1e-4
-    warmup_steps: 200
 
 data:
   class_path: training.datamodules.compas.CompasDataModule
   init_args:
     filepath: data/Compas/raw.parquet
-    batch_size: 64
+    batch_size: 128
     val_fraction: 0.1
     test_fraction: 0.1
     seed: 42

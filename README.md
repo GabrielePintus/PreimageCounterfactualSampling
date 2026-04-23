@@ -115,15 +115,15 @@ Setting $\delta = 0$ recovers the standard (non-robust) formulation.
 A global fixed ε is a poor fit for heterogeneous datasets: points near the class boundary need a small ball (for feasibility); isolated interior points can tolerate a much larger one (richer polytope). The library provides pluggable **ε strategies** decoupled from atlas construction:
 
 ```
-eps = strategy.compute_eps(X, y)   # shape (N,) — one value per training point
+eps = strategy.compute_eps(X, y, norm=atlas_norm)   # shape (N,) — one value per training point
 ```
 
 | Strategy | Formula | Use case |
 |---|---|---|
 | `ConstantEpsStrategy(eps)` | $\varepsilon_i = \varepsilon$ | Baseline, backward-compatible |
-| `NearestOppositeClassClearanceStrategy(alpha)` | $\varepsilon_i = \alpha \cdot \min_{j:\, y_j \neq y_i} \|\mathbf{x}_i - \mathbf{x}_j\|_\infty$ | Adaptive; recommended for tabular data |
+| `NearestOppositeClassClearanceStrategy(alpha)` | $\varepsilon_i = \alpha \cdot \min_{j:\, y_j \neq y_i} \|\mathbf{x}_i - \mathbf{x}_j\|_p$ | Adaptive; recommended for tabular data |
 
-**NearestOppositeClassClearanceStrategy** sets each point's ε to a fraction $\alpha \in (0, 1]$ of its L∞ distance to the nearest opposite-class training point. At $\alpha < 0.5$ the certification ball never crosses a class boundary, guaranteeing feasibility. Larger values are allowed for experimentation, but they lose that safety guarantee. The default $\alpha = 0.25$ leaves a comfortable 50% safety margin. The O(N²) pairwise Chebyshev distance computation runs once offline via `scipy.spatial.distance.cdist`.
+**NearestOppositeClassClearanceStrategy** sets each point's ε to a fraction $\alpha \in (0, 1]$ of its distance to the nearest opposite-class training point, measured in the same norm used by the atlas (`L1`, `L2`, or `L∞`). At $\alpha < 0.5$ the certification ball never crosses a class boundary, guaranteeing feasibility when the clearance and atlas use the same norm. Larger values are allowed for experimentation, but they lose that safety guarantee. The default $\alpha = 0.25$ leaves a comfortable 50% safety margin. The O(N²) pairwise distance computation runs once offline via `scipy.spatial.distance.cdist`.
 
 ---
 

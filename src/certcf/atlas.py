@@ -34,8 +34,8 @@ except ImportError:
 
 from .certification.lirpa import PreimageApproximation
 from .eps_strategies import EpsStrategy, ConstantEpsStrategy
-from .geometry.polytopes import ball_box_constraints, make_polygon
-from .geometry.operations import build_class_union, refine_unions_by_priority
+from .geometry.polytopes import ball_box_constraints
+from .geometry.operations import build_class_union, assert_no_cross_class_overlap
 from .indexing.bvh import BVHIndex
 
 
@@ -192,7 +192,7 @@ class CertCFAtlas:
         # Compute per-sample epsilon for the full dataset
         X_all = self._preimage.dataset.tensors[0].numpy()
         y_all = self._preimage.dataset.tensors[1].numpy()
-        eps_array = eps_strategy.compute_eps(X_all, y_all)
+        eps_array = eps_strategy.compute_eps(X_all, y_all, norm=norm)
 
         if verbose:
             eps_min, eps_max = eps_array.min(), eps_array.max()
@@ -241,8 +241,9 @@ class CertCFAtlas:
                 self._class_unions = {}
                 for label in self.class_labels:
                     self._class_unions[label] = build_class_union(
-                        label, self.bounds, self.bounds[label]['eps']
+                        label, self.bounds, self.bounds[label]['eps'], norm=self.norm
                     )
+                self._validate_class_unions(tol=1e-9)
 
         if verbose:
             total_polytopes = sum(
@@ -1613,26 +1614,13 @@ class CertCFAtlas:
             )
         return self._class_unions[label]
 
-    def get_refined_unions(self, priority_order: Optional[List[int]] = None) -> Dict:
-        """
-        Get refined polygon unions with overlaps removed (2D only).
-
-        Parameters
-        ----------
-        priority_order : list[int], optional
-            Priority order for resolving overlaps (highest priority first).
-            If None, uses sorted label order.
-
-        Returns
-        -------
-        dict
-            Dictionary mapping labels to refined Polygon/MultiPolygon.
-        """
+    def _validate_class_unions(self, tol: float = 1e-9) -> None:
+        """Raise if built class unions violate certified disjointness."""
         if self._class_unions is None:
             raise ValueError(
                 "Polygon unions not built. Call build() with build_unions=True."
             )
-        return refine_unions_by_priority(self._class_unions, priority_order)
+        assert_no_cross_class_overlap(self._class_unions, tol=tol)
 
     def summary(self) -> str:
         """Return a summary string of the atlas."""

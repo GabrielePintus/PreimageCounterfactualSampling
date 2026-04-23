@@ -42,6 +42,14 @@ class FACEMethod(BaseCounterfactualMethod):
         else:
             raise ValueError("density_estimator must be either a BaseDensityEstimator instance or a config dict")
 
+    @staticmethod
+    def _normalize_norm(norm: int | float | str) -> int | float:
+        if isinstance(norm, str):
+            if norm.lower() in {"inf", "infinity"}:
+                return np.inf
+            return float(norm)
+        return norm
+
     def __init__(
         self,
         # The trained model
@@ -50,6 +58,7 @@ class FACEMethod(BaseCounterfactualMethod):
         # Main params of the FACE method
         density_estimator: Union[BaseDensityEstimator, dict],
         epsilon: float = float("inf"),
+        norm: int | float | str = 2,
         tp: float = 0.5,
         td: float = 0.0,
         conditions_fn: Optional[ConditionsFn] = None,
@@ -66,7 +75,9 @@ class FACEMethod(BaseCounterfactualMethod):
         Args:
             model: the classifier to explain
             density_estimator: a density estimator
-            epsilon: threshold of closeness for two nodes to be neighbors. the paper uses euclidean norm
+            epsilon: threshold of closeness for two nodes to be neighbors
+            norm: lp norm used for graph construction, edge distances, nearest-node projection,
+                and the reported counterfactual distance. Supported values: 1, 2, "inf".
             tp: the model's prediction confidence threshold
             td: density threshold
 
@@ -81,6 +92,7 @@ class FACEMethod(BaseCounterfactualMethod):
 
         self.density_estimator = FACEMethod._parse_density_estimator(density_estimator)
         self.epsilon = epsilon
+        self.norm = self._normalize_norm(norm)
         self.tp = tp
         self.td = td
         if conditions_fn is not None:
@@ -92,13 +104,21 @@ class FACEMethod(BaseCounterfactualMethod):
         self.density: Optional[np.ndarray] = None
         self.graph: Optional[nx.Graph] = None
 
+    def _pairwise_metric_kwargs(self) -> dict:
+        if self.norm == np.inf:
+            return {"metric": "chebyshev"}
+        return {"metric": "minkowski", "p": float(self.norm)}
+
+    def _lp_distance(self, xi: np.ndarray, xj: np.ndarray, axis: Optional[int] = None) -> np.ndarray:
+        return np.linalg.norm(xi - xj, ord=self.norm, axis=axis)
+
     def conditions_fn(self, x_query: np.ndarray, x_candidate: np.ndarray) -> bool:
         """Default conditions function that allows all candidates."""
         return True
 
     def weight_fn(self, xi: np.ndarray, xj: np.ndarray) -> float:
         midpoint = ((xi + xj) / 2.0)
-        distance = np.linalg.norm(xi - xj, ord=2)
+        distance = self._lp_distance(xi, xj)
         density = self.density_estimator(midpoint.reshape(1, -1))[0]
 
         # Avoid log(0) by adding a small epsilon to the density
@@ -124,7 +144,11 @@ class FACEMethod(BaseCounterfactualMethod):
         query_label = int(self.model.predict(x_query)[0])
         predicted_train_labels = np.argmax(self.train_proba, axis=1)
         same_class_indices = np.where(predicted_train_labels == query_label)[0]
-        local_idx = int(np.argmin(pairwise_distances(x_query, self._x_train[same_class_indices])[0]))
+        local_idx = int(np.argmin(pairwise_distances(
+            x_query,
+            self._x_train[same_class_indices],
+            **self._pairwise_metric_kwargs(),
+        )[0]))
         start_node = int(same_class_indices[local_idx])
 
         # Compute the candidate nodes filtering by
@@ -159,7 +183,7 @@ class FACEMethod(BaseCounterfactualMethod):
         return CounterfactualResult(
             x_cf=x_cf,
             success=bool(success),
-            distance=float(np.linalg.norm(x_cf - x_query[0], ord=2)),
+            distance=float(self._lp_distance(x_cf, x_query[0])),
             metadata={
                 "target_class": target_class,
                 "start_node": start_node,
@@ -167,6 +191,7 @@ class FACEMethod(BaseCounterfactualMethod):
                 "path_cost": float(path_cost),
                 "path_indices": [int(i) for i in path],
                 "n_candidates": int(len(candidates)),
+                "norm": self.norm,
             },
         )
 
@@ -178,6 +203,7 @@ class FACEMethod(BaseCounterfactualMethod):
             radius=self.epsilon,
             mode="distance",
             include_self=False,
+            **self._pairwise_metric_kwargs(),
         )
         graph = nx.from_scipy_sparse_array(adjacency)
 
@@ -215,4 +241,3 @@ class FACEMethod(BaseCounterfactualMethod):
         density_mask = self.density >= self.td
         indices = np.where(conf_mask & density_mask)[0]
         return np.array([i for i in indices if self.conditions_fn(x_query, self._x_train[i])])
-

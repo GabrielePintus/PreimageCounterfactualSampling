@@ -23,13 +23,26 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
         n_in_layer: int = 512,
         max_radius: float = 3.0,
         radius_step: float = 0.15,
+        norm: int | float | str = 2,
         random_seed: int = 42,
     ):
         super().__init__(model=model, random_seed=random_seed)
         self.n_in_layer = n_in_layer
         self.max_radius = max_radius
         self.radius_step = radius_step
+        self.norm = self._normalize_norm(norm)
         self._feature_scale: Optional[np.ndarray] = None
+
+    @staticmethod
+    def _normalize_norm(norm: int | float | str) -> int | float:
+        if isinstance(norm, str):
+            if norm.lower() in {"inf", "infinity"}:
+                return np.inf
+            return float(norm)
+        return norm
+
+    def _lp_distance(self, x: np.ndarray, y: np.ndarray, axis: Optional[int] = None) -> np.ndarray:
+        return np.linalg.norm(x - y, ord=self.norm, axis=axis)
 
     def _fit(self) -> None:
         assert self._x_train is not None
@@ -60,7 +73,7 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
             if len(valid) > 0:
                 # Among the first valid shell, keep the closest enemy and then apply
                 # Growing Spheres' post-hoc feature selection step for sparsity.
-                dists = np.linalg.norm(valid - x_query[None, :], axis=1)
+                dists = self._lp_distance(valid, x_query[None, :], axis=1)
                 idx = int(np.argmin(dists))
                 enemy = valid[idx]
                 best = self._feature_selection(
@@ -68,7 +81,7 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
                     enemy=enemy,
                     target_class=target_class,
                 )
-                best_dist = float(np.linalg.norm(best - x_query, ord=2))
+                best_dist = float(self._lp_distance(best, x_query))
                 break
             radius += self.radius_step
 
@@ -84,16 +97,14 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
             x_cf=best.astype(np.float32),
             success=True,
             distance=best_dist,
-            metadata={"target_class": target_class, "searched_radius": radius},
+            metadata={"target_class": target_class, "searched_radius": radius, "norm": self.norm},
         )
 
     def _sample_layer(self, x0: np.ndarray, inner_radius: float, outer_radius: float) -> np.ndarray:
-        # Sample uniformly over directions, then sample radii so points are uniform
-        # over the shell volume rather than concentrated near the inner boundary.
-        directions = self.rng.normal(size=(self.n_in_layer, x0.shape[0]))
-        norms = np.linalg.norm(directions, axis=1, keepdims=True)
-        norms[norms == 0.0] = 1.0
-        unit = directions / norms
+        # Sample uniformly over directions in the chosen lp geometry, then sample
+        # radii so points are uniform over the shell volume rather than concentrated
+        # near the inner boundary.
+        unit = self._sample_unit_directions(dim=x0.shape[0])
 
         if outer_radius <= inner_radius:
             radii = np.full((self.n_in_layer, 1), outer_radius, dtype=np.float32)
@@ -112,6 +123,28 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
 
         scaled = unit * radii * self._feature_scale[None, :]
         return x0[None, :] + scaled
+
+    def _sample_unit_directions(self, dim: int) -> np.ndarray:
+        if self.norm == 1:
+            magnitudes = self.rng.exponential(scale=1.0, size=(self.n_in_layer, dim))
+            signs = self.rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=(self.n_in_layer, dim))
+            directions = magnitudes * signs
+        elif self.norm == 2:
+            directions = self.rng.normal(size=(self.n_in_layer, dim))
+        elif self.norm == np.inf:
+            directions = self.rng.uniform(-1.0, 1.0, size=(self.n_in_layer, dim))
+            max_abs = np.max(np.abs(directions), axis=1, keepdims=True)
+            max_abs[max_abs == 0.0] = 1.0
+            directions = directions / max_abs
+            return directions.astype(np.float32)
+        else:
+            raise ValueError(
+                "GrowingSpheresMethod currently supports norm in {1, 2, 'inf'}"
+            )
+
+        norms = np.linalg.norm(directions, ord=self.norm, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        return (directions / norms).astype(np.float32)
 
     def _feature_selection(
         self,
@@ -133,4 +166,3 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
             if int(self.model.predict(trial[None, :])[0]) == target_class:
                 x_cf = trial
         return x_cf
-

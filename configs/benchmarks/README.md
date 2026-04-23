@@ -101,7 +101,7 @@ model:
     checkpoint: checkpoints/adult_classifier/best.ckpt
     device: cuda              # cpu | cuda | auto
     dataset_module: adult     # which datamodule to load constants from
-    hidden_dims: [32, 8]
+    hidden_dims: [64, 32]
     dropout: 0.2
 
 sampling:
@@ -193,7 +193,7 @@ datasets:
         checkpoint: checkpoints/adult_classifier/best.ckpt
         device: cuda
         dataset_module: adult
-        hidden_dims: [32, 8]
+        hidden_dims: [64, 32]
         dropout: 0.2
 
   - name: compas
@@ -206,7 +206,7 @@ datasets:
         device: cuda
         dataset_module: compas
         hidden_dims: [64, 32]
-        dropout: 0.1
+        dropout: 0.2
     method_overrides:           # optional: override individual params for this dataset
       certcf:
         eps_alpha: 0.35

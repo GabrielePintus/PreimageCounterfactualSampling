@@ -20,6 +20,22 @@ Interactive notebooks for training evaluation, benchmark analysis, and CertCF di
   Main current comparison notebook for CertCF, NN, GS, and DiCE, including KDE plots, shared-success summaries, and manifoldness diagnostics.
 - `6.16 - CertCF 2D Gaussian mixture coverage diagnostics.ipynb`
   Visual diagnostic notebook built around a hard 2D Gaussian mixture so we can inspect decision regions, atlas coverage, and query behavior directly.
+- `6.17 - CertCF 2D Adult PCA coverage diagnostics.ipynb`
+  Visual diagnostic notebook that projects Adult into a 2D PCA plane so we can inspect CertCF coverage on a real tabular dataset in a controlled setting.
+- `6.18 - CertCF Adult validity and proximity diagnostics.ipynb`
+  Lightweight Adult notebook that runs CertCF in the normal preprocessed tabular space and prints aggregate validity and proximity metrics across multiple `eps_alpha` values.
+- `6.19 - CertCF merged polytope certification diagnostics.ipynb`
+  2D diagnostic notebook that wraps nearby certified polytopes into a convex hull, runs a fresh LiRPA certification pass on the wrapper, and compares area/query-distance proxies against the original local union.
+- `6.20 - CertCF Adult box merge compression diagnostics.ipynb`
+  Adult full-space diagnostic notebook that replaces small local groups of anchor regions with freshly certified axis-aligned boxes and reports atlas compression plus a nearest-target-box query proxy.
+- `6.21 - CertCF Adult simplex merge compression diagnostics.ipynb`
+  Adult full-space diagnostic notebook that replaces small local groups of anchor regions with freshly certified convex hulls of anchor centers and reports whether high-dimensional convex-polytope compression becomes certifiable.
+- `6.22 - CertCF Adult Minkowski capsule diagnostics.ipynb`
+  Adult full-space diagnostic notebook that tests full-dimensional certified merging via `Conv(anchors) + B_1(eps)`, using exact first-layer capsule bounds and interval propagation through the rest of the MLP.
+- `6.23 - CertCF Adult full-region hull merge diagnostics.ipynb`
+  Adult full-space diagnostic notebook that tests true region-containing merges by building the exact lifted convex hull of small groups of original certified `L1` regions and certifying the merged set with LiRPA affine bounds plus a final LP.
+- `6.24 - FACE hyperparameter heuristic diagnostics.ipynb`
+  Tabular benchmark notebook that loads the datasets and checkpoints used by `benchmark_full.yaml`, computes FACE graph and candidate-pool diagnostics, and proposes a per-dataset heuristic for choosing `epsilon` and `tp`.
 
 ## Archived Notebooks
 

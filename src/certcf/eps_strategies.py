@@ -18,7 +18,12 @@ class EpsStrategy(ABC):
     """Abstract base class for per-sample epsilon strategies."""
 
     @abstractmethod
-    def compute_eps(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    def compute_eps(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        norm: int | float = np.inf,
+    ) -> np.ndarray:
         """
         Compute per-sample epsilon values for the full dataset.
 
@@ -28,6 +33,9 @@ class EpsStrategy(ABC):
             Input samples from all classes combined.
         y : np.ndarray, shape (N,)
             Corresponding class labels (integer).
+        norm : int or float, optional
+            Lp norm used to define the opposite-class clearance. Defaults to
+            ``np.inf`` for backward compatibility.
 
         Returns
         -------
@@ -53,7 +61,12 @@ class ConstantEpsStrategy(EpsStrategy):
             raise ValueError(f"eps must be positive, got {eps}")
         self.eps = eps
 
-    def compute_eps(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    def compute_eps(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        norm: int | float = np.inf,
+    ) -> np.ndarray:
         return np.full(len(X), self.eps)
 
     def __repr__(self) -> str:
@@ -62,12 +75,12 @@ class ConstantEpsStrategy(EpsStrategy):
 
 class NearestOppositeClassClearanceStrategy(EpsStrategy):
     """
-    Per-point epsilon set to a fraction of the L-infinity clearance to the
-    nearest opposite-class sample.
+    Per-point epsilon set to a fraction of the Lp clearance to the nearest
+    opposite-class sample.
 
     For each point x_i with label c_i:
 
-        d_i = min_{j: y_j != c_i}  ||x_i - x_j||_inf
+        d_i = min_{j: y_j != c_i}  ||x_i - x_j||_p
         eps_i = alpha * d_i
 
     **Intuition**: points close to a class boundary receive a small epsilon
@@ -87,10 +100,10 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
 
     Notes
     -----
-    ``compute_eps`` runs once offline (before LiRPA), with cost O(N^2) L-inf
-    distance computations implemented via ``scipy.spatial.distance.cdist`` with
-    ``metric='chebyshev'``.  For N <= 10 000 and moderate d this is negligible
-    compared with the LiRPA calls that follow.
+    ``compute_eps`` runs once offline (before LiRPA), with cost O(N^2)
+    pairwise distance computations implemented via
+    ``scipy.spatial.distance.cdist``. For N <= 10 000 and moderate d this is
+    negligible compared with the LiRPA calls that follow.
     """
 
     def __init__(self, alpha: float = 0.25):
@@ -98,13 +111,32 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
             raise ValueError(f"alpha must be in (0, 1], got {alpha}")
         self.alpha = alpha
 
-    def compute_eps(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _resolve_cdist_metric(norm: int | float) -> tuple[str, dict]:
+        if norm == np.inf:
+            return "chebyshev", {}
+        p = float(norm)
+        if p <= 0:
+            raise ValueError(f"norm must be positive, got {norm}")
+        if p == 1.0:
+            return "cityblock", {}
+        if p == 2.0:
+            return "euclidean", {}
+        return "minkowski", {"p": p}
+
+    def compute_eps(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        norm: int | float = np.inf,
+    ) -> np.ndarray:
         from scipy.spatial.distance import cdist
 
         X = np.asarray(X)
         y = np.asarray(y)
         N = len(X)
         eps = np.zeros(N)
+        metric, metric_kwargs = self._resolve_cdist_metric(norm)
 
         for c in np.unique(y):
             mask_c = y == c
@@ -117,8 +149,8 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
             X_c = X[mask_c]        # (N_c, d)
             X_other = X[mask_other]  # (N_other, d)
 
-            # Pairwise L-inf (Chebyshev) distances: (N_c, N_other)
-            dists = cdist(X_c, X_other, metric='chebyshev')
+            # Pairwise Lp distances: (N_c, N_other)
+            dists = cdist(X_c, X_other, metric=metric, **metric_kwargs)
 
             # Per-point clearance = distance to nearest opposite-class neighbor
             clearance = dists.min(axis=1)  # (N_c,)

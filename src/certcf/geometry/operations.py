@@ -22,6 +22,7 @@ def build_class_union(
     label: int,
     bounds: dict,
     eps,
+    norm: int | float,
     tol: float = 1e-7
 ) -> Polygon | MultiPolygon:
     """
@@ -41,6 +42,8 @@ def build_class_union(
         Perturbation radius used for clipping polytopes.  Can be a scalar
         (same for all samples) or a 1-D array of shape ``(N,)`` for
         per-sample radii.
+    norm : int or float
+        Lp norm used to define the exact certified trust region.
     tol : float, optional
         Tolerance for polytope construction (default: 1e-7).
 
@@ -58,7 +61,7 @@ def build_class_union(
 
     for i in range(bd['lA'].shape[0]):
         eps_i = float(eps[i]) if isinstance(eps, np.ndarray) else eps
-        p = make_polygon(bd['lA'][i], bd['lbias'][i], bd['X'][i], eps_i, tol=tol)
+        p = make_polygon(bd['lA'][i], bd['lbias'][i], bd['X'][i], eps_i, norm=norm, tol=tol)
         if p is not None:
             polys.append(p)
 
@@ -66,56 +69,6 @@ def build_class_union(
         return Polygon()
 
     return unary_union(polys)
-
-
-def refine_unions_by_priority(
-    unions: dict[int, Polygon | MultiPolygon],
-    priority_order: list[int] | None = None
-) -> dict[int, Polygon | MultiPolygon]:
-    """
-    Subtract higher-priority class regions from lower-priority ones.
-
-    Since LiRPA inner approximations can overlap between classes,
-    we resolve conflicts by assigning priorities: higher-priority
-    classes keep their full footprint, while lower-priority classes
-    have overlapping regions removed.
-
-    U'_y = U_y minus (union of all U_y' for y' with higher priority)
-
-    Parameters
-    ----------
-    unions : dict[int, Polygon | MultiPolygon]
-        Dictionary mapping class labels to their union geometries.
-    priority_order : list[int], optional
-        List of labels in descending priority order (highest first).
-        If None, uses sorted label order.
-
-    Returns
-    -------
-    dict[int, Polygon | MultiPolygon]
-        Refined unions with overlaps removed according to priority.
-    """
-    _require_shapely()
-    if priority_order is None:
-        priority_order = sorted(unions.keys())
-
-    refined = {}
-    placed = Polygon()  # Accumulator of all previously placed regions
-
-    for label in priority_order:
-        region = unions[label]
-
-        if region.is_empty:
-            refined[label] = region
-            continue
-
-        # Remove all higher-priority regions from this class
-        refined[label] = region.difference(placed)
-
-        # Add this class's original footprint to the accumulator
-        placed = placed.union(region)
-
-    return refined
 
 
 def compute_overlap_matrix(unions: dict[int, Polygon | MultiPolygon]) -> dict:
@@ -147,3 +100,25 @@ def compute_overlap_matrix(unions: dict[int, Polygon | MultiPolygon]) -> dict:
                 overlap[j][i] = area
 
     return {'overlap': overlap, 'labels': labels}
+
+
+def assert_no_cross_class_overlap(
+    unions: dict[int, Polygon | MultiPolygon],
+    tol: float = 1e-9,
+) -> None:
+    """
+    Raise if any certified class unions have positive-area overlap.
+
+    Certified regions of different classes must be disjoint. Any positive-area
+    overlap indicates a bug in the geometric reconstruction path.
+    """
+    _require_shapely()
+    labels = sorted(unions.keys())
+    for i, label_i in enumerate(labels):
+        for label_j in labels[i + 1:]:
+            area = unions[label_i].intersection(unions[label_j]).area
+            if area > tol:
+                raise ValueError(
+                    "Certified class unions must be disjoint, "
+                    f"but classes {label_i} and {label_j} overlap with area {area:.12g}."
+                )

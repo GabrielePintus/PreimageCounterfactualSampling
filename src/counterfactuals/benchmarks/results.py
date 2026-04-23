@@ -60,6 +60,7 @@ class MethodResult:
     params: Dict[str, Any]            # native Python dict — no JSON serialization
     build_time_s: float
     space: str                        # "raw" or "gen"
+    metadata: Dict[str, Any] = field(default_factory=dict)
     query_results: List[QueryResult] = field(default_factory=list)
 
 
@@ -93,6 +94,20 @@ class BenchmarkResult:
 
         for mr in self.method_results:
             params_json = json.dumps(mr.params)
+            method_metadata_safe = self._json_safe_value(mr.metadata)
+            method_ram_trace = method_metadata_safe.get("ram_trace") if isinstance(method_metadata_safe, dict) else None
+            if isinstance(method_metadata_safe, dict):
+                method_metadata_without_trace = dict(method_metadata_safe)
+                method_metadata_without_trace.pop("ram_trace", None)
+            else:
+                method_metadata_without_trace = method_metadata_safe
+            method_metadata_json = json.dumps(method_metadata_without_trace, sort_keys=True)
+            method_metadata_flat = self._flatten_metadata(method_metadata_without_trace, prefix="method_meta")
+            method_ram_trace_json = (
+                json.dumps(method_ram_trace, sort_keys=True)
+                if method_ram_trace is not None
+                else None
+            )
             for pos, qr in enumerate(mr.query_results):
                 x_orig = self.x_queries[pos]
                 y_orig_val = int(self.y_orig[pos])
@@ -117,6 +132,8 @@ class BenchmarkResult:
                     "build_time_s": float(mr.build_time_s),
                     "runtime_s": float(qr.runtime_s),
                     "params": params_json,
+                    "method_metadata_json": method_metadata_json,
+                    "method_ram_trace_json": method_ram_trace_json if pos == 0 else None,
                     "error": qr.error,
                     "metadata_json": json.dumps(
                         self._json_safe_value(qr.metadata),
@@ -128,6 +145,7 @@ class BenchmarkResult:
                     "mad_l1_distance": float(qr.mad_l1_distance),
                     "redundancy": float(qr.redundancy),
                 }
+                row.update(method_metadata_flat)
                 row.update(self._flatten_metadata(qr.metadata))
                 if self.y_true is not None:
                     row["y_true"] = int(self.y_true[pos])

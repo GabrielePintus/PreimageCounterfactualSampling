@@ -51,6 +51,7 @@ def plot_polytopes(
     bounds: dict,
     eps,
     n_classes: int,
+    norm: int | float,
     figsize: tuple = (7, 7),
     cmap_name: str = 'tab10'
 ) -> tuple:
@@ -71,6 +72,8 @@ def plot_polytopes(
         ``bounds[label]['eps']`` is present.
     n_classes : int
         Number of classes.
+    norm : int or float
+        Lp norm used to define the exact certified trust region.
     figsize : tuple, optional
         Figure size (default: (7, 7)).
     cmap_name : str, optional
@@ -97,7 +100,7 @@ def plot_polytopes(
         # Plot polytopes
         for i in range(bd['lA'].shape[0]):
             eps_i = float(eps_class[i]) if isinstance(eps_class, np.ndarray) else eps_class
-            poly = make_polygon(bd['lA'][i], bd['lbias'][i], bd['X'][i], eps_i)
+            poly = make_polygon(bd['lA'][i], bd['lbias'][i], bd['X'][i], eps_i, norm=norm)
             if poly is None:
                 continue
 
@@ -116,21 +119,18 @@ def plot_polytopes(
 
 def plot_class_unions(
     class_unions: dict,
-    refined_unions: dict,
     bounds: dict,
     n_classes: int,
-    figsize: tuple = (14, 6),
+    figsize: tuple = (7, 7),
     cmap_name: str = 'tab10'
 ) -> tuple:
     """
-    Plot raw and refined class unions side by side.
+    Plot certified class unions.
 
     Parameters
     ----------
     class_unions : dict
-        Dictionary of raw class unions (before refinement).
-    refined_unions : dict
-        Dictionary of refined class unions (after overlap removal).
+        Dictionary of certified class unions.
     bounds : dict
         Bounds dictionary for sample points.
     n_classes : int
@@ -142,33 +142,30 @@ def plot_class_unions(
 
     Returns
     -------
-    fig, axes : matplotlib Figure and Axes array
+    fig, ax : matplotlib Figure and Axes
     """
     cmap = plt.cm.get_cmap(cmap_name, n_classes)
-    fig, axes = plt.subplots(1, 2, figsize=figsize, sharex=True, sharey=True)
+    fig, ax = plt.subplots(figsize=figsize)
 
-    titles = ['Raw union (overlaps present)', 'Refined union (disjoint)']
-    unions_list = [class_unions, refined_unions]
+    for label in range(n_classes):
+        ax.scatter(
+            bounds[label]['X'][:, 0],
+            bounds[label]['X'][:, 1],
+            s=10,
+            alpha=0.35,
+            color=cmap(label),
+            edgecolors='none',
+        )
+        plot_geom(ax, class_unions[label], color=cmap(label), label=f'class {label}')
 
-    for ax, title, unions in zip(axes, titles, unions_list):
-        for label in range(n_classes):
-            # Plot sample points
-            ax.scatter(bounds[label]['X'][:, 0],
-                       bounds[label]['X'][:, 1],
-                       s=10, alpha=0.35, color=cmap(label), edgecolors='none')
-
-            # Plot union geometry
-            plot_geom(ax, unions[label], color=cmap(label), label=f'class {label}')
-
-        ax.set_aspect('equal')
-        ax.set_title(title)
-        ax.set_xlabel('x₁')
-        ax.set_ylabel('x₂')
-
-    axes[0].legend(loc='upper left', fontsize=7, ncol=2)
+    ax.set_aspect('equal')
+    ax.set_title('Certified class unions')
+    ax.set_xlabel('x₁')
+    ax.set_ylabel('x₂')
+    ax.legend(loc='upper left', fontsize=7, ncol=2)
     plt.tight_layout()
 
-    return fig, axes
+    return fig, ax
 
 
 def plot_overlap_heatmap(
@@ -206,7 +203,7 @@ def plot_overlap_heatmap(
     ax.set_yticklabels(labels)
     ax.set_xlabel('Class')
     ax.set_ylabel('Class')
-    ax.set_title('Pairwise overlap (raw unions)')
+    ax.set_title('Pairwise overlap (certified unions)')
 
     # Add text annotations
     for i in range(n):
