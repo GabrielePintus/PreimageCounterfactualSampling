@@ -47,6 +47,7 @@ warnings.filterwarnings(
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from counterfactuals.benchmarks import BenchmarkResult, MethodResult, QueryResult, create_default_registries
+from counterfactuals.core.base_classes import CounterfactualResult
 from counterfactuals.preprocessing import (
     IdentityTransform,
     InverseTransformModel,
@@ -964,7 +965,11 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
     for method_cfg in methods_cfg:
         method_name: str = method_cfg["name"]        # registry key — selects the implementation
         run_name: str = method_cfg.get("run_name", method_name)  # label used in results
-        method_params: Dict[str, Any] = method_cfg.get("params") or {}
+        method_params_raw: Dict[str, Any] = dict(method_cfg.get("params") or {})
+        method_params: Dict[str, Any] = dict(method_params_raw)
+        query_batch_size = 1
+        if method_name == "dice":
+            query_batch_size = max(1, int(method_params.pop("query_batch_size", 1)))
         print(f"\n[METHOD] {run_name}" + (f" (impl: {method_name})" if run_name != method_name else ""))
         resource_monitor = ResourceMonitor(
             enabled=ram_monitor_enabled,
@@ -972,6 +977,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         )
         method_metadata: Dict[str, Any] = {
             "ram_monitor_enabled": ram_monitor_enabled,
+            "query_batch_size": query_batch_size,
         }
         if ram_monitor_enabled:
             method_metadata["ram_monitor_interval_s"] = ram_monitor_interval_s
@@ -1024,7 +1030,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                 resource_monitor.stop()
                 method_metadata.update(resource_monitor.summarize())
                 benchmark_result.method_results.append(MethodResult(
-                    method=method_name, run_name=run_name, params=method_params,
+                    method=method_name, run_name=run_name, params=method_params_raw,
                     build_time_s=0.0, space="raw", metadata=method_metadata, query_results=qrs,
                 ))
                 continue
@@ -1055,7 +1061,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                 resource_monitor.stop()
                 method_metadata.update(resource_monitor.summarize())
                 benchmark_result.method_results.append(MethodResult(
-                    method=method_name, run_name=run_name, params=method_params,
+                    method=method_name, run_name=run_name, params=method_params_raw,
                     build_time_s=0.0, space="gen", metadata=method_metadata, query_results=qrs,
                 ))
                 continue
@@ -1074,125 +1080,166 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             if target_classes_all is not None
             else np.asarray([1 - int(y) for y in active_y_orig], dtype=np.int64)
         )
-        pbar = tqdm(
-            enumerate(zip(query_indices, active_queries, active_y_orig, task_targets)),
-            total=len(query_indices),
-            desc=f"  {run_name}",
-            unit="query",
-        )
-        for pos, (q_idx, x_active, y_orig, target_class) in pbar:
+        pbar = tqdm(total=len(query_indices), desc=f"  {run_name}", unit="query")
+
+        def _append_query_result(
+            pos: int,
+            q_idx: int,
+            target_class: int,
+            result: CounterfactualResult,
+            runtime_s: float,
+        ) -> None:
             x_orig_raw = x_queries[pos]   # raw feature vector, always
             target_class = int(target_class)
+            nonlocal n_ok, n_failed
+            if result.x_cf is None:
+                reason = str(result.metadata.get("reason", "no_counterfactual"))
+                query_results.append(_make_failure_query_result(
+                    q_idx=int(q_idx),
+                    runtime_s=runtime_s,
+                    error=reason,
+                    target_class=target_class,
+                    metadata=result.metadata,
+                    method_success=bool(result.success),
+                    target_reached=False,
+                ))
+                n_failed += 1
+                return
+            x_cf_active = np.asarray(result.x_cf, dtype=np.float32)
 
+            # For certcf: atlas outputs are already in raw/OHE space.
+            if embed_model is not None:
+                x_cf_row = x_cf_active
+                y_cf = int(model.predict(x_cf_row[None, :])[0])
+            else:
+                x_cf_row = np.asarray(transform.inverse_transform(x_cf_active), dtype=np.float32)
+                if ohe_blocks is not None:
+                    x_cf_row = np.asarray(snap_ohe_blocks(x_cf_row, ohe_blocks), dtype=np.float32)
+                y_cf = int(model.predict(x_cf_row[None, :])[0])
+
+            method_success = bool(result.success)
+            target_reached = (y_cf == target_class)
+            cf_success = method_success and target_reached
+            result_metadata = dict(result.metadata or {})
+            result_metadata.update(fit_label_metadata)
+            result_metadata["method_success"] = method_success
+            result_metadata["target_reached"] = target_reached
+            result_metadata["benchmark_success"] = cf_success
+            error = None
+            if not method_success:
+                error = str(
+                    result_metadata.get("reason")
+                    or result_metadata.get("error")
+                    or "method_reported_failure"
+                )
+
+            # Redundancy: fraction of changed features that can be individually
+            # reverted without flipping the CF out of the target class.
+            redundancy_val = 0.0
+            diff_raw = np.abs(x_cf_row.astype(np.float64) - x_orig_raw.astype(np.float64))
+            changed_feats = np.where(diff_raw > 1e-6)[0]
+            if len(changed_feats) > 0:
+                n_redundant = 0
+                for k in changed_feats:
+                    x_test = x_cf_row.copy().astype(np.float32)
+                    x_test[k] = x_orig_raw[k]
+                    if int(model.predict(x_test[None, :])[0]) == target_class:
+                        n_redundant += 1
+                redundancy_val = n_redundant / len(changed_feats)
+
+            l2, l1, l0, mad_l1 = _compute_query_metrics(
+                x_orig_raw, x_cf_row, n_features, mad_weights, _input_types
+            )
+            query_results.append(QueryResult(
+                query_idx=int(q_idx),
+                x_cf=x_cf_row,
+                y_cf=y_cf,
+                success=cf_success,
+                method_success=method_success,
+                target_reached=target_reached,
+                runtime_s=runtime_s,
+                error=error,
+                l2_distance=l2,
+                l1_distance=l1,
+                l0_sparsity=l0,
+                mad_l1_distance=mad_l1,
+                redundancy=redundancy_val,
+                target_class=target_class,
+                metadata=result_metadata,
+            ))
+            n_ok += int(cf_success)
+
+        for start in range(0, len(query_indices), query_batch_size):
+            end = min(start + query_batch_size, len(query_indices))
+            batch_len = end - start
+            batch_query_indices = query_indices[start:end]
+            batch_queries = active_queries[start:end]
+            batch_targets = np.asarray(task_targets[start:end], dtype=np.int64)
             t0 = time.perf_counter()
             try:
-                result = _call_with_timeout(
-                    lambda: method.generate(x=x_active, target_class=target_class),
-                    timeout_s,
-                )
-                runtime_s = time.perf_counter() - t0
-                if result.x_cf is None:
-                    reason = str(result.metadata.get("reason", "no_counterfactual"))
-                    query_results.append(_make_failure_query_result(
-                        q_idx=int(q_idx),
-                        runtime_s=runtime_s,
-                        error=reason,
-                        target_class=target_class,
-                        metadata=result.metadata,
-                        method_success=bool(result.success),
-                        target_reached=False,
-                    ))
-                    n_failed += 1
-                    pbar.set_postfix(valid=n_ok, failed=n_failed)
-                    continue
-                x_cf_active = np.asarray(result.x_cf, dtype=np.float32)
-
-                # For certcf: atlas outputs are already in raw/OHE space.
-                if embed_model is not None:
-                    x_cf_row = x_cf_active
-                    y_cf = int(model.predict(x_cf_row[None, :])[0])
-                else:
-                    x_cf_row = np.asarray(transform.inverse_transform(x_cf_active), dtype=np.float32)
-                    if ohe_blocks is not None:
-                        x_cf_row = np.asarray(snap_ohe_blocks(x_cf_row, ohe_blocks), dtype=np.float32)
-                    y_cf = int(model.predict(x_cf_row[None, :])[0])
-
-                method_success = bool(result.success)
-                target_reached = (y_cf == target_class)
-                cf_success = method_success and target_reached
-                result_metadata = dict(result.metadata or {})
-                result_metadata.update(fit_label_metadata)
-                result_metadata["method_success"] = method_success
-                result_metadata["target_reached"] = target_reached
-                result_metadata["benchmark_success"] = cf_success
-                error = None
-                if not method_success:
-                    error = str(
-                        result_metadata.get("reason")
-                        or result_metadata.get("error")
-                        or "method_reported_failure"
+                if method_name == "dice" and batch_len > 1:
+                    results_batch = _call_with_timeout(
+                        lambda: method.generate_batch(x=batch_queries, target_class=batch_targets),
+                        timeout_s * batch_len,
                     )
-
-                # Redundancy: fraction of changed features that can be individually
-                # reverted without flipping the CF out of the target class.
-                redundancy_val = 0.0
-                diff_raw = np.abs(x_cf_row.astype(np.float64) - x_orig_raw.astype(np.float64))
-                changed_feats = np.where(diff_raw > 1e-6)[0]
-                if len(changed_feats) > 0:
-                    n_redundant = 0
-                    for k in changed_feats:
-                        x_test = x_cf_row.copy().astype(np.float32)
-                        x_test[k] = x_orig_raw[k]
-                        if int(model.predict(x_test[None, :])[0]) == target_class:
-                            n_redundant += 1
-                    redundancy_val = n_redundant / len(changed_feats)
-
-                l2, l1, l0, mad_l1 = _compute_query_metrics(
-                    x_orig_raw, x_cf_row, n_features, mad_weights, _input_types
-                )
-                query_results.append(QueryResult(
-                    query_idx=int(q_idx),
-                    x_cf=x_cf_row,
-                    y_cf=y_cf,
-                    success=cf_success,
-                    method_success=method_success,
-                    target_reached=target_reached,
-                    runtime_s=runtime_s,
-                    error=error,
-                    l2_distance=l2,
-                    l1_distance=l1,
-                    l0_sparsity=l0,
-                    mad_l1_distance=mad_l1,
-                    redundancy=redundancy_val,
-                    target_class=target_class,
-                    metadata=result_metadata,
-                ))
-                n_ok += int(cf_success)
+                    runtime_s = time.perf_counter() - t0
+                    if len(results_batch) != batch_len:
+                        raise ValueError(
+                            f"generate_batch returned {len(results_batch)} results for batch_len={batch_len}"
+                        )
+                    per_query_runtime_s = runtime_s / batch_len
+                    for offset, result in enumerate(results_batch):
+                        pos = start + offset
+                        _append_query_result(
+                            pos=pos,
+                            q_idx=int(batch_query_indices[offset]),
+                            target_class=int(batch_targets[offset]),
+                            result=result,
+                            runtime_s=per_query_runtime_s,
+                        )
+                else:
+                    result = _call_with_timeout(
+                        lambda: method.generate(x=batch_queries[0], target_class=int(batch_targets[0])),
+                        timeout_s,
+                    )
+                    runtime_s = time.perf_counter() - t0
+                    _append_query_result(
+                        pos=start,
+                        q_idx=int(batch_query_indices[0]),
+                        target_class=int(batch_targets[0]),
+                        result=result,
+                        runtime_s=runtime_s,
+                    )
             except TimeoutError:
                 runtime_s = time.perf_counter() - t0
-                query_results.append(_make_failure_query_result(
-                    q_idx=int(q_idx),
-                    runtime_s=runtime_s,
-                    error="timeout",
-                    target_class=target_class,
-                    metadata={**fit_label_metadata, "reason": "timeout"},
-                ))
-                n_failed += 1
+                per_query_runtime_s = runtime_s / batch_len
+                for offset in range(batch_len):
+                    query_results.append(_make_failure_query_result(
+                        q_idx=int(batch_query_indices[offset]),
+                        runtime_s=per_query_runtime_s,
+                        error="timeout",
+                        target_class=int(batch_targets[offset]),
+                        metadata={**fit_label_metadata, "reason": "timeout"},
+                    ))
+                    n_failed += 1
             except Exception as exc:
                 runtime_s = time.perf_counter() - t0
-                query_results.append(_make_failure_query_result(
-                    q_idx=int(q_idx),
-                    runtime_s=runtime_s,
-                    error=str(exc),
-                    target_class=target_class,
-                    metadata={
-                        **fit_label_metadata,
-                        "reason": "exception",
-                        "exception_type": type(exc).__name__,
-                    },
-                ))
-                n_failed += 1
+                per_query_runtime_s = runtime_s / batch_len
+                for offset in range(batch_len):
+                    query_results.append(_make_failure_query_result(
+                        q_idx=int(batch_query_indices[offset]),
+                        runtime_s=per_query_runtime_s,
+                        error=str(exc),
+                        target_class=int(batch_targets[offset]),
+                        metadata={
+                            **fit_label_metadata,
+                            "reason": "exception",
+                            "exception_type": type(exc).__name__,
+                        },
+                    ))
+                    n_failed += 1
 
+            pbar.update(batch_len)
             pbar.set_postfix(valid=n_ok, failed=n_failed)
 
         resource_monitor.stop()
@@ -1200,7 +1247,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         benchmark_result.method_results.append(MethodResult(
             method=method_name,
             run_name=run_name,
-            params=method_params,
+            params=method_params_raw,
             build_time_s=build_time_s,
             space=space,
             metadata=method_metadata,

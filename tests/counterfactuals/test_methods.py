@@ -88,6 +88,62 @@ def test_dice_method_contract():
     assert int(model.predict(result.x_cf[None, :])[0]) == 1
 
 
+def test_dice_generate_batch_supports_per_query_targets():
+    torch = pytest.importorskip("torch")
+
+    from counterfactuals.models.torch_model import TorchModelWrapper
+    from counterfactuals.preprocessing.transforms import IdentityTransform, InverseTransformModel, OHEBlockSpec
+
+    class TinyTabularNet(torch.nn.Module):
+        def forward(self, x):
+            score = 2.5 * x[:, 0] + 4.0 * x[:, 2] - 4.0 * x[:, 1] - 0.5
+            return torch.stack([-score, score], dim=1)
+
+    x_train = np.array(
+        [
+            [0.1, 1.0, 0.0],
+            [0.2, 1.0, 0.0],
+            [0.7, 0.0, 1.0],
+            [0.9, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 0, 1, 1], dtype=np.int64)
+    model = InverseTransformModel(
+        base_model=TorchModelWrapper(model=TinyTabularNet(), device="cpu"),
+        transform=IdentityTransform(),
+        ohe_blocks=[OHEBlockSpec(start=1, end=3)],
+    )
+    method = DiceMethod(
+        model=model,
+        total_cfs=1,
+        diversity_weight=0.0,
+        min_iter=25,
+        max_iter=250,
+        posthoc_sparsity_param=0.0,
+        random_seed=10,
+    )
+    method.fit(x_train=x_train, y_train=y_train)
+
+    queries = np.array(
+        [
+            [0.15, 1.0, 0.0],
+            [0.85, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    targets = np.array([1, 0], dtype=np.int64)
+    results = method.generate_batch(x=queries, target_class=targets)
+
+    assert len(results) == 2
+    for result, target in zip(results, targets):
+        assert result.success
+        assert result.x_cf.shape == (3,)
+        assert np.isclose(result.x_cf[1:3].sum(), 1.0)
+        assert set(np.unique(result.x_cf[1:3])).issubset({0.0, 1.0})
+        assert int(model.predict(result.x_cf[None, :])[0]) == int(target)
+
+
 def test_dice_validity_mask_uses_argmax():
     method = DiceMethod(model=ThresholdModel(), random_seed=10)
 

@@ -123,15 +123,29 @@ class DiceMethod(BaseCounterfactualMethod):
 
     def generate(self, x: np.ndarray, target_class: Optional[int] = None) -> CounterfactualResult:
         """Run the DiCE gradient loop and return the best valid post-hoc sparse counterfactual."""
+        return self.generate_batch(x=np.asarray(x, dtype=np.float32).reshape(1, -1), target_class=target_class)[0]
+
+    def generate_batch(
+        self,
+        x: np.ndarray,
+        target_class: Optional[int | Sequence[int] | np.ndarray] = None,
+    ) -> list[CounterfactualResult]:
+        """Run the DiCE gradient loop for a batch of queries."""
         if not self._is_fitted:
             raise RuntimeError("Method is not fitted. Call fit() before generate().")
 
-        x_query = np.asarray(x, dtype=np.float32).reshape(-1)
-        target_class = self.resolve_target_class(x=x_query, target_class=target_class)
+        x_batch = np.asarray(x, dtype=np.float32)
+        if x_batch.ndim == 1:
+            x_batch = x_batch.reshape(1, -1)
+        target_classes = self.resolve_target_classes(x=x_batch, target_class=target_class)
 
+        assert torch is not None
+        batch_size, n_features = x_batch.shape
+        x_batch_t = torch.tensor(x_batch, dtype=torch.float32, device=self.device)
+        target_classes_t = torch.tensor(target_classes, dtype=torch.int64, device=self.device)
         candidates = torch.nn.Parameter(
             torch.tensor(
-                self.initialize_candidates(x_query.shape[0]),
+                self.initialize_candidates_batch(batch_size=batch_size, d=n_features),
                 dtype=torch.float32,
                 device=self.device,
             )
@@ -140,30 +154,44 @@ class DiceMethod(BaseCounterfactualMethod):
 
         prev_loss = 0.0
         converge_count = 0
-        best_backup_eval = None  # torch.Tensor on self.device, set when all candidates are valid
-        final_loss = np.inf
+        best_backup_eval = None  # torch.Tensor on self.device, set when one query's rounded CF set is fully valid
+        has_backup_t = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        final_losses = np.full(batch_size, np.inf, dtype=np.float32)
         n_iter = self.max_iter
 
         for itr in range(self.max_iter):
             # The optimisation variable stays continuous during gradient updates;
             # projection to valid OHE vertices only happens for evaluation/backup.
             optimizer.zero_grad()
-            probs = self._predict_proba(candidates)
-            loss = self.objective(cfs=candidates, probs=probs, x_query=x_query, target_class=target_class)
+            probs = self._predict_proba_batch(candidates)
+            losses_t = self.objective_batch(
+                cfs=candidates,
+                probs=probs,
+                x_query=x_batch_t,
+                target_class=target_classes_t,
+            )
+            loss = torch.mean(losses_t)
             loss.backward()
             optimizer.step()
 
             final_loss = float(loss.detach().cpu().item())
+            final_losses = losses_t.detach().cpu().numpy().astype(np.float32)
             loss_diff = abs(prev_loss - final_loss)
             prev_loss = final_loss
 
             # Track the most recent fully valid rounded batch as a backup in case the
             # final iterate is not valid after categorical snapping. All operations stay
             # on-device; no GPU→CPU transfer happens here.
-            rounded_t = self.round_cfs_to_eval_torch(candidates)
-            valid_mask_t, _ = self.validity_mask_eval_torch(rounded_t, target_class)
-            if valid_mask_t.all():
-                best_backup_eval = rounded_t.detach().clone()
+            rounded_t = self.round_cfs_to_eval_torch_batch(candidates)
+            valid_mask_t, _ = self.validity_mask_eval_torch_batch(rounded_t, target_classes_t)
+            fully_valid_t = valid_mask_t.all(dim=1)
+            if fully_valid_t.any():
+                rounded_detached = rounded_t.detach()
+                if best_backup_eval is None:
+                    best_backup_eval = rounded_detached.clone()
+                else:
+                    best_backup_eval[fully_valid_t] = rounded_detached[fully_valid_t]
+                has_backup_t = has_backup_t | fully_valid_t
 
             if itr + 1 < self.min_iter:
                 continue
@@ -173,67 +201,102 @@ class DiceMethod(BaseCounterfactualMethod):
             else:
                 converge_count = 0
 
-            if converge_count >= self.loss_converge_maxiter and valid_mask_t.all():
+            if converge_count >= self.loss_converge_maxiter and torch.all(fully_valid_t | has_backup_t):
                 n_iter = itr + 1
                 break
 
         # Resolve the final candidate tensor on-device, then move to CPU once.
-        final_t = self.round_cfs_to_eval_torch(candidates)
-        valid_mask_t, probs_target_t = self.validity_mask_eval_torch(final_t, target_class)
-        if not valid_mask_t.all() and best_backup_eval is not None:
-            final_t = best_backup_eval
-            valid_mask_t, probs_target_t = self.validity_mask_eval_torch(final_t, target_class)
-        candidates_eval = final_t.cpu().numpy()
+        final_t = self.round_cfs_to_eval_torch_batch(candidates)
+        valid_mask_t, probs_target_t = self.validity_mask_eval_torch_batch(final_t, target_classes_t)
+        if best_backup_eval is not None:
+            restore_mask_t = (~valid_mask_t.all(dim=1)) & has_backup_t
+            if restore_mask_t.any():
+                final_t = final_t.clone()
+                final_t[restore_mask_t] = best_backup_eval[restore_mask_t]
+                valid_mask_t, probs_target_t = self.validity_mask_eval_torch_batch(final_t, target_classes_t)
+
+        candidates_eval = final_t.cpu().numpy().astype(np.float32)
         valid_mask = valid_mask_t.cpu().numpy()
-        probs_target = probs_target_t.cpu().numpy()
+        probs_target = probs_target_t.cpu().numpy().astype(np.float32)
 
-        if np.any(valid_mask):
-            valid_eval = candidates_eval[valid_mask]
-            # Post-hoc sparsity is only applied to already-valid counterfactuals,
-            # matching the original DiCE workflow.
-            valid_eval = self.apply_posthoc_sparsity(
-                candidates_eval=valid_eval,
-                x_query=x_query,
-                target_class=target_class,
-            )
-            valid_mask_post, probs_target_post = self.validity_mask_eval(valid_eval, target_class=target_class)
-            if np.any(valid_mask_post):
-                valid_eval = valid_eval[valid_mask_post]
-                probs_target = probs_target_post[valid_mask_post]
+        results: list[CounterfactualResult] = []
+        for row_idx in range(batch_size):
+            x_query = x_batch[row_idx]
+            target_class_i = int(target_classes[row_idx])
+            candidates_eval_i = candidates_eval[row_idx]
+            valid_mask_i = valid_mask[row_idx]
+            probs_target_i = probs_target[row_idx]
+
+            if np.any(valid_mask_i):
+                valid_eval = candidates_eval_i[valid_mask_i]
+                # Post-hoc sparsity is only applied to already-valid counterfactuals,
+                # matching the original DiCE workflow.
+                valid_eval = self.apply_posthoc_sparsity(
+                    candidates_eval=valid_eval,
+                    x_query=x_query,
+                    target_class=target_class_i,
+                )
+                valid_mask_post, probs_target_post = self.validity_mask_eval(valid_eval, target_class=target_class_i)
+                if np.any(valid_mask_post):
+                    valid_eval = valid_eval[valid_mask_post]
+                    probs_target_i = probs_target_post[valid_mask_post]
+                else:
+                    probs_target_i = np.asarray([], dtype=np.float32)
             else:
-                probs_target = np.asarray([], dtype=np.float32)
-        else:
-            valid_eval = np.empty((0, x_query.shape[0]), dtype=np.float32)
+                valid_eval = np.empty((0, x_query.shape[0]), dtype=np.float32)
 
-        if valid_eval.shape[0] == 0:
-            fallback = candidates_eval[0].astype(np.float32)
-            return CounterfactualResult(
-                x_cf=fallback,
-                success=False,
-                distance=float(np.linalg.norm(fallback - x_query, ord=2)),
+            if valid_eval.shape[0] == 0:
+                fallback = candidates_eval_i[0].astype(np.float32)
+                results.append(CounterfactualResult(
+                    x_cf=fallback,
+                    success=False,
+                    distance=float(np.linalg.norm(fallback - x_query, ord=2)),
+                    metadata={
+                        "target_class": target_class_i,
+                        "reason": "no_valid_candidate",
+                        "optimization_loss": float(final_losses[row_idx]),
+                        "iterations": int(n_iter),
+                    },
+                ))
+                continue
+
+            selected = self.select_best_valid(valid_eval=valid_eval, x_query=x_query)
+            distance = float(np.linalg.norm(selected - x_query, ord=2))
+            results.append(CounterfactualResult(
+                x_cf=selected.astype(np.float32),
+                success=True,
+                distance=distance,
                 metadata={
-                    "target_class": target_class,
-                    "reason": "no_valid_candidate",
-                    "optimization_loss": final_loss,
+                    "target_class": target_class_i,
+                    "n_valid": int(valid_eval.shape[0]),
+                    "n_candidates": int(candidates_eval_i.shape[0]),
+                    "optimization_loss": float(final_losses[row_idx]),
                     "iterations": int(n_iter),
+                    "mean_target_proba": float(np.mean(probs_target_i)) if probs_target_i.size else float("nan"),
                 },
-            )
+            ))
+        return results
 
-        selected = self.select_best_valid(valid_eval=valid_eval, x_query=x_query)
-        distance = float(np.linalg.norm(selected - x_query, ord=2))
-        return CounterfactualResult(
-            x_cf=selected.astype(np.float32),
-            success=True,
-            distance=distance,
-            metadata={
-                "target_class": target_class,
-                "n_valid": int(valid_eval.shape[0]),
-                "n_candidates": int(candidates_eval.shape[0]),
-                "optimization_loss": final_loss,
-                "iterations": int(n_iter),
-                "mean_target_proba": float(np.mean(probs_target)) if probs_target.size else float("nan"),
-            },
-        )
+    def resolve_target_classes(
+        self,
+        x: np.ndarray,
+        target_class: Optional[int | Sequence[int] | np.ndarray],
+    ) -> np.ndarray:
+        """Resolve one target class per query, broadcasting a scalar when needed."""
+        x_batch = np.asarray(x, dtype=np.float32)
+        if x_batch.ndim != 2:
+            raise ValueError("x must be a 2D array for batched target resolution")
+        if target_class is None:
+            return np.asarray(
+                [self.resolve_target_class(x=row, target_class=None) for row in x_batch],
+                dtype=np.int64,
+            )
+        if np.isscalar(target_class):
+            return np.full(x_batch.shape[0], int(target_class), dtype=np.int64)
+        target_classes = np.asarray(target_class, dtype=np.int64).reshape(-1)
+        if target_classes.shape[0] != x_batch.shape[0]:
+            raise ValueError("target_class must be scalar or have one entry per query")
+        return target_classes
 
     def _unwrap_model(self, model: ModelInterface, n_features: int) -> tuple:
         """Extract the raw torch module, device, and OHE block specs from the model wrapper."""
@@ -328,6 +391,10 @@ class DiceMethod(BaseCounterfactualMethod):
         """Draw initial candidate counterfactuals from a standard normal distribution."""
         return self.rng.standard_normal(size=(self.total_cfs, d)).astype(np.float32)
 
+    def initialize_candidates_batch(self, batch_size: int, d: int) -> np.ndarray:
+        """Draw one candidate set per query for batched optimisation."""
+        return self.rng.standard_normal(size=(batch_size, self.total_cfs, d)).astype(np.float32)
+
     def build_optimizer(self, params: Sequence):
         """Create the Adam optimizer used to update the candidate tensor (paper's optimizer choice)."""
         assert torch is not None
@@ -342,6 +409,12 @@ class DiceMethod(BaseCounterfactualMethod):
             return torch.stack([1.0 - p1, p1], dim=1)
         return torch.softmax(logits, dim=1)
 
+    def _predict_proba_batch(self, cfs):
+        """Run the torch module on batched candidates and restore the batch shape."""
+        flat = cfs.reshape(-1, cfs.shape[-1])
+        probs = self._predict_proba(flat)
+        return probs.reshape(cfs.shape[0], cfs.shape[1], -1)
+
     def _predict_proba_torch_no_grad(self, cfs):
         """Run the torch module on an on-device tensor without gradient tracking (used for in-loop validity checks)."""
         assert torch is not None
@@ -351,6 +424,12 @@ class DiceMethod(BaseCounterfactualMethod):
                 p1 = torch.sigmoid(logits.reshape(-1))
                 return torch.stack([1.0 - p1, p1], dim=1)
             return torch.softmax(logits, dim=1)
+
+    def _predict_proba_torch_no_grad_batch(self, cfs):
+        """Run the torch module on batched candidates without gradient tracking."""
+        flat = cfs.reshape(-1, cfs.shape[-1])
+        probs = self._predict_proba_torch_no_grad(flat)
+        return probs.reshape(cfs.shape[0], cfs.shape[1], -1)
 
     def round_cfs_to_eval_torch(self, cfs):
         """Snap each OHE block to a one-hot vertex via argmax, returning an on-device tensor.
@@ -366,11 +445,26 @@ class DiceMethod(BaseCounterfactualMethod):
             result[:, start:end] = torch.zeros_like(block).scatter_(1, winners, 1.0)
         return result
 
+    def round_cfs_to_eval_torch_batch(self, cfs):
+        """Snap each OHE block to a valid one-hot vertex for a batched candidate tensor."""
+        flat = cfs.reshape(-1, cfs.shape[-1])
+        rounded = self.round_cfs_to_eval_torch(flat)
+        return rounded.reshape(cfs.shape[0], cfs.shape[1], cfs.shape[2])
+
     def validity_mask_eval_torch(self, rounded, target_class: int):
         """Return (valid_mask, probs_target) as on-device tensors; valid iff argmax(probs) == target_class."""
         probs = self._predict_proba_torch_no_grad(rounded)
         valid_mask = torch.argmax(probs, dim=1) == target_class
         probs_target = probs[:, target_class]
+        return valid_mask, probs_target
+
+    def validity_mask_eval_torch_batch(self, rounded, target_class):
+        """Return batched validity masks and target probabilities."""
+        assert torch is not None
+        probs = self._predict_proba_torch_no_grad_batch(rounded)
+        valid_mask = torch.argmax(probs, dim=2) == target_class[:, None]
+        gather_idx = target_class[:, None, None].expand(-1, probs.shape[1], 1)
+        probs_target = torch.gather(probs, dim=2, index=gather_idx).squeeze(-1)
         return valid_mask, probs_target
 
     def predict_proba_eval(self, cfs_eval: np.ndarray) -> np.ndarray:
@@ -402,6 +496,21 @@ class DiceMethod(BaseCounterfactualMethod):
         regularization = self.categorical_regularizer(cfs_norm=cfs)
         return target_loss + self.proximity_weight * proximity - self.diversity_weight * diversity + self.categorical_penalty * regularization
 
+    def objective_batch(self, cfs, probs, x_query, target_class):
+        """Vectorized DiCE objective for a batch of queries."""
+        assert torch is not None and F is not None and self.feature_weights_t is not None
+        target_loss = self.yloss_batch(probs=probs, target_class=target_class)
+        weights = self.feature_weights_t
+        proximity = torch.sum(
+            torch.abs(cfs - x_query[:, None, :]) * weights[None, None, :],
+            dim=2,
+        )
+        d_cont = float(len(self.continuous_indices)) if self.continuous_indices is not None and len(self.continuous_indices) > 0 else 1.0
+        proximity = torch.mean(proximity, dim=1) / d_cont
+        diversity = self.diversity_batch(cfs_norm=cfs, weights=weights)
+        regularization = self.categorical_regularizer_batch(cfs_norm=cfs)
+        return target_loss + self.proximity_weight * proximity - self.diversity_weight * diversity + self.categorical_penalty * regularization
+
     def yloss(self, probs, target_class: int):
         """Hinge loss on the model log-odds: mean(max(0, 1 - z * logit(p))), z=±1 for binary, z=+1 for multiclass target."""
         assert torch is not None and F is not None
@@ -414,6 +523,20 @@ class DiceMethod(BaseCounterfactualMethod):
         target_prob = torch.clamp(probs[:, target_class], 1e-7, 1.0 - 1e-7)
         logits = torch.log(target_prob / (1.0 - target_prob))
         return torch.mean(F.relu(1.0 - logits))
+
+    def yloss_batch(self, probs, target_class):
+        """Vectorized hinge validity loss for one target per query."""
+        assert torch is not None and F is not None
+        if probs.shape[2] == 2:
+            p_pos = torch.clamp(probs[:, :, 1], 1e-7, 1.0 - 1e-7)
+            logits = torch.log(p_pos / (1.0 - p_pos))
+            y_signed = torch.where(target_class == 1, 1.0, -1.0).to(dtype=logits.dtype)
+            return torch.mean(F.relu(1.0 - y_signed[:, None] * logits), dim=1)
+
+        gather_idx = target_class[:, None, None].expand(-1, probs.shape[1], 1)
+        target_prob = torch.clamp(torch.gather(probs, dim=2, index=gather_idx).squeeze(-1), 1e-7, 1.0 - 1e-7)
+        logits = torch.log(target_prob / (1.0 - target_prob))
+        return torch.mean(F.relu(1.0 - logits), dim=1)
 
     def diversity(self, cfs_norm, weights):
         """DPP determinant diversity: det(K) where K_ij = 1 / (1 + weighted-L1(c_i, c_j)) (paper eq. 4)."""
@@ -428,6 +551,20 @@ class DiceMethod(BaseCounterfactualMethod):
         kernel = kernel + 1e-4 * torch.eye(kernel.shape[0], device=kernel.device)
         return torch.det(kernel)
 
+    def diversity_batch(self, cfs_norm, weights):
+        """Vectorized DPP diversity, computed independently within each query."""
+        assert torch is not None
+        if cfs_norm.shape[1] <= 1:
+            return torch.zeros(cfs_norm.shape[0], device=cfs_norm.device)
+        pairwise = torch.sum(
+            torch.abs(cfs_norm.unsqueeze(2) - cfs_norm.unsqueeze(1)) * weights.view(1, 1, 1, -1),
+            dim=3,
+        )
+        kernel = 1.0 / (1.0 + pairwise)
+        eye = torch.eye(kernel.shape[-1], device=kernel.device).unsqueeze(0)
+        kernel = kernel + 1e-4 * eye
+        return torch.det(kernel)
+
     def categorical_regularizer(self, cfs_norm):
         """Penalise deviation from the OHE simplex: sum((sum(block) - 1)^2) over all OHE blocks."""
         assert torch is not None
@@ -436,6 +573,17 @@ class DiceMethod(BaseCounterfactualMethod):
         penalty = torch.tensor(0.0, device=cfs_norm.device)
         for start, end in self.ohe_blocks:
             penalty = penalty + torch.sum((torch.sum(cfs_norm[:, start:end], dim=1) - 1.0) ** 2)
+        return penalty
+
+    def categorical_regularizer_batch(self, cfs_norm):
+        """Vectorized OHE simplex regularizer, one value per query."""
+        assert torch is not None
+        if not self.ohe_blocks:
+            return torch.zeros(cfs_norm.shape[0], device=cfs_norm.device)
+        penalty = torch.zeros(cfs_norm.shape[0], device=cfs_norm.device)
+        for start, end in self.ohe_blocks:
+            block_sum = torch.sum(cfs_norm[:, :, start:end], dim=2) - 1.0
+            penalty = penalty + torch.sum(block_sum ** 2, dim=1)
         return penalty
 
     def round_cfs_to_eval(self, cfs: np.ndarray) -> np.ndarray:
@@ -604,4 +752,3 @@ class DiceMethod(BaseCounterfactualMethod):
         weighted_l1 = np.sum(np.abs(valid_eval - x_query[None, :]) * self.feature_weights[None, :], axis=1)
         idx = int(np.argmin(weighted_l1))
         return valid_eval[idx]
-

@@ -14,6 +14,7 @@ contributors and coding agents working in this repository.
 - `06-history.md`: lightweight operational history of major repository decisions
 - `07-absolute-certification-report.md`: benchmark/result semantics for certification reporting
 - `08-method-validation-playbook.md`: benchmarking, metrics, and plot guidelines for method evaluation
+- `09-boundary-manifold-sampling-ideas.md`: working note on decision-boundary walking and manifold sampling as future CertCF support-generation ideas
 
 ## Why This Exists
 

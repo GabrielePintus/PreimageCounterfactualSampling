@@ -28,7 +28,7 @@ methods:
     run_name: face
     params:
       density_estimator:
-        name: kde
+        name: knn
       norm: 1
       tp: 0.5
       epsilon: 3.3

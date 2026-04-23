@@ -128,6 +128,10 @@ methods:
       device: cuda
       norm: 1
       eps_alpha: 0.25
+
+# Method-specific runner knobs:
+# - DiCE accepts `query_batch_size` in `params`; default is 1, and values > 1
+#   let the benchmark call `DiceMethod.generate_batch(...)` on query chunks.
       batch_size: 256
       atlas_subsample_method: kmedoids
       atlas_subsample_space: input

@@ -43,6 +43,7 @@ Important parameters:
 Epsilon strategies:
 - `ConstantEpsStrategy(eps)` for uniform radius
 - `NearestOppositeClassClearanceStrategy(alpha)` for per-sample adaptive radius
+  computed in the same norm used by the atlas
 
 ## Query Phase (Online)
 

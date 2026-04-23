@@ -1,0 +1,41 @@
+seed: 42
+output: results/dice_test.parquet
+timeout_per_sample: 120
+resource_monitor:
+  enabled: true
+  interval_s: 1.0
+
+
+methods:
+
+  # - name: dice
+  #   run_name: dice
+  #   params:
+  #     total_cfs: 1
+  #     diversity_weight: 0.0
+  #     proximity_weight: 1.0
+  #     min_iter: 50
+
+  - name: dice
+    run_name: dice_batch50
+    params:
+      total_cfs: 1
+      diversity_weight: 0.0
+      proximity_weight: 1.0
+      min_iter: 50
+      max_iter: 500
+      query_batch_size: 250
+
+datasets:
+
+  - name: adult
+    sampling:
+      n_queries: 1000
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/adult_classifier/best.ckpt
+        device: cuda
+        dataset_module: adult
+        hidden_dims: [64, 32]
+        dropout: 0.2
