@@ -1,5 +1,5 @@
 seed: 42
-output: results/benchmark_full_reduced5000_nodice_L2.parquet
+output: results/benchmark_full_reduced5000_L1.parquet
 timeout_per_sample: 120
 resource_monitor:
   enabled: true
@@ -11,12 +11,12 @@ methods:
   - name: nearest_neighbor
     run_name: nn
     params:
-      norm: 2
+      norm: 1
 
   - name: growing_spheres
     run_name: gs
     params:
-      norm: 2
+      norm: 1
       max_radius: 10.0
       radius_step: 0.25
       n_in_layer: 1000
@@ -35,15 +35,28 @@ methods:
     run_name: certcf
     params:
       device: cuda
-      norm: 2
+      norm: 1
       eps_alpha: [0.25, 0.45, 0.65, 0.85, 0.99]
       batch_size: 256
       query_method: nearest_anchor
-      query_k_candidates: 3
+      query_k_candidates: 5
       atlas_subsample_method: boundary_random
       atlas_boundary_beta: 0.5
       atlas_subsample_space: input
       k_per_class: 5000
+      cvxpy_solvers: [CLARABEL]
+      cvxpy_solver_options:
+        CLARABEL:
+          max_iter: 100
+          tol_gap_abs: 1.0e-3
+          tol_gap_rel: 1.0e-5
+          tol_feas: 1.0e-8
+      cvxpy_accept_statuses:
+        CLARABEL: [optimal]
+      ohe_decode_mode: beam_then_exact
+      decode_beam_width: 8
+      decode_beam_branch_top_k: 3
+      decode_beam_max_solver_calls: 32
 
 datasets:
 

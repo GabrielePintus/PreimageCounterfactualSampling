@@ -1,5 +1,5 @@
 seed: 42
-output: results/benchmark_full_reduced5000_nodice_L1.parquet
+output: results/benchmark_full_reduced5000_L2.parquet
 timeout_per_sample: 120
 resource_monitor:
   enabled: true
@@ -11,12 +11,12 @@ methods:
   - name: nearest_neighbor
     run_name: nn
     params:
-      norm: 1
+      norm: 2
 
   - name: growing_spheres
     run_name: gs
     params:
-      norm: 1
+      norm: 2
       max_radius: 10.0
       radius_step: 0.25
       n_in_layer: 1000
@@ -35,7 +35,7 @@ methods:
     run_name: certcf
     params:
       device: cuda
-      norm: 1
+      norm: 2
       eps_alpha: [0.25, 0.45, 0.65, 0.85, 0.99]
       batch_size: 256
       query_method: nearest_anchor

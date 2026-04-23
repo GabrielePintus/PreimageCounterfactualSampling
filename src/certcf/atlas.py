@@ -558,6 +558,20 @@ class CertCFAtlas:
         return int(size)
 
     @staticmethod
+    def _anchor_bbox_lower_bounds(
+        x_query: np.ndarray,
+        centers: np.ndarray,
+        eps_array: np.ndarray,
+        distance_norm: int | float,
+    ) -> np.ndarray:
+        diff = np.maximum(0.0, np.abs(x_query[None, :] - centers) - eps_array[:, None])
+        if distance_norm == 1:
+            return np.sum(diff, axis=1)
+        if distance_norm == np.inf:
+            return np.max(diff, axis=1)
+        return np.linalg.norm(diff, ord=distance_norm, axis=1)
+
+    @staticmethod
     def _apply_fixed_ohe_assignments(
         x: np.ndarray,
         ohe_slices: List[Tuple[int, int]],
@@ -1663,6 +1677,12 @@ class CertCFAtlas:
             k=bvh.n_polytopes,
             distance_norm=self.distance_norm,
         )
+        lower_bounds = self._anchor_bbox_lower_bounds(
+            np.asarray(x_query, dtype=np.float64),
+            np.asarray(bd["X"], dtype=np.float64),
+            np.asarray(bd["eps"], dtype=np.float64),
+            self.distance_norm,
+        )
         primary_indices = sorted_candidate_indices[:k]
         fallback_indices = sorted_candidate_indices[k:]
 
@@ -1671,7 +1691,17 @@ class CertCFAtlas:
         best_idx: Optional[int] = None
         n_qp = 0
         fallback_used = False
+        n_pruned_by_bound = 0
+        best_lower_bound_at_termination = np.nan
         for idx in primary_indices:
+            lower_bound = float(lower_bounds[int(idx)])
+            if lower_bound >= best_dist:
+                n_pruned_by_bound += 1
+                if np.isnan(best_lower_bound_at_termination):
+                    best_lower_bound_at_termination = lower_bound
+                else:
+                    best_lower_bound_at_termination = min(best_lower_bound_at_termination, lower_bound)
+                continue
             point, dist = project_fn(int(idx), best_dist)
             n_qp += 1
             if dist < best_dist:
@@ -1686,6 +1716,10 @@ class CertCFAtlas:
         if best_point is None:
             fallback_used = True
             for idx in fallback_indices:
+                lower_bound = float(lower_bounds[int(idx)])
+                if lower_bound >= best_dist:
+                    n_pruned_by_bound += 1
+                    continue
                 point, dist = project_fn(int(idx), best_dist)
                 n_qp += 1
                 if point is not None and np.isfinite(dist):
@@ -1693,6 +1727,7 @@ class CertCFAtlas:
                     best_dist = dist
                     best_idx = int(idx)
                     break
+            best_lower_bound_at_termination = np.nan
 
         query_loop_time_s = time.perf_counter() - t0
         profiling = {
@@ -1704,7 +1739,9 @@ class CertCFAtlas:
             "nearest_anchor_fallback_used": float(fallback_used),
             "n_candidates_considered": float(n_qp),
             "n_candidates_total": float(bvh.n_polytopes),
-            "n_candidates_pruned_by_top_k": float(max(0, bvh.n_polytopes - n_qp)),
+            "n_candidates_pruned_by_top_k": float(max(0, bvh.n_polytopes - k) if not fallback_used else 0),
+            "n_candidates_pruned_by_bound": float(n_pruned_by_bound),
+            "best_lower_bound_at_termination": float(best_lower_bound_at_termination),
         }
         profiling.update(best_decode_profile[0])
         return best_point, best_dist, best_idx, n_qp, profiling

@@ -101,6 +101,17 @@ def _manual_atlas(
     atlas.distance_norm = 2
     atlas.ohe_slices = ohe_slices
     atlas.solver_maxiter = 100
+    atlas.query_parallelism = 1
+    atlas.ohe_decode_mode = "exact"
+    atlas.decode_beam_width = 8
+    atlas.decode_beam_branch_top_k = 3
+    atlas.decode_beam_max_solver_calls = 32
+    atlas.cvxpy_solvers = ["CLARABEL", "SCS"]
+    atlas.cvxpy_solver_options = {}
+    atlas.cvxpy_accept_statuses = {
+        "CLARABEL": ["optimal"],
+        "SCS": ["optimal", "optimal_inaccurate"],
+    }
     atlas.class_labels = [2, 5]
     atlas.label_to_index = {2: 0, 5: 1}
     atlas.n_classes = 2
@@ -144,6 +155,10 @@ def test_certcf_method_forwards_delta_and_robust_norm():
                 distance=1.25,
                 profiling={"ok": True},
             )
+
+        def find_counterfactual_batch(self, **kwargs):
+            result = self.find_counterfactual(**kwargs)
+            return [result]
 
     method = CertCF(model=object(), delta=0.3, robust_norm="inf", query_k_candidates=3, random_seed=7)
     method._is_fitted = True
@@ -488,6 +503,9 @@ def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
     init_calls = []
 
     class FakeAtlas:
+        _normalize_cvxpy_solver_config = staticmethod(CertCFAtlas._normalize_cvxpy_solver_config)
+        _normalize_ohe_decode_config = staticmethod(CertCFAtlas._normalize_ohe_decode_config)
+
         def __init__(self, *args, **kwargs):
             init_calls.append(kwargs)
 
@@ -586,7 +604,9 @@ def test_find_counterfactual_nearest_anchor_limits_projection_budget(monkeypatch
     assert result.profiling["n_candidates_total"] == 3.0
     assert result.profiling["n_candidates_considered"] == 2.0
     assert result.profiling["n_candidates_pruned_by_top_k"] == 1.0
+    assert result.profiling["n_candidates_pruned_by_bound"] == 0.0
     assert result.profiling["nearest_anchor_fallback_used"] == 0.0
+    assert np.isnan(result.profiling["best_lower_bound_at_termination"])
 
 
 def test_find_counterfactual_nearest_anchor_falls_back_after_topk_failure(monkeypatch):
@@ -645,6 +665,125 @@ def test_find_counterfactual_nearest_anchor_falls_back_after_topk_failure(monkey
     assert result.profiling["nearest_anchor_fallback_used"] == 1.0
     assert result.profiling["n_candidates_considered"] == 3.0
     assert result.profiling["n_candidates_pruned_by_top_k"] == 0.0
+    assert result.profiling["n_candidates_pruned_by_bound"] == 0.0
+    assert np.isnan(result.profiling["best_lower_bound_at_termination"])
+
+
+def test_find_counterfactual_nearest_anchor_prunes_primary_candidates_by_bound(monkeypatch):
+    atlas = _manual_atlas(
+        centers_by_label={
+            2: np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
+            5: np.array(
+                [
+                    [1.0, 1.5, 0.0],
+                    [2.5, 2.5, 0.0],
+                    [0.5, 0.8, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+        },
+        eps=0.0,
+    )
+
+    class FakeCandidateIndex:
+        n_polytopes = 3
+
+        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
+            del x_query, distance_norm
+            assert k == 3
+            return [2, 0, 1]
+
+    atlas.bvh_indices[5] = FakeCandidateIndex()
+    calls = []
+
+    def fake_make_project_fn(x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
+        del x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims
+        projection_time_s = [0.0]
+        best_decode_profile = [{}]
+        distances = {2: 0.5, 0: 0.4, 1: 0.1}
+
+        def project_fn(idx, incumbent):
+            calls.append((idx, incumbent))
+            return np.full(3, float(idx), dtype=np.float64), distances[idx]
+
+        return project_fn, projection_time_s, best_decode_profile
+
+    monkeypatch.setattr(atlas, "_make_project_fn", fake_make_project_fn)
+
+    result = atlas.find_counterfactual(
+        x_query=np.array([0.2, 0.8, 0.0], dtype=np.float32),
+        target_class=5,
+        method="nearest_anchor",
+        query_k_candidates=3,
+    )
+
+    assert result.success is True
+    assert result.anchor_idx == 2
+    assert result.n_qp_solved == 1
+    assert np.isclose(result.distance, 0.5)
+    assert [idx for idx, _ in calls] == [2]
+    assert result.profiling["n_candidates_considered"] == 1.0
+    assert result.profiling["n_candidates_pruned_by_bound"] == 2.0
+    assert result.profiling["n_candidates_pruned_by_top_k"] == 0.0
+    assert result.profiling["nearest_anchor_fallback_used"] == 0.0
+    assert np.isclose(result.profiling["best_lower_bound_at_termination"], np.linalg.norm(np.array([1.0, 1.5, 0.0]) - np.array([0.2, 0.8, 0.0])))
+
+
+def test_find_counterfactual_nearest_anchor_does_not_prune_before_first_incumbent(monkeypatch):
+    atlas = _manual_atlas(
+        centers_by_label={
+            2: np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
+            5: np.array(
+                [
+                    [0.0, 1.0, 0.0],
+                    [10.0, 10.0, 0.0],
+                    [0.5, 0.8, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+        },
+        eps=0.0,
+    )
+
+    class FakeCandidateIndex:
+        n_polytopes = 3
+
+        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
+            del x_query, distance_norm
+            assert k == 3
+            return [2, 0, 1]
+
+    atlas.bvh_indices[5] = FakeCandidateIndex()
+    calls = []
+
+    def fake_make_project_fn(x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
+        del x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims
+        projection_time_s = [0.0]
+        best_decode_profile = [{}]
+
+        def project_fn(idx, incumbent):
+            calls.append((idx, incumbent))
+            if idx in {2, 0}:
+                return None, np.inf
+            return np.full(3, float(idx), dtype=np.float64), 4.0
+
+        return project_fn, projection_time_s, best_decode_profile
+
+    monkeypatch.setattr(atlas, "_make_project_fn", fake_make_project_fn)
+
+    result = atlas.find_counterfactual(
+        x_query=np.array([0.2, 0.8, 0.0], dtype=np.float32),
+        target_class=5,
+        method="nearest_anchor",
+        query_k_candidates=3,
+    )
+
+    assert result.success is True
+    assert result.anchor_idx == 1
+    assert result.n_qp_solved == 3
+    assert [idx for idx, _ in calls] == [2, 0, 1]
+    assert result.profiling["n_candidates_considered"] == 3.0
+    assert result.profiling["n_candidates_pruned_by_bound"] == 0.0
 
 
 def test_find_counterfactual_rejects_unknown_target_label():
