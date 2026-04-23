@@ -96,7 +96,7 @@ class CounterfactualSampler:
         Parameters
         ----------
         solver : str, optional
-            CVXPY solver name (default: 'ECOS'). Options: 'ECOS', 'OSQP', 'SCS', 'CLARABEL'.
+            CVXPY solver name (default: 'ECOS'). Options: 'ECOS', 'SCS', 'CLARABEL'.
         verbose : bool, optional
             Whether to print verbose output (default: False).
         distance_norm : int or float, optional

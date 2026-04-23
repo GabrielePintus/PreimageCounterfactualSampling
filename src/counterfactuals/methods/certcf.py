@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Optional, List, Tuple, Union
+from typing import Any, Dict, Optional, List, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -55,6 +55,14 @@ class CertCF(BaseCounterfactualMethod):
         default_query_method: str = "sorted",
         query_k_candidates: int = 1,
         solver_maxiter: int = 500,
+        query_parallelism: int = 1,
+        cvxpy_solvers: Optional[List[str]] = None,
+        cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]] = None,
+        cvxpy_accept_statuses: Optional[Dict[str, List[str]]] = None,
+        ohe_decode_mode: str = "exact",
+        decode_beam_width: int = 8,
+        decode_beam_branch_top_k: int = 3,
+        decode_beam_max_solver_calls: int = 32,
 
         # Custom downsampling strategy
         k_per_class: Optional[int] = None,
@@ -88,6 +96,29 @@ class CertCF(BaseCounterfactualMethod):
         if self.query_k_candidates <= 0:
             raise ValueError("query_k_candidates must be positive")
         self.solver_maxiter = solver_maxiter
+        self.query_parallelism = int(query_parallelism)
+        if self.query_parallelism <= 0:
+            raise ValueError("query_parallelism must be positive")
+        (
+            self.cvxpy_solvers,
+            self.cvxpy_solver_options,
+            self.cvxpy_accept_statuses,
+        ) = CertCFAtlas._normalize_cvxpy_solver_config(
+            cvxpy_solvers=cvxpy_solvers,
+            cvxpy_solver_options=cvxpy_solver_options,
+            cvxpy_accept_statuses=cvxpy_accept_statuses,
+        )
+        (
+            self.ohe_decode_mode,
+            self.decode_beam_width,
+            self.decode_beam_branch_top_k,
+            self.decode_beam_max_solver_calls,
+        ) = CertCFAtlas._normalize_ohe_decode_config(
+            ohe_decode_mode=ohe_decode_mode,
+            decode_beam_width=decode_beam_width,
+            decode_beam_branch_top_k=decode_beam_branch_top_k,
+            decode_beam_max_solver_calls=decode_beam_max_solver_calls,
+        )
         self.subsample_space = subsample_space
         self.boundary_beta = float(boundary_beta)
         if not (0.0 <= self.boundary_beta <= 1.0):
@@ -364,6 +395,14 @@ class CertCF(BaseCounterfactualMethod):
             ohe_slices=self.ohe_slices,
             default_query_method=self.default_query_method,
             solver_maxiter=self.solver_maxiter,
+            query_parallelism=self.query_parallelism,
+            cvxpy_solvers=self.cvxpy_solvers,
+            cvxpy_solver_options=self.cvxpy_solver_options,
+            cvxpy_accept_statuses=self.cvxpy_accept_statuses,
+            ohe_decode_mode=self.ohe_decode_mode,
+            decode_beam_width=self.decode_beam_width,
+            decode_beam_branch_top_k=self.decode_beam_branch_top_k,
+            decode_beam_max_solver_calls=self.decode_beam_max_solver_calls,
         )
         self.atlas.build()
 
@@ -374,14 +413,40 @@ class CertCF(BaseCounterfactualMethod):
         if target_class is None:
             raise ValueError("CertCF requires target_class.")
 
-        result = self.atlas.find_counterfactual(
-            x_query=np.asarray(x, dtype=np.float32),
+        return self.generate_batch(
+            x=np.asarray(x, dtype=np.float32).reshape(1, -1),
             target_class=int(target_class),
+        )[0]
+
+    def generate_batch(
+        self,
+        x: np.ndarray,
+        target_class: Optional[Union[int, Sequence[int], np.ndarray]] = None,
+        timeout_s_per_query: Optional[float] = None,
+    ) -> list[CounterfactualResult]:
+        """Find the closest certified counterfactual for each query in x."""
+        if not self._is_fitted:
+            raise RuntimeError("Method is not fitted. Call fit() before generate().")
+        if target_class is None:
+            raise ValueError("CertCF requires target_class.")
+
+        x_batch = np.asarray(x, dtype=np.float32)
+        if x_batch.ndim == 1:
+            x_batch = x_batch.reshape(1, -1)
+
+        results = self.atlas.find_counterfactual_batch(
+            X_query=x_batch,
+            target_class=target_class,
             delta=self.delta,
             robust_norm=self.robust_norm,
             query_k_candidates=self.query_k_candidates,
+            timeout_s_per_query=timeout_s_per_query,
         )
+        return [self._wrap_atlas_result(result) for result in results]
 
+    @staticmethod
+    def _wrap_atlas_result(result) -> CounterfactualResult:
+        """Convert atlas-level results into the shared benchmark result type."""
         x_cf = np.asarray(result.x_cf, dtype=np.float32) if result.x_cf is not None else None
         return CounterfactualResult(
             x_cf=x_cf,

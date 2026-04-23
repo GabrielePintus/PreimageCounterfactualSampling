@@ -11,6 +11,12 @@ def _make_atlas(cert_norm, distance_norm):
     atlas.distance_norm = distance_norm
     atlas.ohe_slices = None
     atlas.solver_maxiter = 200
+    atlas.cvxpy_solvers = ["CLARABEL", "SCS"]
+    atlas.cvxpy_solver_options = {}
+    atlas.cvxpy_accept_statuses = {
+        "CLARABEL": ["optimal"],
+        "SCS": ["optimal", "optimal_inaccurate"],
+    }
     return atlas
 
 

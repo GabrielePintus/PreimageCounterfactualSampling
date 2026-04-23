@@ -16,14 +16,16 @@ Example usage:
 
 import time
 import heapq
+from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from itertools import count, product
 import numpy as np
+from copy import deepcopy
 
 _SOLVER_TOL = 1e-9  # QP convergence tolerance (fixed)
 import torch
 import torch.nn as nn
 from scipy.optimize import minimize
-from typing import Optional, Dict, List, Tuple, Union
+from typing import Any, Optional, Dict, List, Sequence, Tuple, Union
 from dataclasses import dataclass, field
 
 try:
@@ -40,6 +42,7 @@ from .indexing.bvh import BVHIndex
 
 
 _EXACT_ENUM_PRODUCT_THRESHOLD = 4096
+_ALLOWED_OHE_DECODE_MODES = {"exact", "beam_then_exact", "beam_only"}
 ProfileValue = Union[float, str, int, bool]
 
 
@@ -124,6 +127,14 @@ class CertCFAtlas:
         # Query configuration
         default_query_method: str = "sorted",
         solver_maxiter: int = 500,
+        query_parallelism: int = 1,
+        cvxpy_solvers: Optional[List[str]] = None,
+        cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]] = None,
+        cvxpy_accept_statuses: Optional[Dict[str, List[str]]] = None,
+        ohe_decode_mode: str = "exact",
+        decode_beam_width: int = 8,
+        decode_beam_branch_top_k: int = 3,
+        decode_beam_max_solver_calls: int = 32,
     ):
         self.model = model
         self.device = torch.device(device) if isinstance(device, str) else device
@@ -138,6 +149,29 @@ class CertCFAtlas:
         self.ohe_slices = ohe_slices
 
         self.solver_maxiter = solver_maxiter
+        self.query_parallelism = int(query_parallelism)
+        if self.query_parallelism <= 0:
+            raise ValueError("query_parallelism must be positive")
+        (
+            self.cvxpy_solvers,
+            self.cvxpy_solver_options,
+            self.cvxpy_accept_statuses,
+        ) = self._normalize_cvxpy_solver_config(
+            cvxpy_solvers=cvxpy_solvers,
+            cvxpy_solver_options=cvxpy_solver_options,
+            cvxpy_accept_statuses=cvxpy_accept_statuses,
+        )
+        (
+            self.ohe_decode_mode,
+            self.decode_beam_width,
+            self.decode_beam_branch_top_k,
+            self.decode_beam_max_solver_calls,
+        ) = self._normalize_ohe_decode_config(
+            ohe_decode_mode=ohe_decode_mode,
+            decode_beam_width=decode_beam_width,
+            decode_beam_branch_top_k=decode_beam_branch_top_k,
+            decode_beam_max_solver_calls=decode_beam_max_solver_calls,
+        )
 
         allowed_methods = {"sorted", "bvh", "nearest_anchor"}
         if default_query_method not in allowed_methods:
@@ -166,6 +200,117 @@ class CertCFAtlas:
 
         # Optional: Shapely polygon unions (only for 2D visualization)
         self._class_unions: Optional[Dict] = None
+
+    @staticmethod
+    def _default_cvxpy_solvers() -> List[str]:
+        return ["CLARABEL", "SCS"]
+
+    @staticmethod
+    def _default_cvxpy_accept_statuses() -> Dict[str, List[str]]:
+        return {
+            "CLARABEL": ["optimal"],
+            "SCS": ["optimal", "optimal_inaccurate"],
+        }
+
+    @staticmethod
+    def _normalize_cvxpy_solver_name(solver_name: str) -> str:
+        if not isinstance(solver_name, str):
+            raise ValueError("cvxpy solver names must be strings")
+        normalized = solver_name.strip().upper()
+        if not normalized:
+            raise ValueError("cvxpy solver names must be non-empty strings")
+        return normalized
+
+    @classmethod
+    def _normalize_cvxpy_solver_config(
+        cls,
+        *,
+        cvxpy_solvers: Optional[List[str]],
+        cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]],
+        cvxpy_accept_statuses: Optional[Dict[str, List[str]]],
+    ) -> Tuple[List[str], Dict[str, Dict[str, Any]], Dict[str, List[str]]]:
+        raw_solvers = cls._default_cvxpy_solvers() if cvxpy_solvers is None else list(cvxpy_solvers)
+        normalized_solvers: List[str] = []
+        seen_solvers = set()
+        for solver_name in raw_solvers:
+            normalized = cls._normalize_cvxpy_solver_name(solver_name)
+            if normalized in seen_solvers:
+                raise ValueError("cvxpy_solvers must be unique after normalization")
+            seen_solvers.add(normalized)
+            normalized_solvers.append(normalized)
+
+        normalized_options: Dict[str, Dict[str, Any]] = {}
+        if cvxpy_solver_options is not None:
+            if not isinstance(cvxpy_solver_options, dict):
+                raise ValueError("cvxpy_solver_options must be a dictionary")
+            for solver_name, solver_options in cvxpy_solver_options.items():
+                normalized_solver = cls._normalize_cvxpy_solver_name(solver_name)
+                if normalized_solver not in seen_solvers:
+                    raise ValueError("cvxpy_solver_options may only reference configured solvers")
+                if not isinstance(solver_options, dict):
+                    raise ValueError("cvxpy_solver_options entries must be dictionaries")
+                normalized_options[normalized_solver] = deepcopy(solver_options)
+
+        default_statuses = {
+            solver: list(cls._default_cvxpy_accept_statuses().get(solver, ["optimal"]))
+            for solver in normalized_solvers
+        }
+        if cvxpy_accept_statuses is not None:
+            if not isinstance(cvxpy_accept_statuses, dict):
+                raise ValueError("cvxpy_accept_statuses must be a dictionary")
+            for solver_name, statuses in cvxpy_accept_statuses.items():
+                normalized_solver = cls._normalize_cvxpy_solver_name(solver_name)
+                if normalized_solver not in seen_solvers:
+                    raise ValueError("cvxpy_accept_statuses may only reference configured solvers")
+                if not isinstance(statuses, (list, tuple)) or len(statuses) == 0:
+                    raise ValueError("cvxpy_accept_statuses entries must be non-empty lists of strings")
+                normalized_statuses = []
+                for status in statuses:
+                    if not isinstance(status, str) or not status.strip():
+                        raise ValueError("cvxpy_accept_statuses entries must be non-empty lists of strings")
+                    normalized_statuses.append(status.strip())
+                default_statuses[normalized_solver] = normalized_statuses
+
+        return normalized_solvers, normalized_options, default_statuses
+
+    @staticmethod
+    def _default_cvxpy_solver_profile() -> Dict[str, ProfileValue]:
+        return {
+            "cvxpy_solver_used": "",
+            "cvxpy_solver_status": "",
+            "cvxpy_solver_attempts": 0,
+            "cvxpy_fallback_used": False,
+        }
+
+    @classmethod
+    def _normalize_ohe_decode_config(
+        cls,
+        *,
+        ohe_decode_mode: str,
+        decode_beam_width: int,
+        decode_beam_branch_top_k: int,
+        decode_beam_max_solver_calls: int,
+    ) -> Tuple[str, int, int, int]:
+        if not isinstance(ohe_decode_mode, str):
+            raise ValueError("ohe_decode_mode must be a string")
+        normalized_mode = ohe_decode_mode.strip().lower()
+        if normalized_mode not in _ALLOWED_OHE_DECODE_MODES:
+            raise ValueError(
+                f"ohe_decode_mode must be one of {_ALLOWED_OHE_DECODE_MODES}, got {ohe_decode_mode!r}"
+            )
+
+        normalized_ints = []
+        for field_name, raw_value in (
+            ("decode_beam_width", decode_beam_width),
+            ("decode_beam_branch_top_k", decode_beam_branch_top_k),
+            ("decode_beam_max_solver_calls", decode_beam_max_solver_calls),
+        ):
+            value = int(raw_value)
+            if value <= 0:
+                raise ValueError(f"{field_name} must be positive")
+            normalized_ints.append(value)
+
+        return normalized_mode, normalized_ints[0], normalized_ints[1], normalized_ints[2]
 
     @staticmethod
     def _normalize_lp_norm(norm_value: Union[int, float, str]) -> Union[int, float]:
@@ -518,6 +663,9 @@ class CertCFAtlas:
         solver_calls: int,
         product_size: int,
         heuristic_success: bool,
+        beam_attempted: bool = False,
+        beam_budget_exhausted: bool = False,
+        beam_fallback_to_exact: bool = False,
     ) -> Dict[str, ProfileValue]:
         return {
             "decode_mode": mode,
@@ -527,6 +675,12 @@ class CertCFAtlas:
             "decode_solver_calls": int(solver_calls),
             "decode_product_size": int(product_size),
             "decode_heuristic_success": bool(heuristic_success),
+            "decode_beam_attempted": bool(beam_attempted),
+            "decode_beam_width": int(self.decode_beam_width),
+            "decode_beam_branch_top_k": int(self.decode_beam_branch_top_k),
+            "decode_beam_max_solver_calls": int(self.decode_beam_max_solver_calls),
+            "decode_beam_budget_exhausted": bool(beam_budget_exhausted),
+            "decode_beam_fallback_to_exact": bool(beam_fallback_to_exact),
         }
 
     def _is_certified_candidate(
@@ -555,7 +709,7 @@ class CertCFAtlas:
         fixed_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
-    ) -> Tuple[Optional[np.ndarray], float]:
+    ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         """
         Project using CVXPY — handles L2 (SOCP) and L1 ball constraints natively.
         """
@@ -614,39 +768,44 @@ class CertCFAtlas:
 
         problem = cp.Problem(objective, constraints)
 
-        # Norm-aware solver ordering.
-        if self.norm == np.inf and self.distance_norm == 2:
-            solvers = ('OSQP', 'CLARABEL', 'SCS')
-        else:
-            solvers = ('CLARABEL', 'SCS', 'OSQP')
+        solver_profile = self._default_cvxpy_solver_profile()
         solved = False
-        for i, _solver in enumerate(solvers):
-            last = (i == len(solvers) - 1)
+        for attempt_idx, solver_name in enumerate(self.cvxpy_solvers, start=1):
+            solver_profile["cvxpy_solver_attempts"] = int(attempt_idx)
             try:
-                problem.solve(solver=_solver, verbose=False, warm_start=True)
-                # Accept inaccurate only from the last solver (SCS) as a fallback.
-                ok_status = ('optimal', 'optimal_inaccurate') if last else ('optimal',)
-                if problem.status in ok_status and z.value is not None:
+                problem.solve(
+                    solver=solver_name,
+                    verbose=False,
+                    warm_start=True,
+                    **self.cvxpy_solver_options.get(solver_name, {}),
+                )
+                solver_profile["cvxpy_solver_used"] = solver_name
+                solver_profile["cvxpy_solver_status"] = str(problem.status or "")
+                accepted_statuses = self.cvxpy_accept_statuses[solver_name]
+                if problem.status in accepted_statuses and z.value is not None:
                     solved = True
                     break
             except Exception:
+                solver_profile["cvxpy_solver_used"] = solver_name
+                solver_profile["cvxpy_solver_status"] = "exception"
                 continue
+        solver_profile["cvxpy_fallback_used"] = bool(int(solver_profile["cvxpy_solver_attempts"]) > 1)
         if not solved:
-            return None, np.inf
+            return None, np.inf, solver_profile
 
         x_proj = z.value
         if np.min(A_full @ x_proj + b_full) < -1e-7:
-            return None, np.inf
+            return None, np.inf, solver_profile
         if np.any(x_proj < center - box_eps - 1e-7) or np.any(x_proj > center + box_eps + 1e-7):
-            return None, np.inf
+            return None, np.inf, solver_profile
         if self.norm == np.inf:
             in_ball = np.max(np.abs(x_proj - center)) <= ball_eps + 1e-7
         else:
             in_ball = np.linalg.norm(x_proj - center, ord=self.norm) <= ball_eps + 1e-7
         if not in_ball:
-            return None, np.inf
+            return None, np.inf, solver_profile
         dist = float(np.linalg.norm(x_proj - x0, ord=self.distance_norm))
-        return x_proj, dist
+        return x_proj, dist, solver_profile
 
     def _project_slsqp(
         self,
@@ -761,10 +920,11 @@ class CertCFAtlas:
         fixed_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
+        profile_out: Optional[Dict[str, ProfileValue]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         use_cvxpy = CVXPY_AVAILABLE and (self.norm in (1, 2) or self.distance_norm != 2)
         if use_cvxpy:
-            return self._project_cvxpy(
+            x_proj, dist, solver_profile = self._project_cvxpy(
                 x0,
                 A_full,
                 b_full,
@@ -775,6 +935,13 @@ class CertCFAtlas:
                 ohe_slices=ohe_slices,
                 fixed_ohe_assignments=fixed_ohe_assignments,
             )
+            if profile_out is not None:
+                profile_out.clear()
+                profile_out.update(solver_profile)
+            return x_proj, dist
+        if profile_out is not None:
+            profile_out.clear()
+            profile_out.update(self._default_cvxpy_solver_profile())
         return self._project_slsqp(
             x0,
             A_full,
@@ -839,6 +1006,128 @@ class CertCFAtlas:
 
         return best_x, best_dist
 
+    def _beam_polytope_decode(
+        self,
+        x_star: np.ndarray,
+        x_query: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        ball_eps: float,
+        maxiter: int,
+        tol: float,
+        fixed_dims: Optional[np.ndarray],
+        incumbent_upper_bound: float,
+    ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
+        ohe_slices = self.ohe_slices or []
+        product_size = self._ohe_product_size(ohe_slices)
+        profile = self._build_decode_profile(
+            mode="beam",
+            exact_fallback_used=False,
+            nodes_visited=0,
+            nodes_pruned=0,
+            solver_calls=0,
+            product_size=product_size,
+            heuristic_success=False,
+            beam_attempted=True,
+        )
+
+        block_indices = [i for i, (s, e) in enumerate(ohe_slices) if e - s > 1]
+        root_dist = float(np.linalg.norm(x_star - x_query, ord=self.distance_norm))
+        if not block_indices:
+            if root_dist >= incumbent_upper_bound:
+                profile["decode_nodes_pruned"] = 1
+                return None, np.inf, profile
+            return x_star.copy(), root_dist, profile
+
+        if root_dist >= incumbent_upper_bound:
+            profile["decode_nodes_pruned"] = 1
+            return None, np.inf, profile
+
+        beam: List[Tuple[Dict[int, int], np.ndarray, float]] = [({}, x_star.copy(), root_dist)]
+        best_x: Optional[np.ndarray] = None
+        best_dist = float(incumbent_upper_bound)
+
+        while beam:
+            next_beam: List[Tuple[Dict[int, int], np.ndarray, float]] = []
+            for fixed_assignments, relaxed_point, lower_bound in beam:
+                if lower_bound >= best_dist:
+                    profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
+                    continue
+
+                if len(fixed_assignments) == len(block_indices):
+                    best_x = relaxed_point
+                    best_dist = float(lower_bound)
+                    continue
+
+                branch_block = None
+                branch_margin = np.inf
+                for block_idx in block_indices:
+                    if block_idx in fixed_assignments:
+                        continue
+                    s, e = ohe_slices[block_idx]
+                    block = relaxed_point[s:e]
+                    if len(block) < 2:
+                        branch_block = block_idx
+                        branch_margin = -np.inf
+                        break
+                    sorted_vals = np.sort(block)[::-1]
+                    margin = float(sorted_vals[0] - sorted_vals[1])
+                    if margin < branch_margin:
+                        branch_margin = margin
+                        branch_block = block_idx
+
+                if branch_block is None:
+                    profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
+                    continue
+
+                s, e = ohe_slices[branch_block]
+                category_order = [int(i) for i in np.argsort(relaxed_point[s:e])[::-1]]
+                category_order = category_order[: self.decode_beam_branch_top_k]
+                for category in category_order:
+                    if int(profile["decode_solver_calls"]) >= self.decode_beam_max_solver_calls:
+                        profile["decode_beam_budget_exhausted"] = True
+                        break
+                    child_assignments = dict(fixed_assignments)
+                    child_assignments[branch_block] = category
+                    profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
+                    profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
+                    child_x, child_dist = self._solve_projection_subproblem(
+                        x_query,
+                        A_full,
+                        b_full,
+                        center,
+                        box_eps,
+                        ball_eps,
+                        maxiter=maxiter,
+                        tol=tol,
+                        fixed_dims=fixed_dims,
+                        ohe_slices=ohe_slices,
+                        fixed_ohe_assignments=child_assignments,
+                    )
+                    if child_x is None or child_dist >= best_dist:
+                        profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
+                        continue
+                    if len(child_assignments) == len(block_indices):
+                        best_x = child_x
+                        best_dist = float(child_dist)
+                        continue
+                    next_beam.append((child_assignments, child_x, float(child_dist)))
+                if bool(profile["decode_beam_budget_exhausted"]):
+                    break
+
+            if bool(profile["decode_beam_budget_exhausted"]):
+                break
+            if not next_beam:
+                break
+            next_beam.sort(key=lambda item: item[2])
+            beam = next_beam[: self.decode_beam_width]
+
+        if best_x is None:
+            return None, np.inf, profile
+        return best_x, best_dist, profile
+
     def _polytope_aware_decode(
         self,
         x_star: np.ndarray,
@@ -887,8 +1176,8 @@ class CertCFAtlas:
             return best_x, best_dist, profile
 
         incumbent = float(incumbent_upper_bound)
-        if product_size <= _EXACT_ENUM_PRODUCT_THRESHOLD:
-            return self._exact_polytope_decode_enumeration(
+        if self.ohe_decode_mode in {"beam_then_exact", "beam_only"}:
+            beam_x, beam_dist, beam_profile = self._beam_polytope_decode(
                 x_star,
                 x_query,
                 A_full,
@@ -901,19 +1190,44 @@ class CertCFAtlas:
                 fixed_dims=fixed_dims,
                 incumbent_upper_bound=incumbent,
             )
-        return self._exact_polytope_decode_branch_and_bound(
-            x_star,
-            x_query,
-            A_full,
-            b_full,
-            center,
-            box_eps,
-            ball_eps,
-            maxiter=maxiter,
-            tol=tol,
-            fixed_dims=fixed_dims,
-            incumbent_upper_bound=incumbent,
-        )
+            if beam_x is not None:
+                return beam_x, beam_dist, beam_profile
+            if self.ohe_decode_mode == "beam_only":
+                return None, np.inf, beam_profile
+
+        if product_size <= _EXACT_ENUM_PRODUCT_THRESHOLD:
+            exact_x, exact_dist, exact_profile = self._exact_polytope_decode_enumeration(
+                x_star,
+                x_query,
+                A_full,
+                b_full,
+                center,
+                box_eps,
+                ball_eps,
+                maxiter=maxiter,
+                tol=tol,
+                fixed_dims=fixed_dims,
+                incumbent_upper_bound=incumbent,
+            )
+        else:
+            exact_x, exact_dist, exact_profile = self._exact_polytope_decode_branch_and_bound(
+                x_star,
+                x_query,
+                A_full,
+                b_full,
+                center,
+                box_eps,
+                ball_eps,
+                maxiter=maxiter,
+                tol=tol,
+                fixed_dims=fixed_dims,
+                incumbent_upper_bound=incumbent,
+            )
+        if self.ohe_decode_mode == "beam_then_exact":
+            exact_profile["decode_beam_attempted"] = True
+            exact_profile["decode_beam_fallback_to_exact"] = True
+            exact_profile["decode_beam_budget_exhausted"] = beam_profile["decode_beam_budget_exhausted"]
+        return exact_x, exact_dist, exact_profile
 
     def _exact_polytope_decode_enumeration(
         self,
@@ -1160,8 +1474,10 @@ class CertCFAtlas:
                 product_size=self._ohe_product_size(self.ohe_slices),
                 heuristic_success=False,
             )
+            profile.update(self._default_cvxpy_solver_profile())
             return None, np.inf, profile
 
+        solver_profile = self._default_cvxpy_solver_profile()
         x_proj, dist = self._solve_projection_subproblem(
             x0,
             A_full,
@@ -1174,6 +1490,7 @@ class CertCFAtlas:
             fixed_dims=fixed_dims,
             ohe_slices=self.ohe_slices,
             fixed_ohe_assignments=None,
+            profile_out=solver_profile,
         )
 
         if x_proj is None:
@@ -1186,6 +1503,7 @@ class CertCFAtlas:
                 product_size=self._ohe_product_size(self.ohe_slices),
                 heuristic_success=False,
             )
+            profile.update(solver_profile)
             return None, np.inf, profile
 
         if self.ohe_slices:
@@ -1213,6 +1531,7 @@ class CertCFAtlas:
                 heuristic_success=True,
             )
 
+        decode_profile.update(solver_profile)
         return x_proj, dist, decode_profile
 
     def _make_project_fn(self, x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
@@ -1463,26 +1782,165 @@ class CertCFAtlas:
     def find_counterfactual_batch(
         self,
         X_query: np.ndarray,
-        target_class: int,
+        target_class: Union[int, Sequence[int], np.ndarray],
         method: Optional[str] = None,
         delta: float = 0.0,
         robust_norm: Optional[Union[int, float, str]] = None,
         solver_maxiter: Optional[int] = None,
         fixed_dims: Optional[np.ndarray] = None,
         query_k_candidates: int = 1,
+        timeout_s_per_query: Optional[float] = None,
     ) -> List[CounterfactualResult]:
         """Find counterfactuals for a batch of query points."""
-        results = []
-        for x in X_query:
-            results.append(self.find_counterfactual(
-                x, target_class, method,
-                delta=delta,
-                robust_norm=robust_norm,
-                solver_maxiter=solver_maxiter,
-                fixed_dims=fixed_dims,
-                query_k_candidates=query_k_candidates,
-            ))
-        return results
+        X_query_np = np.asarray(X_query, dtype=np.float32)
+        if X_query_np.ndim == 1:
+            X_query_np = X_query_np.reshape(1, -1)
+        if X_query_np.ndim != 2:
+            raise ValueError("X_query must be a 2D array or a single query vector")
+        n_queries = int(X_query_np.shape[0])
+        if n_queries == 0:
+            return []
+
+        target_classes = self._normalize_batch_target_classes(
+            X_query=X_query_np,
+            target_class=target_class,
+        )
+
+        if self.query_parallelism <= 1:
+            return [
+                self.find_counterfactual(
+                    x_query=X_query_np[idx],
+                    target_class=int(target_classes[idx]),
+                    method=method,
+                    delta=delta,
+                    robust_norm=robust_norm,
+                    solver_maxiter=solver_maxiter,
+                    fixed_dims=fixed_dims,
+                    query_k_candidates=query_k_candidates,
+                )
+                for idx in range(n_queries)
+            ]
+
+        resolved_method = method or self.default_query_method
+        normalized_robust_norm = (
+            self._normalize_lp_norm(robust_norm) if robust_norm is not None else None
+        )
+        results: List[Optional[CounterfactualResult]] = [None] * n_queries
+        grouped_indices: Dict[int, List[int]] = {}
+        for idx, cls in enumerate(target_classes):
+            grouped_indices.setdefault(int(cls), []).append(idx)
+        work_items = [
+            (idx, cls)
+            for cls, indices in grouped_indices.items()
+            for idx in indices
+        ]
+
+        max_workers = min(self.query_parallelism, n_queries)
+        executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="certcf-query",
+        )
+        try:
+            future_to_item = {
+                executor.submit(
+                    self.find_counterfactual,
+                    x_query=X_query_np[idx],
+                    target_class=cls,
+                    method=method,
+                    delta=delta,
+                    robust_norm=robust_norm,
+                    solver_maxiter=solver_maxiter,
+                    fixed_dims=fixed_dims,
+                    query_k_candidates=query_k_candidates,
+                ): (idx, cls)
+                for idx, cls in work_items
+            }
+            if timeout_s_per_query is None or timeout_s_per_query <= 0:
+                done, not_done = wait(future_to_item.keys(), return_when=ALL_COMPLETED)
+            else:
+                done, not_done = wait(
+                    future_to_item.keys(),
+                    timeout=float(timeout_s_per_query),
+                    return_when=ALL_COMPLETED,
+                )
+
+            for future in done:
+                idx, _ = future_to_item[future]
+                results[idx] = future.result()
+
+            if not_done:
+                timeout_s = float(timeout_s_per_query or 0.0)
+                for future in not_done:
+                    idx, cls = future_to_item[future]
+                    results[idx] = self._build_timeout_result(
+                        target_class=cls,
+                        method=resolved_method,
+                        delta=delta,
+                        robust_norm=normalized_robust_norm,
+                        timeout_s_per_query=timeout_s,
+                    )
+                executor.shutdown(wait=False, cancel_futures=False)
+                executor = None
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=False)
+
+        final_results = [result for result in results if result is not None]
+        if len(final_results) != n_queries:
+            raise RuntimeError("CertCF batch query failed to produce one result per input query")
+        return final_results
+
+    def _normalize_batch_target_classes(
+        self,
+        X_query: np.ndarray,
+        target_class: Union[int, Sequence[int], np.ndarray],
+    ) -> np.ndarray:
+        """Return one target class per query, broadcasting a scalar if needed."""
+        X_query_np = np.asarray(X_query, dtype=np.float32)
+        if X_query_np.ndim != 2:
+            raise ValueError("X_query must be a 2D array for batched target normalization")
+        if np.isscalar(target_class):
+            return np.full(X_query_np.shape[0], int(target_class), dtype=np.int64)
+        target_classes = np.asarray(target_class, dtype=np.int64).reshape(-1)
+        if target_classes.shape[0] != X_query_np.shape[0]:
+            raise ValueError("target_class must be a scalar or provide one entry per query")
+        return target_classes
+
+    def _build_timeout_result(
+        self,
+        *,
+        target_class: int,
+        method: str,
+        delta: float,
+        robust_norm: Optional[Union[int, float]],
+        timeout_s_per_query: float,
+    ) -> CounterfactualResult:
+        """Return a failure result representing a soft per-query timeout."""
+        profiling: Dict[str, ProfileValue] = {
+            "method": method,
+            "delta": float(delta),
+            "robust_norm": (
+                float(robust_norm) if robust_norm == np.inf else int(robust_norm)
+            ) if robust_norm is not None else (
+                float(self.norm) if self.norm == np.inf else int(self.norm)
+            ),
+            "reason": "timeout",
+            "timed_out": True,
+            "timeout_s_per_query": float(timeout_s_per_query),
+            "total_time_ms": 1e3 * float(timeout_s_per_query),
+            "n_qp_solved": 0.0,
+            "success": 0.0,
+            "distance": float(np.inf),
+        }
+        return CounterfactualResult(
+            x_cf=None,
+            distance=float(np.inf),
+            target_class=int(target_class),
+            anchor_idx=None,
+            n_qp_solved=0,
+            success=False,
+            profiling=profiling,
+        )
 
     def verify_counterfactual(
         self,

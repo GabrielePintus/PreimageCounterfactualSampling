@@ -1,0 +1,52 @@
+seed: 42
+output: results/benchmark_test_certcf.parquet
+timeout_per_sample: 120
+resource_monitor:
+  enabled: true
+  interval_s: 1.0
+
+
+methods:
+
+  - name: certcf
+    run_name: certcf
+    params:
+      device: cpu
+      norm: 1
+      eps_alpha: 0.25
+      batch_size: 256
+      query_method: nearest_anchor
+      query_k_candidates: 5
+      atlas_subsample_method: boundary_random
+      atlas_boundary_beta: 0.5
+      atlas_subsample_space: input
+      k_per_class: 500
+      query_parallelism: 1
+      solver_maxiter: 100
+      cvxpy_solvers: [CLARABEL]
+      cvxpy_solver_options:
+        CLARABEL:
+          max_iter: 100
+          tol_gap_abs: 1.0e-3
+          tol_gap_rel: 1.0e-5
+          tol_feas: 1.0e-8
+      cvxpy_accept_statuses:
+        CLARABEL: [optimal]
+      ohe_decode_mode: beam_then_exact
+      decode_beam_width: 8
+      decode_beam_branch_top_k: 3
+      decode_beam_max_solver_calls: 32
+
+datasets:
+
+  - name: adult
+    sampling:
+      n_queries: 50
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/adult_classifier/best.ckpt
+        device: cuda
+        dataset_module: adult
+        hidden_dims: [64, 32]
+        dropout: 0.2

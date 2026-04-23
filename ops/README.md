@@ -15,6 +15,7 @@ contributors and coding agents working in this repository.
 - `07-absolute-certification-report.md`: benchmark/result semantics for certification reporting
 - `08-method-validation-playbook.md`: benchmarking, metrics, and plot guidelines for method evaluation
 - `09-boundary-manifold-sampling-ideas.md`: working note on decision-boundary walking and manifold sampling as future CertCF support-generation ideas
+- `10-certcf-speedup-ideas.md`: working note on likely high-impact CertCF query/build speedups and why threading did not help the current Adult setup
 
 ## Why This Exists
 

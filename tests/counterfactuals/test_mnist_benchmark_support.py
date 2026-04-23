@@ -272,6 +272,19 @@ def test_build_certcf_method_forwards_atlas_subsample_space(monkeypatch):
             "atlas_subsample_space": "latent",
             "atlas_boundary_beta": 0.7,
             "k_per_class": 10,
+            "cvxpy_solvers": ["clarabel", "scs"],
+            "cvxpy_solver_options": {
+                "clarabel": {"max_iter": 75},
+                "scs": {"eps": 1e-3},
+            },
+            "cvxpy_accept_statuses": {
+                "clarabel": ["optimal"],
+                "scs": ["optimal", "optimal_inaccurate"],
+            },
+            "ohe_decode_mode": "beam_then_exact",
+            "decode_beam_width": 5,
+            "decode_beam_branch_top_k": 2,
+            "decode_beam_max_solver_calls": 9,
         },
         model_params={
             "dataset_module": "adult",
@@ -288,7 +301,103 @@ def test_build_certcf_method_forwards_atlas_subsample_space(monkeypatch):
     assert init_calls
     assert init_calls[0]["subsample_space"] == "latent"
     assert np.isclose(float(init_calls[0]["boundary_beta"]), 0.7)
+    assert init_calls[0]["cvxpy_solvers"] == ["clarabel", "scs"]
+    assert init_calls[0]["cvxpy_solver_options"] == {
+        "clarabel": {"max_iter": 75},
+        "scs": {"eps": 1e-3},
+    }
+    assert init_calls[0]["cvxpy_accept_statuses"] == {
+        "clarabel": ["optimal"],
+        "scs": ["optimal", "optimal_inaccurate"],
+    }
+    assert init_calls[0]["ohe_decode_mode"] == "beam_then_exact"
+    assert init_calls[0]["decode_beam_width"] == 5
+    assert init_calls[0]["decode_beam_branch_top_k"] == 2
+    assert init_calls[0]["decode_beam_max_solver_calls"] == 9
     assert np.array_equal(atlas_method.y_train, np.array([1, 0], dtype=np.int64))
+
+
+def test_build_certcf_method_does_not_inject_cvxpy_defaults(monkeypatch):
+    torch = pytest.importorskip("torch")
+    benchmark = _load_benchmark_module()
+    init_calls = []
+
+    class FakeLitModel:
+        def __init__(self):
+            self.net = torch.nn.Sequential(
+                torch.nn.Linear(2, 3),
+                torch.nn.ReLU(),
+                torch.nn.Linear(3, 2),
+            )
+
+        def eval(self):
+            return self
+
+        def to(self, _device):
+            return self
+
+    class FakeCertCF:
+        def __init__(self, **kwargs):
+            init_calls.append(kwargs)
+
+        def fit(self, x_train, y_train):
+            self.x_train = x_train
+            self.y_train = y_train
+
+    monkeypatch.setattr(benchmark, "_load_lit_checkpoint_resilient", lambda *args, **kwargs: SimpleNamespace(model=FakeLitModel()))
+    monkeypatch.setattr("counterfactuals.methods.certcf.CertCF", FakeCertCF)
+
+    benchmark._build_certcf_method(
+        params={
+            "checkpoint": "checkpoints/adult_classifier/best.ckpt",
+            "device": "cpu",
+        },
+        model_params={
+            "dataset_module": "adult",
+            "hidden_dims": [32, 8],
+            "dropout": 0.2,
+        },
+        dataset_name="adult",
+        x_train=np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+        y_train=np.array([1, 0], dtype=np.int64),
+        x_queries=np.array([[0.5, 0.5]], dtype=np.float32),
+        seed=7,
+    )
+
+    assert init_calls
+    assert "cvxpy_solvers" not in init_calls[0]
+    assert "cvxpy_solver_options" not in init_calls[0]
+    assert "cvxpy_accept_statuses" not in init_calls[0]
+    assert "ohe_decode_mode" not in init_calls[0]
+    assert "decode_beam_width" not in init_calls[0]
+    assert "decode_beam_branch_top_k" not in init_calls[0]
+    assert "decode_beam_max_solver_calls" not in init_calls[0]
+
+
+def test_expand_grid_keeps_certcf_cvxpy_solvers_as_atomic_list():
+    benchmark = _load_benchmark_module()
+
+    expanded = benchmark._expand_grid(
+        [
+            {
+                "name": "certcf",
+                "run_name": "certcf",
+                "params": {
+                    "eps_alpha": [0.25, 0.35],
+                    "cvxpy_solvers": ["CLARABEL", "SCS"],
+                    "query_method": "nearest_anchor",
+                },
+            }
+        ]
+    )
+
+    assert len(expanded) == 2
+    assert [entry["run_name"] for entry in expanded] == [
+        "certcf_eps_alpha=0.25",
+        "certcf_eps_alpha=0.35",
+    ]
+    assert expanded[0]["params"]["cvxpy_solvers"] == ["CLARABEL", "SCS"]
+    assert expanded[1]["params"]["cvxpy_solvers"] == ["CLARABEL", "SCS"]
 
 
 class _TinyToyDataset:
@@ -534,3 +643,140 @@ def test_run_single_dataset_passes_prediction_aligned_labels_to_certcf(monkeypat
     assert qr.metadata["train_label_source"] == "predicted"
     assert qr.metadata["train_label_space"] == "raw"
     assert np.isclose(qr.metadata["train_label_agreement_true"], 0.0)
+
+
+def test_run_single_dataset_certcf_defaults_to_serial_query_execution(monkeypatch, tmp_path):
+    benchmark = _load_benchmark_module()
+    captured = {"generate_calls": 0, "generate_batch_calls": 0}
+
+    class TwoQueryToyDataset(_TinyToyDataset):
+        def get_test(self):
+            x = np.array([[-0.5, 0.0], [0.5, 0.0]], dtype=np.float32)
+            y = np.array([0, 1], dtype=np.int64)
+            return x, y
+
+    def _registries_with_two_query_dataset():
+        regs = _toy_registries()
+        regs["dataset"] = Registry("dataset")
+        regs["dataset"].register("toy", TwoQueryToyDataset)
+        return regs
+
+    class CapturingCertCF:
+        def fit(self, x_train, y_train):
+            self.x_train = x_train
+            self.y_train = y_train
+
+        def generate(self, x, target_class=None):
+            captured["generate_calls"] += 1
+            return CounterfactualResult(
+                x_cf=np.array([0.75, 0.0], dtype=np.float32),
+                success=True,
+                distance=1.0,
+                metadata={},
+            )
+
+        def generate_batch(self, x, target_class=None, timeout_s_per_query=None):
+            del x, target_class, timeout_s_per_query
+            captured["generate_batch_calls"] += 1
+            raise AssertionError("serial CertCF benchmark path should not call generate_batch by default")
+
+    monkeypatch.setattr(benchmark, "create_default_registries", _registries_with_two_query_dataset)
+
+    def fake_build_certcf_method(**kwargs):
+        method = CapturingCertCF()
+        method.fit(kwargs["x_train"], kwargs["y_train"])
+        return method, _ToyModel(), None, None, kwargs["x_queries"], None
+
+    monkeypatch.setattr(benchmark, "_build_certcf_method", fake_build_certcf_method)
+
+    benchmark.run_single_dataset(
+        {
+            "seed": 0,
+            "dataset": {"name": "toy", "params": {}},
+            "model": {"name": "toy_model", "params": {}},
+            "sampling": {"n_queries": 2},
+            "output": {"path": str(tmp_path / "toy_certcf_serial.parquet")},
+            "methods": [
+                {
+                    "name": "certcf",
+                    "run_name": "toy_certcf_serial",
+                    "params": {},
+                }
+            ],
+        }
+    )
+
+    assert captured["generate_calls"] == 2
+    assert captured["generate_batch_calls"] == 0
+
+
+def test_run_single_dataset_certcf_batch_path_passes_targets_and_soft_timeout(monkeypatch, tmp_path):
+    benchmark = _load_benchmark_module()
+    captured = {}
+
+    class TwoQueryToyDataset(_TinyToyDataset):
+        def get_test(self):
+            x = np.array([[-0.5, 0.0], [0.5, 0.0]], dtype=np.float32)
+            y = np.array([0, 1], dtype=np.int64)
+            return x, y
+
+    def _registries_with_two_query_dataset():
+        regs = _toy_registries()
+        regs["dataset"] = Registry("dataset")
+        regs["dataset"].register("toy", TwoQueryToyDataset)
+        return regs
+
+    class CapturingCertCF:
+        def fit(self, x_train, y_train):
+            self.x_train = x_train
+            self.y_train = y_train
+
+        def generate(self, x, target_class=None):
+            del x, target_class
+            raise AssertionError("threaded CertCF benchmark path should use generate_batch")
+
+        def generate_batch(self, x, target_class=None, timeout_s_per_query=None):
+            captured["x"] = np.array(x, copy=True)
+            captured["target_class"] = np.array(target_class, copy=True)
+            captured["timeout_s_per_query"] = timeout_s_per_query
+            return [
+                CounterfactualResult(
+                    x_cf=np.array([0.75, 0.0], dtype=np.float32),
+                    success=True,
+                    distance=1.0,
+                    metadata={},
+                )
+                for _ in range(len(x))
+            ]
+
+    monkeypatch.setattr(benchmark, "create_default_registries", _registries_with_two_query_dataset)
+
+    def fake_build_certcf_method(**kwargs):
+        method = CapturingCertCF()
+        method.fit(kwargs["x_train"], kwargs["y_train"])
+        return method, _ToyModel(), None, None, kwargs["x_queries"], None
+
+    monkeypatch.setattr(benchmark, "_build_certcf_method", fake_build_certcf_method)
+
+    result = benchmark.run_single_dataset(
+        {
+            "seed": 0,
+            "timeout_per_sample": 7,
+            "dataset": {"name": "toy", "params": {}},
+            "model": {"name": "toy_model", "params": {}},
+            "sampling": {"n_queries": 2},
+            "output": {"path": str(tmp_path / "toy_certcf_batch.parquet")},
+            "methods": [
+                {
+                    "name": "certcf",
+                    "run_name": "toy_certcf_batch",
+                    "params": {"query_parallelism": 2},
+                }
+            ],
+        }
+    )
+
+    assert np.array_equal(captured["target_class"], np.array([1, 0], dtype=np.int64))
+    assert np.isclose(captured["timeout_s_per_query"], 7.0)
+    assert captured["x"].shape[0] == 2
+    assert len(result.method_results[0].query_results) == 2

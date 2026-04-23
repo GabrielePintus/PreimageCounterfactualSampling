@@ -128,15 +128,15 @@ methods:
       device: cuda
       norm: 1
       eps_alpha: 0.25
-
-# Method-specific runner knobs:
-# - DiCE accepts `query_batch_size` in `params`; default is 1, and values > 1
-#   let the benchmark call `DiceMethod.generate_batch(...)` on query chunks.
       batch_size: 256
       atlas_subsample_method: kmedoids
       atlas_subsample_space: input
       k_per_class: 200
 ```
+
+Method-specific runner knobs:
+- DiCE accepts `query_batch_size` in `params`; the default is `1`, and values greater than `1` let the benchmark call `DiceMethod.generate_batch(...)` on query chunks.
+- CertCF accepts `query_parallelism` in `params`; the default is `1`, and values greater than `1` enable threaded `generate_batch(...)` calls with soft per-query timeout handling.
 
 Result semantics:
 - `method` in the saved parquet is the implementation key, for example `certcf` or `dice`
@@ -149,6 +149,9 @@ Result semantics:
 Any parameter whose value is a **list** is treated as a sweep axis.
 All list parameters are expanded into a Cartesian product; the `run_name` gets a
 `_param=value` suffix for each varied parameter.
+
+Exception:
+- `certcf.params.cvxpy_solvers` is treated as an atomic solver chain, not a sweep axis.
 
 ```yaml
 # This single entry expands to 8 runs:

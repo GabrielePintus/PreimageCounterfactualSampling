@@ -496,6 +496,18 @@ def _build_certcf_method(
             f"got {atlas_subsample_space!r}"
         )
     solver_maxiter = int(params.get("solver_maxiter", 500))
+    query_parallelism = int(params.get("query_parallelism", 1))
+    if query_parallelism <= 0:
+        raise ValueError("certcf.query_parallelism must be positive")
+    cvxpy_solvers = deepcopy(params["cvxpy_solvers"]) if "cvxpy_solvers" in params else None
+    cvxpy_solver_options = deepcopy(params["cvxpy_solver_options"]) if "cvxpy_solver_options" in params else None
+    cvxpy_accept_statuses = deepcopy(params["cvxpy_accept_statuses"]) if "cvxpy_accept_statuses" in params else None
+    ohe_decode_mode = params["ohe_decode_mode"] if "ohe_decode_mode" in params else None
+    decode_beam_width = params["decode_beam_width"] if "decode_beam_width" in params else None
+    decode_beam_branch_top_k = params["decode_beam_branch_top_k"] if "decode_beam_branch_top_k" in params else None
+    decode_beam_max_solver_calls = (
+        params["decode_beam_max_solver_calls"] if "decode_beam_max_solver_calls" in params else None
+    )
     # Architecture params come from the shared model config, not method params.
     dataset_module = str(model_params.get("dataset_module", dataset_name))
     hidden_dims = list(model_params.get("hidden_dims", [32, 8]))
@@ -536,7 +548,7 @@ def _build_certcf_method(
         cnn = False
 
     eps_strategy = NearestOppositeClassClearanceStrategy(alpha=eps_alpha)
-    atlas_method = CertCF(
+    certcf_kwargs = dict(
         model=atlas_model,
         norm=norm,
         distance_norm=distance_norm,
@@ -550,12 +562,29 @@ def _build_certcf_method(
         default_query_method=query_method,
         query_k_candidates=query_k_candidates,
         solver_maxiter=solver_maxiter,
+        query_parallelism=query_parallelism,
         k_per_class=k_per_class,
         subsample_method=atlas_subsample_method,
         subsample_space=atlas_subsample_space,
         boundary_beta=boundary_beta,
         random_seed=seed,
     )
+    if cvxpy_solvers is not None:
+        certcf_kwargs["cvxpy_solvers"] = cvxpy_solvers
+    if cvxpy_solver_options is not None:
+        certcf_kwargs["cvxpy_solver_options"] = cvxpy_solver_options
+    if cvxpy_accept_statuses is not None:
+        certcf_kwargs["cvxpy_accept_statuses"] = cvxpy_accept_statuses
+    if ohe_decode_mode is not None:
+        certcf_kwargs["ohe_decode_mode"] = ohe_decode_mode
+    if decode_beam_width is not None:
+        certcf_kwargs["decode_beam_width"] = decode_beam_width
+    if decode_beam_branch_top_k is not None:
+        certcf_kwargs["decode_beam_branch_top_k"] = decode_beam_branch_top_k
+    if decode_beam_max_solver_calls is not None:
+        certcf_kwargs["decode_beam_max_solver_calls"] = decode_beam_max_solver_calls
+
+    atlas_method = CertCF(**certcf_kwargs)
     atlas_method.fit(x_train=z_train, y_train=y_train)
 
     return atlas_method, atlas_model, model, z_train, z_queries, None
@@ -654,6 +683,11 @@ def _build_mnist_model_from_checkpoint(
 # Grid search expansion
 # ---------------------------------------------------------------------------
 
+_NON_SWEEP_LIST_PARAMS_BY_METHOD: Dict[str, set[str]] = {
+    "certcf": {"cvxpy_solvers"},
+}
+
+
 def _expand_grid(methods_cfg: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Expand method configs with list-valued params into all combinations.
 
@@ -678,9 +712,16 @@ def _expand_grid(methods_cfg: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         name = entry["name"]
         run_name = entry.get("run_name", name)
         params = dict(entry.get("params") or {})
+        non_sweep_list_keys = _NON_SWEEP_LIST_PARAMS_BY_METHOD.get(name, set())
 
-        sweep = {k: v for k, v in params.items() if isinstance(v, list)}
-        fixed = {k: v for k, v in params.items() if not isinstance(v, list)}
+        sweep = {
+            k: v for k, v in params.items()
+            if isinstance(v, list) and k not in non_sweep_list_keys
+        }
+        fixed = {
+            k: v for k, v in params.items()
+            if not isinstance(v, list) or k in non_sweep_list_keys
+        }
 
         if not sweep:
             expanded.append(entry)
@@ -970,6 +1011,8 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         query_batch_size = 1
         if method_name == "dice":
             query_batch_size = max(1, int(method_params.pop("query_batch_size", 1)))
+        elif method_name == "certcf":
+            query_batch_size = max(1, int(method_params.get("query_parallelism", 1)))
         print(f"\n[METHOD] {run_name}" + (f" (impl: {method_name})" if run_name != method_name else ""))
         resource_monitor = ResourceMonitor(
             enabled=ram_monitor_enabled,
@@ -1181,6 +1224,27 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     results_batch = _call_with_timeout(
                         lambda: method.generate_batch(x=batch_queries, target_class=batch_targets),
                         timeout_s * batch_len,
+                    )
+                    runtime_s = time.perf_counter() - t0
+                    if len(results_batch) != batch_len:
+                        raise ValueError(
+                            f"generate_batch returned {len(results_batch)} results for batch_len={batch_len}"
+                        )
+                    per_query_runtime_s = runtime_s / batch_len
+                    for offset, result in enumerate(results_batch):
+                        pos = start + offset
+                        _append_query_result(
+                            pos=pos,
+                            q_idx=int(batch_query_indices[offset]),
+                            target_class=int(batch_targets[offset]),
+                            result=result,
+                            runtime_s=per_query_runtime_s,
+                        )
+                elif method_name == "certcf" and batch_len > 1:
+                    results_batch = method.generate_batch(
+                        x=batch_queries,
+                        target_class=batch_targets,
+                        timeout_s_per_query=timeout_s,
                     )
                     runtime_s = time.perf_counter() - t0
                     if len(results_batch) != batch_len:

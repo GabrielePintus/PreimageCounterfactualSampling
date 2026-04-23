@@ -78,8 +78,8 @@ $$\min_{\mathbf{z}}\; \|\mathbf{z} - \mathbf{x}_0\|_2^2 \quad \text{s.t.} \quad 
 
 Solver dispatch depends on the norm:
 - **$L_\infty$**: SLSQP (all constraints are linear, very fast)
-- **$L_2$**: CVXPY with solver fallback chain CLARABEL → OSQP → SCS
-- **$L_1$**: CVXPY with solver fallback chain OSQP → CLARABEL → SCS
+- **$L_2$**: CVXPY with solver fallback chain CLARABEL → SCS
+- **$L_1$**: CVXPY with solver fallback chain CLARABEL → SCS
 
 **3. Return the global minimum.** The counterfactual is the projection with smallest distance across all evaluated polytopes. BVH guarantees this is the global minimum over the full atlas.
 
