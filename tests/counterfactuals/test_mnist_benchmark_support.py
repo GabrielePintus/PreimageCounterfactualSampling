@@ -400,6 +400,78 @@ def test_expand_grid_keeps_certcf_cvxpy_solvers_as_atomic_list():
     assert expanded[1]["params"]["cvxpy_solvers"] == ["CLARABEL", "SCS"]
 
 
+def test_load_lit_checkpoint_resilient_falls_back_to_direct_state_dict_load(tmp_path):
+    torch = pytest.importorskip("torch")
+    benchmark = _load_benchmark_module()
+
+    class TinyBackbone(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(2, 2)
+
+        def forward(self, x):
+            return self.linear(x)
+
+    class FakeLit(torch.nn.Module):
+        def __init__(self, model, initial_lr=5e-3, weight_decay=1e-4, final_lr=1e-6, class_weights=None):
+            super().__init__()
+            self.model = model
+            self.initial_lr = initial_lr
+            self.weight_decay = weight_decay
+            self.final_lr = final_lr
+            self.class_weights = class_weights
+
+        @classmethod
+        def load_from_checkpoint(cls, *args, **kwargs):
+            del args, kwargs
+            raise TypeError("object() takes no arguments")
+
+    source = FakeLit(
+        model=TinyBackbone(),
+        initial_lr=1e-2,
+        weight_decay=2e-4,
+        final_lr=1e-5,
+        class_weights=[1.0, 2.0],
+    )
+    ckpt_path = tmp_path / "fake.ckpt"
+    torch.save(
+        {
+            "state_dict": source.state_dict(),
+            "hyper_parameters": {
+                "_class_path": "training.lit_classifier.LitClassifier",
+                "_instantiator": "lightning.pytorch.cli.instantiate_module",
+                "initial_lr": 1e-2,
+                "weight_decay": 2e-4,
+                "final_lr": 1e-5,
+                "class_weights": [1.0, 2.0],
+            },
+        },
+        ckpt_path,
+    )
+
+    target_backbone = TinyBackbone()
+    loaded = benchmark._load_lit_checkpoint_resilient(
+        FakeLit,
+        str(ckpt_path),
+        target_backbone,
+        map_location="cpu",
+    )
+
+    assert loaded.model is target_backbone
+    assert loaded.initial_lr == pytest.approx(1e-2)
+    assert loaded.weight_decay == pytest.approx(2e-4)
+    assert loaded.final_lr == pytest.approx(1e-5)
+    assert loaded.class_weights == [1.0, 2.0]
+    assert torch.allclose(
+        loaded.model.linear.weight.detach(),
+        source.model.linear.weight.detach(),
+    )
+    assert torch.allclose(
+        loaded.model.linear.bias.detach(),
+        source.model.linear.bias.detach(),
+    )
+
+
 class _TinyToyDataset:
     spec = None
 

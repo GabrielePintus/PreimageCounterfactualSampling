@@ -106,6 +106,20 @@ def _normalize_torch_device(device: Any) -> str:
 
 def _load_lit_checkpoint_resilient(lit_cls, checkpoint: str, backbone, map_location: str):
     """Load Lightning checkpoint with fallback for legacy/unknown storage tags."""
+    def _manual_load(target_map_location: str):
+        import torch
+
+        ckpt = torch.load(checkpoint, map_location=target_map_location, weights_only=False)
+        hparams = dict(ckpt.get("hyper_parameters", {}))
+        hparams.pop("_class_path", None)
+        hparams.pop("_instantiator", None)
+        hparams.pop("model", None)
+
+        lit = lit_cls(model=backbone, **hparams)
+        state_dict = ckpt.get("state_dict", {})
+        lit.load_state_dict(state_dict, strict=True)
+        return lit
+
     try:
         return lit_cls.load_from_checkpoint(checkpoint, model=backbone, map_location=map_location)
     except RuntimeError as exc:
@@ -116,6 +130,25 @@ def _load_lit_checkpoint_resilient(lit_cls, checkpoint: str, backbone, map_locat
                 "Retrying load with map_location=cpu."
             )
             return lit_cls.load_from_checkpoint(checkpoint, model=backbone, map_location="cpu")
+        raise
+    except TypeError as exc:
+        msg = str(exc)
+        if "object() takes no arguments" in msg:
+            print(
+                "[WARNING] Lightning checkpoint instantiation failed via CLI metadata. "
+                "Falling back to direct state_dict load."
+            )
+            try:
+                return _manual_load(map_location)
+            except RuntimeError as manual_exc:
+                manual_msg = str(manual_exc)
+                if "tagged with gpu" in manual_msg and map_location != "cpu":
+                    print(
+                        "[WARNING] Manual checkpoint load hit legacy 'gpu' storage tag. "
+                        "Retrying load with map_location=cpu."
+                    )
+                    return _manual_load("cpu")
+                raise
         raise
 
 
