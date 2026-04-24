@@ -29,6 +29,6 @@ methods:
     params:
       density_estimator:
         name: knn
-      norm: 1
+      norm: 2
       tp: 0.5
       epsilon: 4.5
