@@ -16,6 +16,7 @@ model:
     dropout: 0.2
 
 sampling:
+  n_train: 5000
   n_queries: 1000
 
 timeout_per_sample: 120

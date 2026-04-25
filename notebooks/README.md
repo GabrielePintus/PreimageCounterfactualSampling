@@ -36,6 +36,8 @@ Interactive notebooks for training evaluation, benchmark analysis, and CertCF di
   Adult full-space diagnostic notebook that tests true region-containing merges by building the exact lifted convex hull of small groups of original certified `L1` regions and certifying the merged set with LiRPA affine bounds plus a final LP.
 - `6.24 - FACE hyperparameter heuristic diagnostics.ipynb`
   Tabular benchmark notebook that loads the datasets and checkpoints used by `benchmark_full.yaml`, computes FACE graph and candidate-pool diagnostics, and proposes a per-dataset heuristic for choosing `epsilon` and `tp`.
+- `6.25 - Benchmark result tables and manifoldness plots.ipynb`
+  Final benchmark analysis notebook scaffold that loads the main L1 benchmark and separate FACE result files into one combined dataframe for validity-distance plots and manifoldness tables.
 
 ## Archived Notebooks
 
