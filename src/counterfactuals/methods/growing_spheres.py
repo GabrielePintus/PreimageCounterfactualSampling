@@ -6,12 +6,13 @@ Interpretability in Machine Learning". FUZZ-IEEE 2017.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
 from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface  # noqa: F401 – used by type annotation in __init__
+from counterfactuals.methods._constraints import immutable_metadata, normalize_fixed_dims
 
 
 class GrowingSpheresMethod(BaseCounterfactualMethod):
@@ -24,6 +25,8 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
         max_radius: float = 3.0,
         radius_step: float = 0.15,
         norm: int | float | str = 2,
+        fixed_dims: Optional[Sequence[int]] = None,
+        immutable_features: Optional[Sequence[str]] = None,
         random_seed: int = 42,
     ):
         super().__init__(model=model, random_seed=random_seed)
@@ -31,6 +34,8 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
         self.max_radius = max_radius
         self.radius_step = radius_step
         self.norm = self._normalize_norm(norm)
+        self.fixed_dims = normalize_fixed_dims(fixed_dims)
+        self.immutable_features = tuple(str(name) for name in (immutable_features or ()))
         self._feature_scale: Optional[np.ndarray] = None
 
     @staticmethod
@@ -90,15 +95,34 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
                 x_cf=x_query.copy(),
                 success=False,
                 distance=0.0,
-                metadata={"target_class": target_class, "searched_radius": self.max_radius},
+                metadata={
+                    "target_class": target_class,
+                    "searched_radius": self.max_radius,
+                    **immutable_metadata(self.fixed_dims, self.immutable_features),
+                },
             )
+
+        best = self._apply_fixed_dims(best, x_query)
+        best_dist = float(self._lp_distance(best, x_query))
 
         return CounterfactualResult(
             x_cf=best.astype(np.float32),
             success=True,
             distance=best_dist,
-            metadata={"target_class": target_class, "searched_radius": radius, "norm": self.norm},
+            metadata={
+                "target_class": target_class,
+                "searched_radius": radius,
+                "norm": self.norm,
+                **immutable_metadata(self.fixed_dims, self.immutable_features),
+            },
         )
+
+    def _apply_fixed_dims(self, x: np.ndarray, x0: np.ndarray) -> np.ndarray:
+        if self.fixed_dims is None:
+            return x
+        constrained = np.asarray(x).copy()
+        constrained[..., self.fixed_dims] = np.asarray(x0)[..., self.fixed_dims]
+        return constrained
 
     def _sample_layer(self, x0: np.ndarray, inner_radius: float, outer_radius: float) -> np.ndarray:
         # Sample uniformly over directions in the chosen lp geometry, then sample
@@ -122,7 +146,7 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
             ).astype(np.float32)
 
         scaled = unit * radii * self._feature_scale[None, :]
-        return x0[None, :] + scaled
+        return self._apply_fixed_dims(x0[None, :] + scaled, x0)
 
     def _sample_unit_directions(self, dim: int) -> np.ndarray:
         if self.norm == 1:
@@ -154,6 +178,7 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
     ) -> np.ndarray:
         """Greedy post-hoc sparsification as in the original Growing Spheres procedure."""
         x_cf = enemy.copy()
+        x_cf = self._apply_fixed_dims(x_cf, x0)
         changed = np.where(np.abs(x_cf - x0) > 1e-8)[0]
         if changed.size == 0:
             return x_cf

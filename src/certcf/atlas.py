@@ -22,6 +22,7 @@ import numpy as np
 from copy import deepcopy
 
 _SOLVER_TOL = 1e-9  # QP convergence tolerance (fixed)
+_PROJECTION_FEASIBILITY_TOL = 1e-6  # Numerical post-solve feasibility tolerance.
 import torch
 import torch.nn as nn
 from scipy.optimize import minimize
@@ -131,6 +132,7 @@ class CertCFAtlas:
         cvxpy_solvers: Optional[List[str]] = None,
         cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]] = None,
         cvxpy_accept_statuses: Optional[Dict[str, List[str]]] = None,
+        classification_margin: float = 0.0,
         ohe_decode_mode: str = "exact",
         decode_beam_width: int = 8,
         decode_beam_branch_top_k: int = 3,
@@ -161,6 +163,9 @@ class CertCFAtlas:
             cvxpy_solver_options=cvxpy_solver_options,
             cvxpy_accept_statuses=cvxpy_accept_statuses,
         )
+        self.classification_margin = float(classification_margin)
+        if self.classification_margin < 0.0:
+            raise ValueError("classification_margin must be non-negative")
         (
             self.ohe_decode_mode,
             self.decode_beam_width,
@@ -443,7 +448,9 @@ class CertCFAtlas:
         if box_eps <= 0 or ball_eps <= 0:
             return None, None, 0.0, 0.0
 
-        # Erode LiRPA constraints: A @ x + b >= delta * ||a_i||_{q*}
+        classification_margin = float(getattr(self, "classification_margin", 0.0))
+
+        # Erode LiRPA constraints: A @ x + b >= margin + delta * ||a_i||_{q*}
         if delta > 0:
             q_dual = self._dual_norm(robust_norm)
             if q_dual == np.inf:
@@ -452,9 +459,9 @@ class CertCFAtlas:
                 row_dual_norms = np.sum(np.abs(A), axis=1)
             else:
                 row_dual_norms = np.linalg.norm(A, axis=1, ord=q_dual)
-            b_eroded = b - delta * row_dual_norms
+            b_eroded = b - classification_margin - delta * row_dual_norms
         else:
-            b_eroded = b
+            b_eroded = b - classification_margin
 
         A_box, b_box = ball_box_constraints(center, box_eps)
         A_full = np.vstack([A, A_box])
@@ -808,14 +815,15 @@ class CertCFAtlas:
             return None, np.inf, solver_profile
 
         x_proj = z.value
-        if np.min(A_full @ x_proj + b_full) < -1e-7:
+        tol = _PROJECTION_FEASIBILITY_TOL
+        if np.min(A_full @ x_proj + b_full) < -tol:
             return None, np.inf, solver_profile
-        if np.any(x_proj < center - box_eps - 1e-7) or np.any(x_proj > center + box_eps + 1e-7):
+        if np.any(x_proj < center - box_eps - tol) or np.any(x_proj > center + box_eps + tol):
             return None, np.inf, solver_profile
         if self.norm == np.inf:
-            in_ball = np.max(np.abs(x_proj - center)) <= ball_eps + 1e-7
+            in_ball = np.max(np.abs(x_proj - center)) <= ball_eps + tol
         else:
-            in_ball = np.linalg.norm(x_proj - center, ord=self.norm) <= ball_eps + 1e-7
+            in_ball = np.linalg.norm(x_proj - center, ord=self.norm) <= ball_eps + tol
         if not in_ball:
             return None, np.inf, solver_profile
         dist = float(np.linalg.norm(x_proj - x0, ord=self.distance_norm))
@@ -911,11 +919,12 @@ class CertCFAtlas:
         # tolerance isn't met (common when the optimum lies on the box boundary).
         # Instead, verify feasibility directly.
         margins = A_full @ x_proj + b_full
-        if np.min(margins) < -1e-7:
+        tol = _PROJECTION_FEASIBILITY_TOL
+        if np.min(margins) < -tol:
             return None, np.inf
 
-        if np.any(x_proj < center - box_eps - 1e-7) or \
-           np.any(x_proj > center + box_eps + 1e-7):
+        if np.any(x_proj < center - box_eps - tol) or \
+           np.any(x_proj > center + box_eps + tol):
             return None, np.inf
 
         dist = float(np.linalg.norm(x_proj - x0, ord=self.distance_norm))
@@ -1686,9 +1695,34 @@ class CertCFAtlas:
         primary_indices = sorted_candidate_indices[:k]
         fallback_indices = sorted_candidate_indices[k:]
 
-        best_point: Optional[np.ndarray] = None
-        best_dist = np.inf
-        best_idx: Optional[int] = None
+        centers = np.asarray(bd["X"], dtype=np.float64)
+        anchor_distances = np.linalg.norm(
+            centers - np.asarray(x_query, dtype=np.float64)[None, :],
+            ord=self.distance_norm,
+            axis=1,
+        )
+        nearest_anchor_idx: Optional[int] = None
+        for candidate_idx in np.argsort(anchor_distances):
+            candidate_idx = int(candidate_idx)
+            if fixed_dims is not None and len(fixed_dims) > 0:
+                if not np.allclose(centers[candidate_idx][fixed_dims], x_query[fixed_dims], atol=1e-6):
+                    continue
+            nearest_anchor_idx = candidate_idx
+            break
+
+        if nearest_anchor_idx is None:
+            best_point: Optional[np.ndarray] = None
+            best_dist = np.inf
+            best_idx: Optional[int] = None
+            best_source = "projection"
+            nearest_anchor_dist = np.inf
+        else:
+            best_point = centers[nearest_anchor_idx].copy()
+            best_dist = float(anchor_distances[nearest_anchor_idx])
+            best_idx = nearest_anchor_idx
+            best_source = "nearest_anchor"
+            nearest_anchor_dist = best_dist
+
         n_qp = 0
         fallback_used = False
         n_pruned_by_bound = 0
@@ -1708,11 +1742,11 @@ class CertCFAtlas:
                 best_point = point
                 best_dist = dist
                 best_idx = int(idx)
+                best_source = "projection"
 
-        # If the fixed top-k budget finds no feasible certified projection,
-        # keep the method useful by scanning remaining anchors in nearest-anchor
-        # order until the first feasible projection is found. This fallback is
-        # only paid on failures; successful top-k queries keep a fixed QP budget.
+        # If no incumbent is available after the fixed top-k budget, keep the
+        # method useful by scanning remaining anchors in nearest-anchor order.
+        # With the NN-anchor initialization this is mainly a fixed-dim fallback.
         if best_point is None:
             fallback_used = True
             for idx in fallback_indices:
@@ -1726,6 +1760,7 @@ class CertCFAtlas:
                     best_point = point
                     best_dist = dist
                     best_idx = int(idx)
+                    best_source = "projection"
                     break
             best_lower_bound_at_termination = np.nan
 
@@ -1742,6 +1777,10 @@ class CertCFAtlas:
             "n_candidates_pruned_by_top_k": float(max(0, bvh.n_polytopes - k) if not fallback_used else 0),
             "n_candidates_pruned_by_bound": float(n_pruned_by_bound),
             "best_lower_bound_at_termination": float(best_lower_bound_at_termination),
+            "nearest_anchor_initialization_used": float(nearest_anchor_idx is not None),
+            "nearest_anchor_initial_idx": float(nearest_anchor_idx) if nearest_anchor_idx is not None else np.nan,
+            "nearest_anchor_initial_distance": float(nearest_anchor_dist),
+            "nearest_anchor_returned": float(best_source == "nearest_anchor"),
         }
         profiling.update(best_decode_profile[0])
         return best_point, best_dist, best_idx, n_qp, profiling
@@ -1775,6 +1814,7 @@ class CertCFAtlas:
         profiling: Dict[str, ProfileValue] = {
             "method": resolved_method,
             "delta": float(delta),
+            "classification_margin": float(getattr(self, "classification_margin", 0.0)),
             "robust_norm": (
                 float(robust_norm) if robust_norm == np.inf else int(robust_norm)
             ) if robust_norm is not None else (

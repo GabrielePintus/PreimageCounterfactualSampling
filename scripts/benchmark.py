@@ -348,6 +348,99 @@ def _get_tabular_spec(dataset_name: str):
         return None
 
 
+def _normalize_immutable_features(raw_features: Any) -> list[str]:
+    if raw_features is None:
+        return []
+    if isinstance(raw_features, str):
+        features = [raw_features]
+    else:
+        try:
+            features = list(raw_features)
+        except TypeError as exc:
+            raise ValueError("immutable_features must be a string or a sequence of strings") from exc
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for feature in features:
+        if not isinstance(feature, str):
+            raise ValueError("immutable_features entries must be strings")
+        name = feature.strip()
+        if not name:
+            raise ValueError("immutable_features entries must be non-empty strings")
+        if name not in seen:
+            normalized.append(name)
+            seen.add(name)
+    return normalized
+
+
+def _resolve_immutable_feature_dims(
+    dataset_name: str,
+    immutable_features: Any,
+    preprocessing_name: str = "identity",
+) -> tuple[Optional[np.ndarray], list[str]]:
+    features = _normalize_immutable_features(immutable_features)
+    if not features:
+        return None, []
+    if preprocessing_name != "identity":
+        raise ValueError(
+            "immutable_features are only supported with identity preprocessing "
+            f"(got preprocessing={preprocessing_name!r})."
+        )
+
+    spec = _get_tabular_spec(dataset_name)
+    if spec is None:
+        raise ValueError(
+            f"immutable_features require a tabular dataset spec; none found for {dataset_name!r}."
+        )
+
+    feature_to_slice = dict(zip(spec.feature_names, spec.feature_slices))
+    unknown = [feature for feature in features if feature not in feature_to_slice]
+    if unknown:
+        valid = ", ".join(spec.feature_names)
+        missing = ", ".join(unknown)
+        raise ValueError(
+            f"Unknown immutable feature(s) for dataset {dataset_name!r}: {missing}. "
+            f"Valid features are: {valid}."
+        )
+
+    dims: list[int] = []
+    for feature in features:
+        start, end = feature_to_slice[feature]
+        dims.extend(range(int(start), int(end)))
+    return np.unique(np.asarray(dims, dtype=np.int64)), features
+
+
+def _attach_immutable_feature_constraints(
+    *,
+    method_name: str,
+    method_params: Dict[str, Any],
+    dataset_name: str,
+    preprocessing_name: str,
+) -> Dict[str, Any]:
+    """Resolve YAML immutable feature names into method-level fixed dimensions."""
+    immutable_features = _normalize_immutable_features(method_params.get("immutable_features"))
+    if not immutable_features:
+        return method_params
+
+    supported_methods = {"nearest_neighbor", "growing_spheres"}
+    if method_name not in supported_methods:
+        supported = ", ".join(sorted(["certcf", *supported_methods]))
+        raise ValueError(
+            f"immutable_features are not supported for method {method_name!r}. "
+            f"Supported methods are: {supported}."
+        )
+
+    fixed_dims, resolved_features = _resolve_immutable_feature_dims(
+        dataset_name=dataset_name,
+        immutable_features=immutable_features,
+        preprocessing_name=preprocessing_name,
+    )
+    constrained_params = dict(method_params)
+    constrained_params["fixed_dims"] = fixed_dims
+    constrained_params["immutable_features"] = resolved_features
+    return constrained_params
+
+
 def _sample_balanced_indices(
     y: np.ndarray,
     per_class: int,
@@ -403,6 +496,21 @@ def _build_query_tasks(
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """Return (query_indices, y_true_tasks, y_orig_tasks, target_classes)."""
+    if "query_indices" in sampling_cfg:
+        query_indices = np.asarray(sampling_cfg["query_indices"], dtype=np.int64)
+        if query_indices.ndim != 1:
+            raise ValueError("sampling.query_indices must be a one-dimensional list of test indices.")
+        if len(query_indices) == 0:
+            raise ValueError("sampling.query_indices must not be empty.")
+        if np.any(query_indices < 0) or np.any(query_indices >= len(x_test)):
+            raise ValueError(
+                "sampling.query_indices contains indices outside the test-set range "
+                f"[0, {len(x_test) - 1}]."
+            )
+        query_indices = np.asarray(sorted(dict.fromkeys(query_indices.tolist())), dtype=np.int64)
+        y_orig = model.predict(x_test[query_indices])
+        return query_indices, y_test[query_indices], y_orig, None
+
     n_queries = int(sampling_cfg.get("n_queries", len(x_test)))
     if dataset_name != "mnist":
         n_queries = min(n_queries, len(x_test))
@@ -456,6 +564,7 @@ def _build_certcf_method(
     y_train: np.ndarray,
     x_queries: np.ndarray,
     seed: int,
+    preprocessing_name: str = "identity",
 ):
     """Build CertCF from a checkpoint.
 
@@ -535,6 +644,7 @@ def _build_certcf_method(
     cvxpy_solvers = deepcopy(params["cvxpy_solvers"]) if "cvxpy_solvers" in params else None
     cvxpy_solver_options = deepcopy(params["cvxpy_solver_options"]) if "cvxpy_solver_options" in params else None
     cvxpy_accept_statuses = deepcopy(params["cvxpy_accept_statuses"]) if "cvxpy_accept_statuses" in params else None
+    classification_margin = float(params.get("classification_margin", 0.0))
     ohe_decode_mode = params["ohe_decode_mode"] if "ohe_decode_mode" in params else None
     decode_beam_width = params["decode_beam_width"] if "decode_beam_width" in params else None
     decode_beam_branch_top_k = params["decode_beam_branch_top_k"] if "decode_beam_branch_top_k" in params else None
@@ -545,6 +655,11 @@ def _build_certcf_method(
     dataset_module = str(model_params.get("dataset_module", dataset_name))
     hidden_dims = list(model_params.get("hidden_dims", [32, 8]))
     dropout = float(model_params.get("dropout", 0.2))
+    fixed_dims, immutable_features = _resolve_immutable_feature_dims(
+        dataset_name=dataset_module,
+        immutable_features=params.get("immutable_features"),
+        preprocessing_name=preprocessing_name,
+    )
 
     z_train = x_train
     z_queries = x_queries
@@ -600,6 +715,9 @@ def _build_certcf_method(
         subsample_method=atlas_subsample_method,
         subsample_space=atlas_subsample_space,
         boundary_beta=boundary_beta,
+        classification_margin=classification_margin,
+        fixed_dims=fixed_dims,
+        immutable_features=immutable_features,
         random_seed=seed,
     )
     if cvxpy_solvers is not None:
@@ -717,7 +835,9 @@ def _build_mnist_model_from_checkpoint(
 # ---------------------------------------------------------------------------
 
 _NON_SWEEP_LIST_PARAMS_BY_METHOD: Dict[str, set[str]] = {
-    "certcf": {"cvxpy_solvers"},
+    "certcf": {"cvxpy_solvers", "immutable_features"},
+    "nearest_neighbor": {"immutable_features"},
+    "growing_spheres": {"immutable_features"},
 }
 
 
@@ -1080,6 +1200,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     y_train=y_train_pred_raw,
                     x_queries=x_queries,
                     seed=seed,
+                    preprocessing_name=transform_name,
                 )
                 build_time_s = time.perf_counter() - _t_build
                 embed_device = method_params.get("device", "cpu")
@@ -1112,6 +1233,12 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                 continue
         else:
             try:
+                method_params = _attach_immutable_feature_constraints(
+                    method_name=method_name,
+                    method_params=method_params,
+                    dataset_name=ds_cfg["name"],
+                    preprocessing_name=transform_name,
+                )
                 method = registries["method"].create(method_name, model=model_for_methods, random_seed=seed, **method_params)
                 _t_build = time.perf_counter()
                 method.fit(x_train=x_train_gen, y_train=y_train_pred_gen)

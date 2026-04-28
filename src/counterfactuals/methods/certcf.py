@@ -12,6 +12,7 @@ from torch.utils.data import TensorDataset
 
 from counterfactuals.core.base_classes import CounterfactualResult, BaseCounterfactualMethod
 from counterfactuals.core.interfaces import ModelInterface
+from counterfactuals.methods._constraints import normalize_fixed_dims
 from certcf.atlas import CertCFAtlas
 from certcf.eps_strategies import EpsStrategy
 
@@ -59,10 +60,13 @@ class CertCF(BaseCounterfactualMethod):
         cvxpy_solvers: Optional[List[str]] = None,
         cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]] = None,
         cvxpy_accept_statuses: Optional[Dict[str, List[str]]] = None,
+        classification_margin: float = 0.0,
         ohe_decode_mode: str = "exact",
         decode_beam_width: int = 8,
         decode_beam_branch_top_k: int = 3,
         decode_beam_max_solver_calls: int = 32,
+        fixed_dims: Optional[Sequence[int]] = None,
+        immutable_features: Optional[Sequence[str]] = None,
 
         # Custom downsampling strategy
         k_per_class: Optional[int] = None,
@@ -89,6 +93,8 @@ class CertCF(BaseCounterfactualMethod):
         self.eps_strategy = eps_strategy
         self.batch_size = batch_size
         self.ohe_slices = ohe_slices
+        self.fixed_dims = normalize_fixed_dims(fixed_dims)
+        self.immutable_features = tuple(str(name) for name in (immutable_features or ()))
         # Atlas config
         self.cnn = cnn
         self.default_query_method = default_query_method
@@ -108,6 +114,9 @@ class CertCF(BaseCounterfactualMethod):
             cvxpy_solver_options=cvxpy_solver_options,
             cvxpy_accept_statuses=cvxpy_accept_statuses,
         )
+        self.classification_margin = float(classification_margin)
+        if self.classification_margin < 0.0:
+            raise ValueError("classification_margin must be non-negative")
         (
             self.ohe_decode_mode,
             self.decode_beam_width,
@@ -399,6 +408,7 @@ class CertCF(BaseCounterfactualMethod):
             cvxpy_solvers=self.cvxpy_solvers,
             cvxpy_solver_options=self.cvxpy_solver_options,
             cvxpy_accept_statuses=self.cvxpy_accept_statuses,
+            classification_margin=self.classification_margin,
             ohe_decode_mode=self.ohe_decode_mode,
             decode_beam_width=self.decode_beam_width,
             decode_beam_branch_top_k=self.decode_beam_branch_top_k,
@@ -439,18 +449,21 @@ class CertCF(BaseCounterfactualMethod):
             target_class=target_class,
             delta=self.delta,
             robust_norm=self.robust_norm,
+            fixed_dims=self.fixed_dims,
             query_k_candidates=self.query_k_candidates,
             timeout_s_per_query=timeout_s_per_query,
         )
         return [self._wrap_atlas_result(result) for result in results]
 
-    @staticmethod
-    def _wrap_atlas_result(result) -> CounterfactualResult:
+    def _wrap_atlas_result(self, result) -> CounterfactualResult:
         """Convert atlas-level results into the shared benchmark result type."""
         x_cf = np.asarray(result.x_cf, dtype=np.float32) if result.x_cf is not None else None
+        metadata = dict(result.profiling)
+        metadata["fixed_dims_count"] = int(0 if self.fixed_dims is None else len(self.fixed_dims))
+        metadata["immutable_features"] = ",".join(self.immutable_features)
         return CounterfactualResult(
             x_cf=x_cf,
             success=bool(result.success),
             distance=float(result.distance),
-            metadata=result.profiling,
+            metadata=metadata,
         )
