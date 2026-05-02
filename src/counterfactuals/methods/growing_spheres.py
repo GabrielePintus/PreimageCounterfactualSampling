@@ -12,7 +12,13 @@ import numpy as np
 
 from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface  # noqa: F401 – used by type annotation in __init__
-from counterfactuals.methods._constraints import immutable_metadata, normalize_fixed_dims
+from counterfactuals.methods._constraints import (
+    apply_directional_constraints,
+    constraint_metadata,
+    normalize_directional_dims,
+    normalize_fixed_dims,
+    validate_disjoint_directional_dims,
+)
 
 
 class GrowingSpheresMethod(BaseCounterfactualMethod):
@@ -27,6 +33,10 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
         norm: int | float | str = 2,
         fixed_dims: Optional[Sequence[int]] = None,
         immutable_features: Optional[Sequence[str]] = None,
+        nondecreasing_dims: Optional[Sequence[int]] = None,
+        nonincreasing_dims: Optional[Sequence[int]] = None,
+        nondecreasing_features: Optional[Sequence[str]] = None,
+        nonincreasing_features: Optional[Sequence[str]] = None,
         random_seed: int = 42,
     ):
         super().__init__(model=model, random_seed=random_seed)
@@ -36,6 +46,17 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
         self.norm = self._normalize_norm(norm)
         self.fixed_dims = normalize_fixed_dims(fixed_dims)
         self.immutable_features = tuple(str(name) for name in (immutable_features or ()))
+        self.nondecreasing_dims = normalize_directional_dims(
+            nondecreasing_dims,
+            name="nondecreasing_dims",
+        )
+        self.nonincreasing_dims = normalize_directional_dims(
+            nonincreasing_dims,
+            name="nonincreasing_dims",
+        )
+        validate_disjoint_directional_dims(self.nondecreasing_dims, self.nonincreasing_dims)
+        self.nondecreasing_features = tuple(str(name) for name in (nondecreasing_features or ()))
+        self.nonincreasing_features = tuple(str(name) for name in (nonincreasing_features or ()))
         self._feature_scale: Optional[np.ndarray] = None
 
     @staticmethod
@@ -98,11 +119,11 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
                 metadata={
                     "target_class": target_class,
                     "searched_radius": self.max_radius,
-                    **immutable_metadata(self.fixed_dims, self.immutable_features),
+                    **self._constraint_metadata(),
                 },
             )
 
-        best = self._apply_fixed_dims(best, x_query)
+        best = self._apply_constraints(best, x_query)
         best_dist = float(self._lp_distance(best, x_query))
 
         return CounterfactualResult(
@@ -113,7 +134,7 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
                 "target_class": target_class,
                 "searched_radius": radius,
                 "norm": self.norm,
-                **immutable_metadata(self.fixed_dims, self.immutable_features),
+                **self._constraint_metadata(),
             },
         )
 
@@ -123,6 +144,25 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
         constrained = np.asarray(x).copy()
         constrained[..., self.fixed_dims] = np.asarray(x0)[..., self.fixed_dims]
         return constrained
+
+    def _apply_constraints(self, x: np.ndarray, x0: np.ndarray) -> np.ndarray:
+        constrained = self._apply_fixed_dims(x, x0)
+        return apply_directional_constraints(
+            constrained,
+            x0,
+            self.nondecreasing_dims,
+            self.nonincreasing_dims,
+        )
+
+    def _constraint_metadata(self) -> dict[str, int | str]:
+        return constraint_metadata(
+            self.fixed_dims,
+            self.immutable_features,
+            self.nondecreasing_dims,
+            self.nonincreasing_dims,
+            self.nondecreasing_features,
+            self.nonincreasing_features,
+        )
 
     def _sample_layer(self, x0: np.ndarray, inner_radius: float, outer_radius: float) -> np.ndarray:
         # Sample uniformly over directions in the chosen lp geometry, then sample
@@ -146,7 +186,7 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
             ).astype(np.float32)
 
         scaled = unit * radii * self._feature_scale[None, :]
-        return self._apply_fixed_dims(x0[None, :] + scaled, x0)
+        return self._apply_constraints(x0[None, :] + scaled, x0)
 
     def _sample_unit_directions(self, dim: int) -> np.ndarray:
         if self.norm == 1:
@@ -178,7 +218,7 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
     ) -> np.ndarray:
         """Greedy post-hoc sparsification as in the original Growing Spheres procedure."""
         x_cf = enemy.copy()
-        x_cf = self._apply_fixed_dims(x_cf, x0)
+        x_cf = self._apply_constraints(x_cf, x0)
         changed = np.where(np.abs(x_cf - x0) > 1e-8)[0]
         if changed.size == 0:
             return x_cf
@@ -190,4 +230,4 @@ class GrowingSpheresMethod(BaseCounterfactualMethod):
             trial[idx] = x0[idx]
             if int(self.model.predict(trial[None, :])[0]) == target_class:
                 x_cf = trial
-        return x_cf
+        return self._apply_constraints(x_cf, x0)

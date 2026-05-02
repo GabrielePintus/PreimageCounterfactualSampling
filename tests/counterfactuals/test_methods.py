@@ -180,6 +180,72 @@ def test_growing_spheres_layer_sampling_stays_finite_in_high_dimension():
     assert np.max(np.linalg.norm(samples_large, axis=1)) <= 5.0 + 1e-5
 
 
+def test_growing_spheres_sampling_preserves_fixed_dims():
+    method = GrowingSpheresMethod(
+        model=ThresholdModel(),
+        n_in_layer=128,
+        fixed_dims=[3, 1, 1],
+        immutable_features=["sex"],
+        random_seed=10,
+    )
+    method._feature_scale = np.ones(4, dtype=np.float32)
+
+    x0 = np.array([-0.8, 1.0, 0.0, 4.0], dtype=np.float32)
+    samples = method._sample_layer(x0=x0, inner_radius=0.0, outer_radius=1.0)
+
+    assert np.array_equal(method.fixed_dims, np.array([1, 3], dtype=np.int64))
+    assert np.allclose(samples[:, [1, 3]], x0[[1, 3]])
+
+
+def test_growing_spheres_sampling_respects_directional_dims():
+    method = GrowingSpheresMethod(
+        model=ThresholdModel(),
+        n_in_layer=128,
+        nondecreasing_dims=[1],
+        nonincreasing_dims=[2],
+        nondecreasing_features=["age"],
+        nonincreasing_features=["debt"],
+        random_seed=10,
+    )
+    method._feature_scale = np.ones(3, dtype=np.float32)
+
+    x0 = np.array([-0.8, 1.0, 4.0], dtype=np.float32)
+    samples = method._sample_layer(x0=x0, inner_radius=0.0, outer_radius=1.0)
+
+    assert np.all(samples[:, 1] >= x0[1] - 1e-6)
+    assert np.all(samples[:, 2] <= x0[2] + 1e-6)
+    assert method.nondecreasing_features == ("age",)
+    assert method.nonincreasing_features == ("debt",)
+
+
+def test_growing_spheres_feature_selection_preserves_fixed_dims():
+    method = GrowingSpheresMethod(model=ThresholdModel(), fixed_dims=[1], random_seed=10)
+
+    x0 = np.array([-0.8, 0.0], dtype=np.float32)
+    enemy = np.array([0.6, 5.0], dtype=np.float32)
+    x_cf = method._feature_selection(x0=x0, enemy=enemy, target_class=1)
+
+    assert int(method.model.predict(x_cf[None, :])[0]) == 1
+    assert np.isclose(x_cf[1], x0[1])
+
+
+def test_growing_spheres_feature_selection_preserves_directional_dims():
+    method = GrowingSpheresMethod(
+        model=ThresholdModel(),
+        nondecreasing_dims=[1],
+        nonincreasing_dims=[2],
+        random_seed=10,
+    )
+
+    x0 = np.array([-0.8, 1.0, 4.0], dtype=np.float32)
+    enemy = np.array([0.6, 0.5, 5.0], dtype=np.float32)
+    x_cf = method._feature_selection(x0=x0, enemy=enemy, target_class=1)
+
+    assert int(method.model.predict(x_cf[None, :])[0]) == 1
+    assert x_cf[1] >= x0[1] - 1e-6
+    assert x_cf[2] <= x0[2] + 1e-6
+
+
 def test_face_method_contract():
     x_train, y_train = _train_data()
     method = FACEMethod(
@@ -274,8 +340,114 @@ def test_face_start_node_respects_query_label():
     assert face._y_train[expected_start] == query_label
 
 
+def test_face_candidate_filter_respects_directional_dims():
+    x_train = np.array(
+        [
+            [-1.0, 0.5],
+            [-0.5, 0.6],
+            [0.2, 0.2],
+            [0.9, 0.8],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 0, 1, 1], dtype=np.int64)
+    face = FACEMethod(
+        model=ThresholdModel(),
+        density_estimator=KNNEstimator(n_neighbors=2),
+        epsilon=2.0,
+        tp=0.5,
+        td=0.0,
+        nondecreasing_dims=[1],
+        nondecreasing_features=["age"],
+        random_seed=10,
+    )
+    face.fit(x_train=x_train, y_train=y_train)
+
+    candidates = face.candidate_nodes(
+        x_query=np.array([-0.8, 0.5], dtype=np.float32),
+        target_class=1,
+    )
+
+    assert np.array_equal(candidates, np.array([3]))
+    assert face.nondecreasing_features == ("age",)
+
+
 def test_nearest_neighbor_method_contract():
     _assert_method_works(NearestNeighborMethod(model=ThresholdModel(), random_seed=10))
+
+
+def test_nearest_neighbor_filters_candidates_by_fixed_dims():
+    x_train = np.array(
+        [
+            [-0.5, 0.5],
+            [0.05, 0.0],
+            [0.9, 0.5],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 1, 1], dtype=np.int64)
+    method = NearestNeighborMethod(
+        model=ThresholdModel(),
+        fixed_dims=[1],
+        immutable_features=["sex"],
+        random_seed=10,
+    )
+    method.fit(x_train=x_train, y_train=y_train)
+
+    result = method.generate(x=np.array([-0.1, 0.5], dtype=np.float32), target_class=1)
+
+    assert result.success
+    assert np.allclose(result.x_cf, np.array([0.9, 0.5], dtype=np.float32))
+    assert result.metadata["n_immutable_compatible_candidates"] == 1
+    assert result.metadata["fixed_dims_count"] == 1
+    assert result.metadata["immutable_features"] == "sex"
+
+
+def test_nearest_neighbor_filters_candidates_by_directional_dims():
+    x_train = np.array(
+        [
+            [-0.5, 0.5],
+            [0.1, 0.1],
+            [0.9, 0.7],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 1, 1], dtype=np.int64)
+    method = NearestNeighborMethod(
+        model=ThresholdModel(),
+        nondecreasing_dims=[1],
+        nondecreasing_features=["age"],
+        random_seed=10,
+    )
+    method.fit(x_train=x_train, y_train=y_train)
+
+    result = method.generate(x=np.array([-0.1, 0.5], dtype=np.float32), target_class=1)
+
+    assert result.success
+    assert np.allclose(result.x_cf, np.array([0.9, 0.7], dtype=np.float32))
+    assert result.metadata["n_directional_compatible_candidates"] == 1
+    assert result.metadata["nondecreasing_dims_count"] == 1
+    assert result.metadata["nondecreasing_features"] == "age"
+
+
+def test_nearest_neighbor_fails_when_no_candidate_matches_fixed_dims():
+    x_train = np.array(
+        [
+            [-0.5, 0.5],
+            [0.05, 0.0],
+            [0.9, 0.25],
+        ],
+        dtype=np.float32,
+    )
+    y_train = np.array([0, 1, 1], dtype=np.int64)
+    method = NearestNeighborMethod(model=ThresholdModel(), fixed_dims=[1], random_seed=10)
+    method.fit(x_train=x_train, y_train=y_train)
+
+    result = method.generate(x=np.array([-0.1, 0.5], dtype=np.float32), target_class=1)
+
+    assert not result.success
+    assert result.metadata["reason"] == "no_immutable_compatible_candidate"
+    assert result.metadata["n_immutable_compatible_candidates"] == 0
 
 
 def test_generic_methods_reject_boundary_random_subsampling():

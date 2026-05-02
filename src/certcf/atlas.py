@@ -133,6 +133,12 @@ class CertCFAtlas:
         cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]] = None,
         cvxpy_accept_statuses: Optional[Dict[str, List[str]]] = None,
         classification_margin: float = 0.0,
+        adaptive_eps: bool = False,
+        adaptive_eps_shrink_factor: float = 0.5,
+        adaptive_eps_max_shrinks: int = 8,
+        adaptive_eps_min: float = 1.0e-6,
+        adaptive_eps_center_tol: float = 1.0e-6,
+        adaptive_eps_binary_search_steps: int = 0,
         ohe_decode_mode: str = "exact",
         decode_beam_width: int = 8,
         decode_beam_branch_top_k: int = 3,
@@ -166,6 +172,22 @@ class CertCFAtlas:
         self.classification_margin = float(classification_margin)
         if self.classification_margin < 0.0:
             raise ValueError("classification_margin must be non-negative")
+        self.adaptive_eps = bool(adaptive_eps)
+        self.adaptive_eps_shrink_factor = float(adaptive_eps_shrink_factor)
+        if not (0.0 < self.adaptive_eps_shrink_factor < 1.0):
+            raise ValueError("adaptive_eps_shrink_factor must be in (0, 1)")
+        self.adaptive_eps_max_shrinks = int(adaptive_eps_max_shrinks)
+        if self.adaptive_eps_max_shrinks < 0:
+            raise ValueError("adaptive_eps_max_shrinks must be non-negative")
+        self.adaptive_eps_min = float(adaptive_eps_min)
+        if self.adaptive_eps_min < 0.0:
+            raise ValueError("adaptive_eps_min must be non-negative")
+        self.adaptive_eps_center_tol = float(adaptive_eps_center_tol)
+        if self.adaptive_eps_center_tol < 0.0:
+            raise ValueError("adaptive_eps_center_tol must be non-negative")
+        self.adaptive_eps_binary_search_steps = int(adaptive_eps_binary_search_steps)
+        if self.adaptive_eps_binary_search_steps < 0:
+            raise ValueError("adaptive_eps_binary_search_steps must be non-negative")
         (
             self.ohe_decode_mode,
             self.decode_beam_width,
@@ -363,6 +385,13 @@ class CertCFAtlas:
             dtype=torch.float32,
             eps_array=eps_array,
             lirpa_method=self.lirpa_method,
+            classification_margin=self.classification_margin,
+            adaptive_eps=self.adaptive_eps,
+            adaptive_eps_shrink_factor=self.adaptive_eps_shrink_factor,
+            adaptive_eps_max_shrinks=self.adaptive_eps_max_shrinks,
+            adaptive_eps_min=self.adaptive_eps_min,
+            adaptive_eps_center_tol=self.adaptive_eps_center_tol,
+            adaptive_eps_binary_search_steps=self.adaptive_eps_binary_search_steps,
         )
 
         # Step 2: Build BVH spatial index for each class
@@ -478,6 +507,8 @@ class CertCFAtlas:
         box_eps: float,
         ball_eps: float,
         fixed_dims: Optional[np.ndarray] = None,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
     ) -> np.ndarray:
@@ -494,6 +525,12 @@ class CertCFAtlas:
             ref = self._apply_fixed_ohe_assignments(ref, ohe_slices, fixed_ohe_assignments)
         if fixed_dims is not None and len(fixed_dims) > 0:
             ref[fixed_dims] = x0[fixed_dims]
+        ref = self._apply_directional_bounds_to_point(
+            ref,
+            x0,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
+        )
 
         direction = x0 - ref
         ref_offset = ref - center
@@ -531,6 +568,12 @@ class CertCFAtlas:
             candidate = self._apply_fixed_ohe_assignments(candidate, ohe_slices, fixed_ohe_assignments)
         if fixed_dims is not None and len(fixed_dims) > 0:
             candidate[fixed_dims] = x0[fixed_dims]
+        candidate = self._apply_directional_bounds_to_point(
+            candidate,
+            x0,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
+        )
 
         margins_ref = A_full @ ref + b_full
         if np.min(margins_ref) >= -1e-9:
@@ -548,12 +591,63 @@ class CertCFAtlas:
                 candidate = self._apply_fixed_ohe_assignments(candidate, ohe_slices, fixed_ohe_assignments)
             if fixed_dims is not None and len(fixed_dims) > 0:
                 candidate[fixed_dims] = x0[fixed_dims]
+            candidate = self._apply_directional_bounds_to_point(
+                candidate,
+                x0,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
+            )
             return candidate
 
         if np.min(A_full @ candidate + b_full) >= -1e-9:
             return candidate
 
         return ref
+
+    @staticmethod
+    def _apply_directional_bounds_to_point(
+        point: np.ndarray,
+        x_query: np.ndarray,
+        *,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Clip one point to query-relative directional halfspaces."""
+        if nondecreasing_dims is None and nonincreasing_dims is None:
+            return point
+        clipped = np.asarray(point, dtype=np.float64).copy()
+        x_query = np.asarray(x_query, dtype=np.float64).reshape(-1)
+        if nondecreasing_dims is not None and len(nondecreasing_dims) > 0:
+            clipped[nondecreasing_dims] = np.maximum(
+                clipped[nondecreasing_dims],
+                x_query[nondecreasing_dims],
+            )
+        if nonincreasing_dims is not None and len(nonincreasing_dims) > 0:
+            clipped[nonincreasing_dims] = np.minimum(
+                clipped[nonincreasing_dims],
+                x_query[nonincreasing_dims],
+            )
+        return clipped
+
+    @staticmethod
+    def _directional_constraints_satisfied(
+        point: np.ndarray,
+        x_query: np.ndarray,
+        *,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
+        tol: float = _PROJECTION_FEASIBILITY_TOL,
+    ) -> bool:
+        """Check query-relative directional feasibility for one point."""
+        point = np.asarray(point, dtype=np.float64).reshape(-1)
+        x_query = np.asarray(x_query, dtype=np.float64).reshape(-1)
+        if nondecreasing_dims is not None and len(nondecreasing_dims) > 0:
+            if np.any(point[nondecreasing_dims] < x_query[nondecreasing_dims] - tol):
+                return False
+        if nonincreasing_dims is not None and len(nonincreasing_dims) > 0:
+            if np.any(point[nonincreasing_dims] > x_query[nonincreasing_dims] + tol):
+                return False
+        return True
 
     @staticmethod
     def _ohe_product_size(ohe_slices: Optional[List[Tuple[int, int]]]) -> int:
@@ -658,6 +752,8 @@ class CertCFAtlas:
         A_nominal, b_nominal, _, nominal_ball_eps = self._erode_constraints(
             bd['lA'][anchor_idx], bd['lbias'][anchor_idx], center, d, 0.0, self.norm, eps_i
         )
+        if A_nominal is None:
+            return False, False
         in_nominal = self._is_certified_candidate(
             x_cf, A_nominal, b_nominal, center, nominal_ball_eps, tol=tol
         )
@@ -728,6 +824,8 @@ class CertCFAtlas:
         box_eps: float,
         ball_eps: float,
         fixed_dims: Optional[np.ndarray] = None,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
@@ -744,6 +842,8 @@ class CertCFAtlas:
             box_eps,
             ball_eps,
             fixed_dims=fixed_dims,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
             ohe_slices=ohe_slices,
             fixed_ohe_assignments=fixed_ohe_assignments,
         )
@@ -774,6 +874,12 @@ class CertCFAtlas:
         # Fix specified dimensions to their query values
         if fixed_dims is not None and len(fixed_dims) > 0:
             constraints.append(z[fixed_dims] == x0[fixed_dims])
+
+        # Query-relative directional constraints for numerical features.
+        if nondecreasing_dims is not None and len(nondecreasing_dims) > 0:
+            constraints.append(z[nondecreasing_dims] >= x0[nondecreasing_dims])
+        if nonincreasing_dims is not None and len(nonincreasing_dims) > 0:
+            constraints.append(z[nonincreasing_dims] <= x0[nonincreasing_dims])
 
         # OHE simplex constraints: each categorical block must sum to 1 and be >= 0
         if ohe_slices is not None:
@@ -820,6 +926,14 @@ class CertCFAtlas:
             return None, np.inf, solver_profile
         if np.any(x_proj < center - box_eps - tol) or np.any(x_proj > center + box_eps + tol):
             return None, np.inf, solver_profile
+        if not self._directional_constraints_satisfied(
+            x_proj,
+            x0,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
+            tol=tol,
+        ):
+            return None, np.inf, solver_profile
         if self.norm == np.inf:
             in_ball = np.max(np.abs(x_proj - center)) <= ball_eps + tol
         else:
@@ -839,6 +953,8 @@ class CertCFAtlas:
         maxiter: int,
         tol: float,
         fixed_dims: Optional[np.ndarray] = None,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
@@ -871,6 +987,15 @@ class CertCFAtlas:
             for i in fixed_dims:
                 bounds[i] = (x0[i], x0[i])
 
+        if nondecreasing_dims is not None:
+            for i in nondecreasing_dims:
+                lo, hi = bounds[int(i)]
+                bounds[int(i)] = (max(lo, float(x0[int(i)])), hi)
+        if nonincreasing_dims is not None:
+            for i in nonincreasing_dims:
+                lo, hi = bounds[int(i)]
+                bounds[int(i)] = (lo, min(hi, float(x0[int(i)])))
+
         # OHE simplex constraints: clamp categorical dims to [0,1] and enforce sum==1
         if ohe_slices is not None:
             for block_idx, (s, e) in enumerate(ohe_slices):
@@ -891,6 +1016,9 @@ class CertCFAtlas:
                         target = 1.0 if i == s + fixed_cat else 0.0
                         bounds[i] = (target, target)
 
+        if any(lo > hi + _PROJECTION_FEASIBILITY_TOL for lo, hi in bounds):
+            return None, np.inf
+
         x_init = self._projection_initial_guess(
             x0,
             A_full,
@@ -899,6 +1027,8 @@ class CertCFAtlas:
             box_eps,
             box_eps,
             fixed_dims=fixed_dims,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
             ohe_slices=ohe_slices,
             fixed_ohe_assignments=fixed_ohe_assignments,
         )
@@ -926,6 +1056,14 @@ class CertCFAtlas:
         if np.any(x_proj < center - box_eps - tol) or \
            np.any(x_proj > center + box_eps + tol):
             return None, np.inf
+        if not self._directional_constraints_satisfied(
+            x_proj,
+            x0,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
+            tol=tol,
+        ):
+            return None, np.inf
 
         dist = float(np.linalg.norm(x_proj - x0, ord=self.distance_norm))
         return x_proj, dist
@@ -941,6 +1079,8 @@ class CertCFAtlas:
         maxiter: int,
         tol: float,
         fixed_dims: Optional[np.ndarray] = None,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
         profile_out: Optional[Dict[str, ProfileValue]] = None,
@@ -955,6 +1095,8 @@ class CertCFAtlas:
                 box_eps,
                 ball_eps,
                 fixed_dims=fixed_dims,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
                 ohe_slices=ohe_slices,
                 fixed_ohe_assignments=fixed_ohe_assignments,
             )
@@ -965,6 +1107,18 @@ class CertCFAtlas:
         if profile_out is not None:
             profile_out.clear()
             profile_out.update(self._default_cvxpy_solver_profile())
+        slsqp_kwargs: Dict[str, Any] = {
+            "fixed_dims": fixed_dims,
+            "ohe_slices": ohe_slices,
+            "fixed_ohe_assignments": fixed_ohe_assignments,
+        }
+        has_directional = (
+            (nondecreasing_dims is not None and len(nondecreasing_dims) > 0)
+            or (nonincreasing_dims is not None and len(nonincreasing_dims) > 0)
+        )
+        if has_directional:
+            slsqp_kwargs["nondecreasing_dims"] = nondecreasing_dims
+            slsqp_kwargs["nonincreasing_dims"] = nonincreasing_dims
         return self._project_slsqp(
             x0,
             A_full,
@@ -973,9 +1127,51 @@ class CertCFAtlas:
             box_eps,
             maxiter,
             tol,
-            fixed_dims=fixed_dims,
-            ohe_slices=ohe_slices,
-            fixed_ohe_assignments=fixed_ohe_assignments,
+            **slsqp_kwargs,
+        )
+
+    def _solve_projection_subproblem_for_constraints(
+        self,
+        x0: np.ndarray,
+        A_full: np.ndarray,
+        b_full: np.ndarray,
+        center: np.ndarray,
+        box_eps: float,
+        ball_eps: float,
+        *,
+        maxiter: int,
+        tol: float,
+        fixed_dims: Optional[np.ndarray] = None,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
+        ohe_slices: Optional[List[Tuple[int, int]]] = None,
+        fixed_ohe_assignments: Optional[Dict[int, int]] = None,
+        profile_out: Optional[Dict[str, ProfileValue]] = None,
+    ) -> Tuple[Optional[np.ndarray], float]:
+        """Call projection with old-compatible kwargs when directional dims are absent."""
+        kwargs: Dict[str, Any] = {
+            "maxiter": maxiter,
+            "tol": tol,
+            "fixed_dims": fixed_dims,
+            "ohe_slices": ohe_slices,
+            "fixed_ohe_assignments": fixed_ohe_assignments,
+            "profile_out": profile_out,
+        }
+        has_directional = (
+            (nondecreasing_dims is not None and len(nondecreasing_dims) > 0)
+            or (nonincreasing_dims is not None and len(nonincreasing_dims) > 0)
+        )
+        if has_directional:
+            kwargs["nondecreasing_dims"] = nondecreasing_dims
+            kwargs["nonincreasing_dims"] = nonincreasing_dims
+        return self._solve_projection_subproblem(
+            x0,
+            A_full,
+            b_full,
+            center,
+            box_eps,
+            ball_eps,
+            **kwargs,
         )
 
     def _heuristic_polytope_decode(
@@ -986,6 +1182,8 @@ class CertCFAtlas:
         b_full: np.ndarray,
         center: np.ndarray,
         ball_eps: float,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         top_k: int = 3,
         tol: float = 1e-6,
     ) -> Tuple[Optional[np.ndarray], float]:
@@ -1022,6 +1220,14 @@ class CertCFAtlas:
 
         best_x, best_dist = None, np.inf
         for cand in candidates:
+            if not self._directional_constraints_satisfied(
+                cand,
+                x_query,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
+                tol=tol,
+            ):
+                continue
             if self._is_certified_candidate(cand, A_full, b_full, center, ball_eps, tol=tol):
                 d_cand = float(np.linalg.norm(cand - x_query, ord=self.distance_norm))
                 if d_cand < best_dist:
@@ -1041,7 +1247,9 @@ class CertCFAtlas:
         maxiter: int,
         tol: float,
         fixed_dims: Optional[np.ndarray],
-        incumbent_upper_bound: float,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
+        incumbent_upper_bound: float = np.inf,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         ohe_slices = self.ohe_slices or []
         product_size = self._ohe_product_size(ohe_slices)
@@ -1116,7 +1324,7 @@ class CertCFAtlas:
                     child_assignments[branch_block] = category
                     profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
                     profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
-                    child_x, child_dist = self._solve_projection_subproblem(
+                    child_x, child_dist = self._solve_projection_subproblem_for_constraints(
                         x_query,
                         A_full,
                         b_full,
@@ -1126,6 +1334,8 @@ class CertCFAtlas:
                         maxiter=maxiter,
                         tol=tol,
                         fixed_dims=fixed_dims,
+                        nondecreasing_dims=nondecreasing_dims,
+                        nonincreasing_dims=nonincreasing_dims,
                         ohe_slices=ohe_slices,
                         fixed_ohe_assignments=child_assignments,
                     )
@@ -1163,6 +1373,8 @@ class CertCFAtlas:
         maxiter: int,
         tol: float,
         fixed_dims: Optional[np.ndarray],
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         incumbent_upper_bound: float = np.inf,
         top_k: int = 3,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
@@ -1183,6 +1395,8 @@ class CertCFAtlas:
             b_full,
             center,
             ball_eps,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
             top_k=top_k,
             tol=tol,
         )
@@ -1211,6 +1425,8 @@ class CertCFAtlas:
                 maxiter=maxiter,
                 tol=tol,
                 fixed_dims=fixed_dims,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
                 incumbent_upper_bound=incumbent,
             )
             if beam_x is not None:
@@ -1230,6 +1446,8 @@ class CertCFAtlas:
                 maxiter=maxiter,
                 tol=tol,
                 fixed_dims=fixed_dims,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
                 incumbent_upper_bound=incumbent,
             )
         else:
@@ -1244,6 +1462,8 @@ class CertCFAtlas:
                 maxiter=maxiter,
                 tol=tol,
                 fixed_dims=fixed_dims,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
                 incumbent_upper_bound=incumbent,
             )
         if self.ohe_decode_mode == "beam_then_exact":
@@ -1264,7 +1484,9 @@ class CertCFAtlas:
         maxiter: int,
         tol: float,
         fixed_dims: Optional[np.ndarray],
-        incumbent_upper_bound: float,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
+        incumbent_upper_bound: float = np.inf,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         ohe_slices = self.ohe_slices or []
         product_size = self._ohe_product_size(ohe_slices)
@@ -1296,7 +1518,7 @@ class CertCFAtlas:
             fixed_ohe_assignments = {block_idx: int(cat) for block_idx, cat in zip(block_indices, assignment)}
             profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
             profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
-            x_leaf, dist_leaf = self._solve_projection_subproblem(
+            x_leaf, dist_leaf = self._solve_projection_subproblem_for_constraints(
                 x_query,
                 A_full,
                 b_full,
@@ -1306,6 +1528,8 @@ class CertCFAtlas:
                 maxiter=maxiter,
                 tol=tol,
                 fixed_dims=fixed_dims,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
                 ohe_slices=ohe_slices,
                 fixed_ohe_assignments=fixed_ohe_assignments,
             )
@@ -1331,7 +1555,9 @@ class CertCFAtlas:
         maxiter: int,
         tol: float,
         fixed_dims: Optional[np.ndarray],
-        incumbent_upper_bound: float,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
+        incumbent_upper_bound: float = np.inf,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         ohe_slices = self.ohe_slices or []
         product_size = self._ohe_product_size(ohe_slices)
@@ -1404,7 +1630,7 @@ class CertCFAtlas:
                 child_assignments[branch_block] = category
                 profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
                 profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
-                child_x, child_dist = self._solve_projection_subproblem(
+                child_x, child_dist = self._solve_projection_subproblem_for_constraints(
                     x_query,
                     A_full,
                     b_full,
@@ -1414,6 +1640,8 @@ class CertCFAtlas:
                     maxiter=maxiter,
                     tol=tol,
                     fixed_dims=fixed_dims,
+                    nondecreasing_dims=nondecreasing_dims,
+                    nonincreasing_dims=nonincreasing_dims,
                     ohe_slices=ohe_slices,
                     fixed_ohe_assignments=child_assignments,
                 )
@@ -1441,6 +1669,8 @@ class CertCFAtlas:
         maxiter: Optional[int] = None,
         tol: Optional[float] = None,
         fixed_dims: Optional[np.ndarray] = None,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         incumbent_upper_bound: float = np.inf,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         """
@@ -1501,7 +1731,7 @@ class CertCFAtlas:
             return None, np.inf, profile
 
         solver_profile = self._default_cvxpy_solver_profile()
-        x_proj, dist = self._solve_projection_subproblem(
+        x_proj, dist = self._solve_projection_subproblem_for_constraints(
             x0,
             A_full,
             b_full,
@@ -1511,6 +1741,8 @@ class CertCFAtlas:
             maxiter=maxiter,
             tol=tol,
             fixed_dims=fixed_dims,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
             ohe_slices=self.ohe_slices,
             fixed_ohe_assignments=None,
             profile_out=solver_profile,
@@ -1541,6 +1773,8 @@ class CertCFAtlas:
                 maxiter=maxiter,
                 tol=tol,
                 fixed_dims=fixed_dims,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
                 incumbent_upper_bound=incumbent_upper_bound,
             )
         else:
@@ -1557,7 +1791,17 @@ class CertCFAtlas:
         decode_profile.update(solver_profile)
         return x_proj, dist, decode_profile
 
-    def _make_project_fn(self, x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
+    def _make_project_fn(
+        self,
+        x_query,
+        bd,
+        delta,
+        robust_norm,
+        solver_maxiter,
+        fixed_dims,
+        nondecreasing_dims=None,
+        nonincreasing_dims=None,
+    ):
         """Return a timed projection closure plus decode profiling accumulators."""
         projection_time_s = [0.0]
         best_projection_dist = [np.inf]
@@ -1579,6 +1823,8 @@ class CertCFAtlas:
                 eps_i=float(bd['eps'][idx]),
                 delta=delta, robust_norm=robust_norm,
                 maxiter=solver_maxiter, fixed_dims=fixed_dims,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
                 incumbent_upper_bound=incumbent_upper_bound,
             )
             projection_time_s[0] += time.perf_counter() - t0
@@ -1604,10 +1850,52 @@ class CertCFAtlas:
 
         return project_fn, projection_time_s, best_decode_profile
 
-    def _search_bvh(self, x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims):
+    def _make_project_fn_for_constraints(
+        self,
+        x_query,
+        bd,
+        delta,
+        robust_norm,
+        solver_maxiter,
+        fixed_dims,
+        nondecreasing_dims=None,
+        nonincreasing_dims=None,
+    ):
+        has_directional = (
+            (nondecreasing_dims is not None and len(nondecreasing_dims) > 0)
+            or (nonincreasing_dims is not None and len(nonincreasing_dims) > 0)
+        )
+        if not has_directional:
+            return self._make_project_fn(
+                x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims
+            )
+        return self._make_project_fn(
+            x_query,
+            bd,
+            delta,
+            robust_norm,
+            solver_maxiter,
+            fixed_dims,
+            nondecreasing_dims,
+            nonincreasing_dims,
+        )
+
+    def _search_bvh(
+        self,
+        x_query,
+        bd,
+        target_class,
+        delta,
+        robust_norm,
+        solver_maxiter,
+        fixed_dims,
+        nondecreasing_dims=None,
+        nonincreasing_dims=None,
+    ):
         """Branch-and-bound BVH search. Returns (x_cf, dist, anchor_idx, n_qp, profiling_dict)."""
-        project_fn, projection_time_s, best_decode_profile = self._make_project_fn(
-            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims)
+        project_fn, projection_time_s, best_decode_profile = self._make_project_fn_for_constraints(
+            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims,
+            nondecreasing_dims, nonincreasing_dims)
         bvh_stats: Dict[str, float] = {}
         bvh = self.bvh_indices[target_class]
         t0 = time.perf_counter()
@@ -1629,10 +1917,22 @@ class CertCFAtlas:
         profiling.update(best_decode_profile[0])
         return x_cf, dist, anchor_idx, n_qp, profiling
 
-    def _search_sorted(self, x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims):
+    def _search_sorted(
+        self,
+        x_query,
+        bd,
+        target_class,
+        delta,
+        robust_norm,
+        solver_maxiter,
+        fixed_dims,
+        nondecreasing_dims=None,
+        nonincreasing_dims=None,
+    ):
         """Sorted lower-bound scan. Returns (x_cf, dist, anchor_idx, n_qp, profiling_dict)."""
-        project_fn, projection_time_s, best_decode_profile = self._make_project_fn(
-            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims)
+        project_fn, projection_time_s, best_decode_profile = self._make_project_fn_for_constraints(
+            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims,
+            nondecreasing_dims, nonincreasing_dims)
         sorted_stats: Dict[str, float] = {}
         bvh = self.bvh_indices[target_class]
         t0 = time.perf_counter()
@@ -1665,6 +1965,8 @@ class CertCFAtlas:
         solver_maxiter,
         fixed_dims,
         query_k_candidates: int,
+        nondecreasing_dims=None,
+        nonincreasing_dims=None,
     ):
         """Project only onto the top-k nearest target-class anchors.
 
@@ -1673,8 +1975,9 @@ class CertCFAtlas:
         performed against certified target-class polytopes, but it does not
         guarantee the closest point over the full atlas.
         """
-        project_fn, projection_time_s, best_decode_profile = self._make_project_fn(
-            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims)
+        project_fn, projection_time_s, best_decode_profile = self._make_project_fn_for_constraints(
+            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims,
+            nondecreasing_dims, nonincreasing_dims)
         bvh = self.bvh_indices[target_class]
         k = int(query_k_candidates)
         if k <= 0:
@@ -1701,27 +2004,51 @@ class CertCFAtlas:
             ord=self.distance_norm,
             axis=1,
         )
+        nearest_anchor_candidate_idx: Optional[int] = None
+        nearest_anchor_candidate_dist = np.inf
+        nearest_anchor_candidate_certified = False
         nearest_anchor_idx: Optional[int] = None
+        nearest_anchor_dist = np.inf
+        membership_robust_norm = self.norm if robust_norm is None else robust_norm
         for candidate_idx in np.argsort(anchor_distances):
             candidate_idx = int(candidate_idx)
             if fixed_dims is not None and len(fixed_dims) > 0:
                 if not np.allclose(centers[candidate_idx][fixed_dims], x_query[fixed_dims], atol=1e-6):
                     continue
-            nearest_anchor_idx = candidate_idx
-            break
+            if not self._directional_constraints_satisfied(
+                centers[candidate_idx],
+                x_query,
+                nondecreasing_dims=nondecreasing_dims,
+                nonincreasing_dims=nonincreasing_dims,
+                tol=1e-6,
+            ):
+                continue
+            _, certified = self._polytope_membership_for_anchor(
+                centers[candidate_idx],
+                bd,
+                candidate_idx,
+                delta=delta,
+                robust_norm=membership_robust_norm,
+            )
+            if nearest_anchor_candidate_idx is None:
+                nearest_anchor_candidate_idx = candidate_idx
+                nearest_anchor_candidate_dist = float(anchor_distances[candidate_idx])
+                nearest_anchor_candidate_certified = bool(certified)
+            if certified:
+                nearest_anchor_idx = candidate_idx
+                nearest_anchor_dist = float(anchor_distances[candidate_idx])
+                break
 
         if nearest_anchor_idx is None:
             best_point: Optional[np.ndarray] = None
             best_dist = np.inf
             best_idx: Optional[int] = None
             best_source = "projection"
-            nearest_anchor_dist = np.inf
         else:
             best_point = centers[nearest_anchor_idx].copy()
-            best_dist = float(anchor_distances[nearest_anchor_idx])
+            best_dist = nearest_anchor_dist
             best_idx = nearest_anchor_idx
             best_source = "nearest_anchor"
-            nearest_anchor_dist = best_dist
 
         n_qp = 0
         fallback_used = False
@@ -1744,9 +2071,9 @@ class CertCFAtlas:
                 best_idx = int(idx)
                 best_source = "projection"
 
-        # If no incumbent is available after the fixed top-k budget, keep the
-        # method useful by scanning remaining anchors in nearest-anchor order.
-        # With the NN-anchor initialization this is mainly a fixed-dim fallback.
+        # If no certified incumbent is available after the fixed top-k budget,
+        # keep the method useful by scanning remaining anchors in nearest-anchor
+        # order until a certified projection is found.
         if best_point is None:
             fallback_used = True
             for idx in fallback_indices:
@@ -1780,6 +2107,13 @@ class CertCFAtlas:
             "nearest_anchor_initialization_used": float(nearest_anchor_idx is not None),
             "nearest_anchor_initial_idx": float(nearest_anchor_idx) if nearest_anchor_idx is not None else np.nan,
             "nearest_anchor_initial_distance": float(nearest_anchor_dist),
+            "nearest_anchor_candidate_idx": (
+                float(nearest_anchor_candidate_idx)
+                if nearest_anchor_candidate_idx is not None
+                else np.nan
+            ),
+            "nearest_anchor_candidate_distance": float(nearest_anchor_candidate_dist),
+            "nearest_anchor_candidate_certified": float(nearest_anchor_candidate_certified),
             "nearest_anchor_returned": float(best_source == "nearest_anchor"),
         }
         profiling.update(best_decode_profile[0])
@@ -1794,6 +2128,8 @@ class CertCFAtlas:
         robust_norm: Optional[Union[int, float, str]] = None,
         solver_maxiter: Optional[int] = None,
         fixed_dims: Optional[np.ndarray] = None,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         query_k_candidates: int = 1,
     ) -> CounterfactualResult:
         """Find the closest counterfactual for a query point."""
@@ -1815,6 +2151,12 @@ class CertCFAtlas:
             "method": resolved_method,
             "delta": float(delta),
             "classification_margin": float(getattr(self, "classification_margin", 0.0)),
+            "nondecreasing_dims_count": (
+                0 if nondecreasing_dims is None else int(len(nondecreasing_dims))
+            ),
+            "nonincreasing_dims_count": (
+                0 if nonincreasing_dims is None else int(len(nonincreasing_dims))
+            ),
             "robust_norm": (
                 float(robust_norm) if robust_norm == np.inf else int(robust_norm)
             ) if robust_norm is not None else (
@@ -1825,14 +2167,16 @@ class CertCFAtlas:
 
         if resolved_method == 'bvh':
             x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_bvh(
-                x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims)
+                x_query, bd, target_class, delta, robust_norm, solver_maxiter,
+                fixed_dims, nondecreasing_dims, nonincreasing_dims)
         elif resolved_method == 'sorted':
             x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_sorted(
-                x_query, bd, target_class, delta, robust_norm, solver_maxiter, fixed_dims)
+                x_query, bd, target_class, delta, robust_norm, solver_maxiter,
+                fixed_dims, nondecreasing_dims, nonincreasing_dims)
         elif resolved_method == 'nearest_anchor':
             x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_nearest_anchor(
                 x_query, bd, target_class, delta, robust_norm, solver_maxiter,
-                fixed_dims, query_k_candidates)
+                fixed_dims, query_k_candidates, nondecreasing_dims, nonincreasing_dims)
         else:
             raise ValueError(f"Unknown method: {resolved_method}. Use 'sorted', 'bvh', or 'nearest_anchor'.")
 
@@ -1865,6 +2209,8 @@ class CertCFAtlas:
         robust_norm: Optional[Union[int, float, str]] = None,
         solver_maxiter: Optional[int] = None,
         fixed_dims: Optional[np.ndarray] = None,
+        nondecreasing_dims: Optional[np.ndarray] = None,
+        nonincreasing_dims: Optional[np.ndarray] = None,
         query_k_candidates: int = 1,
         timeout_s_per_query: Optional[float] = None,
     ) -> List[CounterfactualResult]:
@@ -1882,18 +2228,28 @@ class CertCFAtlas:
             X_query=X_query_np,
             target_class=target_class,
         )
+        find_kwargs: Dict[str, Any] = {
+            "method": method,
+            "delta": delta,
+            "robust_norm": robust_norm,
+            "solver_maxiter": solver_maxiter,
+            "fixed_dims": fixed_dims,
+            "query_k_candidates": query_k_candidates,
+        }
+        has_directional = (
+            (nondecreasing_dims is not None and len(nondecreasing_dims) > 0)
+            or (nonincreasing_dims is not None and len(nonincreasing_dims) > 0)
+        )
+        if has_directional:
+            find_kwargs["nondecreasing_dims"] = nondecreasing_dims
+            find_kwargs["nonincreasing_dims"] = nonincreasing_dims
 
         if self.query_parallelism <= 1:
             return [
                 self.find_counterfactual(
                     x_query=X_query_np[idx],
                     target_class=int(target_classes[idx]),
-                    method=method,
-                    delta=delta,
-                    robust_norm=robust_norm,
-                    solver_maxiter=solver_maxiter,
-                    fixed_dims=fixed_dims,
-                    query_k_candidates=query_k_candidates,
+                    **find_kwargs,
                 )
                 for idx in range(n_queries)
             ]
@@ -1923,12 +2279,7 @@ class CertCFAtlas:
                     self.find_counterfactual,
                     x_query=X_query_np[idx],
                     target_class=cls,
-                    method=method,
-                    delta=delta,
-                    robust_norm=robust_norm,
-                    solver_maxiter=solver_maxiter,
-                    fixed_dims=fixed_dims,
-                    query_k_candidates=query_k_candidates,
+                    **find_kwargs,
                 ): (idx, cls)
                 for idx, cls in work_items
             }

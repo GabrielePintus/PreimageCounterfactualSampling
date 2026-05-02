@@ -12,7 +12,12 @@ from torch.utils.data import TensorDataset
 
 from counterfactuals.core.base_classes import CounterfactualResult, BaseCounterfactualMethod
 from counterfactuals.core.interfaces import ModelInterface
-from counterfactuals.methods._constraints import normalize_fixed_dims
+from counterfactuals.methods._constraints import (
+    directional_metadata,
+    normalize_directional_dims,
+    normalize_fixed_dims,
+    validate_disjoint_directional_dims,
+)
 from certcf.atlas import CertCFAtlas
 from certcf.eps_strategies import EpsStrategy
 
@@ -61,12 +66,22 @@ class CertCF(BaseCounterfactualMethod):
         cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]] = None,
         cvxpy_accept_statuses: Optional[Dict[str, List[str]]] = None,
         classification_margin: float = 0.0,
+        adaptive_eps: bool = False,
+        adaptive_eps_shrink_factor: float = 0.5,
+        adaptive_eps_max_shrinks: int = 8,
+        adaptive_eps_min: float = 1.0e-6,
+        adaptive_eps_center_tol: float = 1.0e-6,
+        adaptive_eps_binary_search_steps: int = 0,
         ohe_decode_mode: str = "exact",
         decode_beam_width: int = 8,
         decode_beam_branch_top_k: int = 3,
         decode_beam_max_solver_calls: int = 32,
         fixed_dims: Optional[Sequence[int]] = None,
         immutable_features: Optional[Sequence[str]] = None,
+        nondecreasing_dims: Optional[Sequence[int]] = None,
+        nonincreasing_dims: Optional[Sequence[int]] = None,
+        nondecreasing_features: Optional[Sequence[str]] = None,
+        nonincreasing_features: Optional[Sequence[str]] = None,
 
         # Custom downsampling strategy
         k_per_class: Optional[int] = None,
@@ -95,6 +110,17 @@ class CertCF(BaseCounterfactualMethod):
         self.ohe_slices = ohe_slices
         self.fixed_dims = normalize_fixed_dims(fixed_dims)
         self.immutable_features = tuple(str(name) for name in (immutable_features or ()))
+        self.nondecreasing_dims = normalize_directional_dims(
+            nondecreasing_dims,
+            name="nondecreasing_dims",
+        )
+        self.nonincreasing_dims = normalize_directional_dims(
+            nonincreasing_dims,
+            name="nonincreasing_dims",
+        )
+        validate_disjoint_directional_dims(self.nondecreasing_dims, self.nonincreasing_dims)
+        self.nondecreasing_features = tuple(str(name) for name in (nondecreasing_features or ()))
+        self.nonincreasing_features = tuple(str(name) for name in (nonincreasing_features or ()))
         # Atlas config
         self.cnn = cnn
         self.default_query_method = default_query_method
@@ -117,6 +143,22 @@ class CertCF(BaseCounterfactualMethod):
         self.classification_margin = float(classification_margin)
         if self.classification_margin < 0.0:
             raise ValueError("classification_margin must be non-negative")
+        self.adaptive_eps = bool(adaptive_eps)
+        self.adaptive_eps_shrink_factor = float(adaptive_eps_shrink_factor)
+        if not (0.0 < self.adaptive_eps_shrink_factor < 1.0):
+            raise ValueError("adaptive_eps_shrink_factor must be in (0, 1)")
+        self.adaptive_eps_max_shrinks = int(adaptive_eps_max_shrinks)
+        if self.adaptive_eps_max_shrinks < 0:
+            raise ValueError("adaptive_eps_max_shrinks must be non-negative")
+        self.adaptive_eps_min = float(adaptive_eps_min)
+        if self.adaptive_eps_min < 0.0:
+            raise ValueError("adaptive_eps_min must be non-negative")
+        self.adaptive_eps_center_tol = float(adaptive_eps_center_tol)
+        if self.adaptive_eps_center_tol < 0.0:
+            raise ValueError("adaptive_eps_center_tol must be non-negative")
+        self.adaptive_eps_binary_search_steps = int(adaptive_eps_binary_search_steps)
+        if self.adaptive_eps_binary_search_steps < 0:
+            raise ValueError("adaptive_eps_binary_search_steps must be non-negative")
         (
             self.ohe_decode_mode,
             self.decode_beam_width,
@@ -409,6 +451,12 @@ class CertCF(BaseCounterfactualMethod):
             cvxpy_solver_options=self.cvxpy_solver_options,
             cvxpy_accept_statuses=self.cvxpy_accept_statuses,
             classification_margin=self.classification_margin,
+            adaptive_eps=self.adaptive_eps,
+            adaptive_eps_shrink_factor=self.adaptive_eps_shrink_factor,
+            adaptive_eps_max_shrinks=self.adaptive_eps_max_shrinks,
+            adaptive_eps_min=self.adaptive_eps_min,
+            adaptive_eps_center_tol=self.adaptive_eps_center_tol,
+            adaptive_eps_binary_search_steps=self.adaptive_eps_binary_search_steps,
             ohe_decode_mode=self.ohe_decode_mode,
             decode_beam_width=self.decode_beam_width,
             decode_beam_branch_top_k=self.decode_beam_branch_top_k,
@@ -444,12 +492,17 @@ class CertCF(BaseCounterfactualMethod):
         if x_batch.ndim == 1:
             x_batch = x_batch.reshape(1, -1)
 
+        fixed_dims = getattr(self, "fixed_dims", None)
+        nondecreasing_dims = getattr(self, "nondecreasing_dims", None)
+        nonincreasing_dims = getattr(self, "nonincreasing_dims", None)
         results = self.atlas.find_counterfactual_batch(
             X_query=x_batch,
             target_class=target_class,
             delta=self.delta,
             robust_norm=self.robust_norm,
-            fixed_dims=self.fixed_dims,
+            fixed_dims=fixed_dims,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
             query_k_candidates=self.query_k_candidates,
             timeout_s_per_query=timeout_s_per_query,
         )
@@ -459,8 +512,22 @@ class CertCF(BaseCounterfactualMethod):
         """Convert atlas-level results into the shared benchmark result type."""
         x_cf = np.asarray(result.x_cf, dtype=np.float32) if result.x_cf is not None else None
         metadata = dict(result.profiling)
-        metadata["fixed_dims_count"] = int(0 if self.fixed_dims is None else len(self.fixed_dims))
-        metadata["immutable_features"] = ",".join(self.immutable_features)
+        fixed_dims = getattr(self, "fixed_dims", None)
+        immutable_features = getattr(self, "immutable_features", ())
+        nondecreasing_dims = getattr(self, "nondecreasing_dims", None)
+        nonincreasing_dims = getattr(self, "nonincreasing_dims", None)
+        nondecreasing_features = getattr(self, "nondecreasing_features", ())
+        nonincreasing_features = getattr(self, "nonincreasing_features", ())
+        metadata["fixed_dims_count"] = int(0 if fixed_dims is None else len(fixed_dims))
+        metadata["immutable_features"] = ",".join(immutable_features)
+        metadata.update(
+            directional_metadata(
+                nondecreasing_dims,
+                nonincreasing_dims,
+                nondecreasing_features,
+                nonincreasing_features,
+            )
+        )
         return CounterfactualResult(
             x_cf=x_cf,
             success=bool(result.success),

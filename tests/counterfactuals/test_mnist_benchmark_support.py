@@ -65,6 +65,20 @@ def test_build_query_tasks_expands_all_other_classes():
         assert source != target
 
 
+def test_subsample_train_per_class_caps_each_label():
+    benchmark = _load_benchmark_module()
+    x_train = np.arange(20, dtype=np.float32).reshape(10, 2)
+    y_train = np.array([0, 0, 0, 0, 0, 1, 1, 1, 2, 2], dtype=np.int64)
+
+    x_sub, y_sub = benchmark.subsample_train_per_class(
+        x_train, y_train, max_per_class=2, rng=np.random.default_rng(0)
+    )
+
+    assert len(x_sub) == len(y_sub) == 6
+    assert dict(zip(*np.unique(y_sub, return_counts=True))) == {0: 2, 1: 2, 2: 2}
+    assert set(map(tuple, x_sub)).issubset(set(map(tuple, x_train)))
+
+
 def test_torch_model_wrapper_reshapes_flat_inputs():
     torch = pytest.importorskip("torch")
 
@@ -285,6 +299,13 @@ def test_build_certcf_method_forwards_atlas_subsample_space(monkeypatch):
             "decode_beam_width": 5,
             "decode_beam_branch_top_k": 2,
             "decode_beam_max_solver_calls": 9,
+            "immutable_features": ["sex"],
+            "adaptive_eps": True,
+            "adaptive_eps_shrink_factor": 0.25,
+            "adaptive_eps_max_shrinks": 3,
+            "adaptive_eps_min": 1e-5,
+            "adaptive_eps_center_tol": 1e-4,
+            "adaptive_eps_binary_search_steps": 2,
         },
         model_params={
             "dataset_module": "adult",
@@ -314,6 +335,14 @@ def test_build_certcf_method_forwards_atlas_subsample_space(monkeypatch):
     assert init_calls[0]["decode_beam_width"] == 5
     assert init_calls[0]["decode_beam_branch_top_k"] == 2
     assert init_calls[0]["decode_beam_max_solver_calls"] == 9
+    assert np.array_equal(init_calls[0]["fixed_dims"], np.array([58, 59], dtype=np.int64))
+    assert init_calls[0]["immutable_features"] == ["sex"]
+    assert init_calls[0]["adaptive_eps"] is True
+    assert init_calls[0]["adaptive_eps_shrink_factor"] == 0.25
+    assert init_calls[0]["adaptive_eps_max_shrinks"] == 3
+    assert init_calls[0]["adaptive_eps_min"] == 1e-5
+    assert init_calls[0]["adaptive_eps_center_tol"] == 1e-4
+    assert init_calls[0]["adaptive_eps_binary_search_steps"] == 2
     assert np.array_equal(atlas_method.y_train, np.array([1, 0], dtype=np.int64))
 
 
@@ -398,6 +427,34 @@ def test_expand_grid_keeps_certcf_cvxpy_solvers_as_atomic_list():
     ]
     assert expanded[0]["params"]["cvxpy_solvers"] == ["CLARABEL", "SCS"]
     assert expanded[1]["params"]["cvxpy_solvers"] == ["CLARABEL", "SCS"]
+
+
+def test_expand_grid_keeps_immutable_features_as_atomic_list():
+    benchmark = _load_benchmark_module()
+
+    expanded = benchmark._expand_grid(
+        [
+            {
+                "name": "nearest_neighbor",
+                "run_name": "nn_constrained",
+                "params": {
+                    "norm": [1, 2],
+                    "immutable_features": ["sex", "race"],
+                },
+            },
+            {
+                "name": "growing_spheres",
+                "run_name": "gs_constrained",
+                "params": {
+                    "radius_step": [0.15, 0.25],
+                    "immutable_features": ["sex", "race"],
+                },
+            },
+        ]
+    )
+
+    assert len(expanded) == 4
+    assert all(entry["params"]["immutable_features"] == ["sex", "race"] for entry in expanded)
 
 
 def test_load_lit_checkpoint_resilient_falls_back_to_direct_state_dict_load(tmp_path):

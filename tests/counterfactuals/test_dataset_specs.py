@@ -130,6 +130,163 @@ def test_benchmark_uses_shared_specs_for_tabular_metadata():
     assert benchmark._get_tabular_spec("mnist") is None
 
 
+def test_benchmark_resolves_immutable_feature_dims_from_shared_spec():
+    benchmark = _load_benchmark_module()
+
+    dims, features = benchmark._resolve_immutable_feature_dims(
+        dataset_name="adult",
+        immutable_features=["sex"],
+        preprocessing_name="identity",
+    )
+
+    assert features == ["sex"]
+    assert np.array_equal(dims, np.array([58, 59], dtype=np.int64))
+
+
+def test_benchmark_rejects_unknown_immutable_feature():
+    benchmark = _load_benchmark_module()
+
+    with pytest.raises(ValueError, match="Unknown immutable feature"):
+        benchmark._resolve_immutable_feature_dims(
+            dataset_name="adult",
+            immutable_features=["not_a_feature"],
+            preprocessing_name="identity",
+        )
+
+
+def test_benchmark_rejects_immutable_features_with_non_identity_preprocessing():
+    benchmark = _load_benchmark_module()
+
+    with pytest.raises(ValueError, match="identity preprocessing"):
+        benchmark._resolve_immutable_feature_dims(
+            dataset_name="adult",
+            immutable_features=["sex"],
+            preprocessing_name="pca",
+        )
+
+
+def test_benchmark_resolves_directional_feature_dims_from_shared_spec():
+    benchmark = _load_benchmark_module()
+
+    inc_dims, dec_dims, inc_features, dec_features = benchmark._resolve_directional_feature_dims(
+        dataset_name="compas",
+        nondecreasing_features=["age"],
+        nonincreasing_features=[],
+        preprocessing_name="identity",
+    )
+
+    assert inc_features == ["age"]
+    assert dec_features == []
+    assert np.array_equal(inc_dims, np.array([0], dtype=np.int64))
+    assert dec_dims is None
+
+
+def test_benchmark_rejects_categorical_directional_feature():
+    benchmark = _load_benchmark_module()
+
+    with pytest.raises(ValueError, match="Categorical feature"):
+        benchmark._resolve_directional_feature_dims(
+            dataset_name="compas",
+            nondecreasing_features=["sex"],
+            nonincreasing_features=[],
+            preprocessing_name="identity",
+        )
+
+
+def test_benchmark_rejects_unknown_directional_feature():
+    benchmark = _load_benchmark_module()
+
+    with pytest.raises(ValueError, match="Unknown directional feature"):
+        benchmark._resolve_directional_feature_dims(
+            dataset_name="compas",
+            nondecreasing_features=["not_a_feature"],
+            nonincreasing_features=[],
+            preprocessing_name="identity",
+        )
+
+
+def test_benchmark_rejects_directional_features_with_non_identity_preprocessing():
+    benchmark = _load_benchmark_module()
+
+    with pytest.raises(ValueError, match="identity preprocessing"):
+        benchmark._resolve_directional_feature_dims(
+            dataset_name="compas",
+            nondecreasing_features=["age"],
+            nonincreasing_features=[],
+            preprocessing_name="pca",
+        )
+
+
+def test_benchmark_keeps_directional_feature_lists_as_atomic_grid_params():
+    benchmark = _load_benchmark_module()
+
+    expanded = benchmark._expand_grid([
+        {
+            "name": "nearest_neighbor",
+            "run_name": "nn",
+            "params": {"norm": [1, 2], "nondecreasing_features": ["age"]},
+        }
+    ])
+
+    assert len(expanded) == 2
+    assert [entry["params"]["norm"] for entry in expanded] == [1, 2]
+    assert all(entry["params"]["nondecreasing_features"] == ["age"] for entry in expanded)
+
+
+def test_benchmark_attaches_immutable_constraints_to_nn_and_gs():
+    benchmark = _load_benchmark_module()
+
+    nn_params = benchmark._attach_immutable_feature_constraints(
+        method_name="nearest_neighbor",
+        method_params={"norm": 1, "immutable_features": ["sex"]},
+        dataset_name="adult",
+        preprocessing_name="identity",
+    )
+    gs_params = benchmark._attach_immutable_feature_constraints(
+        method_name="growing_spheres",
+        method_params={"immutable_features": ["sex"]},
+        dataset_name="adult",
+        preprocessing_name="identity",
+    )
+
+    assert nn_params["norm"] == 1
+    assert nn_params["immutable_features"] == ["sex"]
+    assert np.array_equal(nn_params["fixed_dims"], np.array([58, 59], dtype=np.int64))
+    assert np.array_equal(gs_params["fixed_dims"], np.array([58, 59], dtype=np.int64))
+
+
+def test_benchmark_attaches_directional_constraints_to_supported_methods():
+    benchmark = _load_benchmark_module()
+
+    params = benchmark._attach_feature_constraints(
+        method_name="face",
+        method_params={
+            "immutable_features": ["sex"],
+            "nondecreasing_features": ["age"],
+        },
+        dataset_name="compas",
+        preprocessing_name="identity",
+    )
+
+    assert params["immutable_features"] == ["sex"]
+    assert np.array_equal(params["fixed_dims"], np.array([4, 5], dtype=np.int64))
+    assert params["nondecreasing_features"] == ["age"]
+    assert np.array_equal(params["nondecreasing_dims"], np.array([0], dtype=np.int64))
+    assert params["nonincreasing_dims"] is None
+
+
+def test_benchmark_rejects_immutable_constraints_for_unsupported_method():
+    benchmark = _load_benchmark_module()
+
+    with pytest.raises(ValueError, match="not supported for method 'dice'"):
+        benchmark._attach_immutable_feature_constraints(
+            method_name="dice",
+            method_params={"immutable_features": ["sex"]},
+            dataset_name="adult",
+            preprocessing_name="identity",
+        )
+
+
 def test_no_counterfactual_code_imports_datamodule_constants():
     root = Path(__file__).resolve().parents[2]
     forbidden = re.compile(

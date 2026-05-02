@@ -11,6 +11,31 @@ from .wrapping import WrappedModel
 from .bounds import get_lower_bound, get_upper_bound
 
 
+_OPTIMIZED_LIRPA_METHODS = {"crown-optimized", "alpha-crown", "forward-optimized"}
+
+
+def _lirpa_grad_context(lirpa_method: str):
+    """Use gradients only for auto_LiRPA methods that optimize relaxation parameters."""
+    method = str(lirpa_method or "").strip().lower()
+    return torch.enable_grad() if method in _OPTIMIZED_LIRPA_METHODS else torch.no_grad()
+
+
+def _center_certification_slack(
+    lA: np.ndarray,
+    lbias: np.ndarray,
+    center: np.ndarray,
+    *,
+    classification_margin: float = 0.0,
+) -> float:
+    """Return min center slack for LiRPA lower-bound halfspaces."""
+    center = np.asarray(center, dtype=np.float64).reshape(-1)
+    A = np.asarray(lA, dtype=np.float64).reshape(-1, center.shape[0])
+    b = np.asarray(lbias, dtype=np.float64).reshape(-1)
+    if A.shape[0] == 0:
+        return float("inf")
+    return float(np.min(A @ center + b - classification_margin))
+
+
 def run_lirpa(
     model: nn.Module,
     label: int,
@@ -281,6 +306,13 @@ class PreimageApproximation:
         dtype: torch.dtype = torch.float32,
         eps_array: np.ndarray = None,
         lirpa_method: str = "backward",
+        classification_margin: float = 0.0,
+        adaptive_eps: bool = False,
+        adaptive_eps_shrink_factor: float = 0.5,
+        adaptive_eps_max_shrinks: int = 8,
+        adaptive_eps_min: float = 1.0e-6,
+        adaptive_eps_center_tol: float = 1.0e-6,
+        adaptive_eps_binary_search_steps: int = 0,
     ) -> dict:
         """
         Compute LiRPA bounds for all classes.
@@ -308,6 +340,13 @@ class PreimageApproximation:
             own epsilon.  If all values in a class are equal the existing batch
             path is used (no performance regression).  Otherwise samples are
             processed individually.
+        adaptive_eps : bool, optional
+            If True, process samples individually and shrink each epsilon until
+            the center satisfies the LiRPA lower-bound halfspaces or the retry
+            budget is exhausted.
+        adaptive_eps_binary_search_steps : int, optional
+            If positive, refine the bracket between the first certified epsilon
+            and the previous failed epsilon using this many bisection steps.
 
         Returns
         -------
@@ -318,8 +357,31 @@ class PreimageApproximation:
             - 'uA': upper bound A matrices (N, k-1, d)
             - 'ubias': upper bound biases (N, k-1)
             - 'X': original samples (N, d)
-            - 'eps': per-sample epsilon values (N,)
+            - 'eps': final per-sample epsilon values (N,)
+            - 'eps_initial': initial per-sample epsilon values (N,)
+            - 'adaptive_eps_n_shrinks': number of epsilon shrinks per sample
+            - 'adaptive_eps_n_binary_steps': number of binary refinements per sample
+            - 'adaptive_eps_center_slack': final center slack per sample
+            - 'adaptive_eps_center_certified': final center-certification flag
         """
+        classification_margin = float(classification_margin)
+        adaptive_eps = bool(adaptive_eps)
+        adaptive_eps_shrink_factor = float(adaptive_eps_shrink_factor)
+        if not (0.0 < adaptive_eps_shrink_factor < 1.0):
+            raise ValueError("adaptive_eps_shrink_factor must be in (0, 1)")
+        adaptive_eps_max_shrinks = int(adaptive_eps_max_shrinks)
+        if adaptive_eps_max_shrinks < 0:
+            raise ValueError("adaptive_eps_max_shrinks must be non-negative")
+        adaptive_eps_min = float(adaptive_eps_min)
+        if adaptive_eps_min < 0.0:
+            raise ValueError("adaptive_eps_min must be non-negative")
+        adaptive_eps_center_tol = float(adaptive_eps_center_tol)
+        if adaptive_eps_center_tol < 0.0:
+            raise ValueError("adaptive_eps_center_tol must be non-negative")
+        adaptive_eps_binary_search_steps = int(adaptive_eps_binary_search_steps)
+        if adaptive_eps_binary_search_steps < 0:
+            raise ValueError("adaptive_eps_binary_search_steps must be non-negative")
+
         all_bounds = {}
         labels_tensor = self.dataset.tensors[1]
 
@@ -345,11 +407,17 @@ class PreimageApproximation:
                     eps_label = eps_array[label_mask.numpy()]
             else:
                 eps_label = np.full(len(X), eps)
+            eps_initial_label = np.asarray(eps_label, dtype=np.float64).copy()
 
             # Decide processing mode
             eps_is_constant = np.all(eps_label == eps_label[0])
 
-            if eps_is_constant:
+            adaptive_n_shrinks = np.zeros(len(X), dtype=np.int64)
+            adaptive_n_binary_steps = np.zeros(len(X), dtype=np.int64)
+            adaptive_center_slack = np.full(len(X), np.nan, dtype=np.float64)
+            adaptive_center_certified = np.zeros(len(X), dtype=bool)
+
+            if eps_is_constant and not adaptive_eps:
                 # ----------------------------------------------------------------
                 # Batch path (original behaviour, or constant-eps shortcut)
                 # ----------------------------------------------------------------
@@ -370,7 +438,7 @@ class PreimageApproximation:
                         if self.cnn:
                             X_batch = X_batch.view(-1, 1, 28, 28)
 
-                        with torch.no_grad():
+                        with _lirpa_grad_context(lirpa_method):
                             lA, lbias, uA, ubias = run_lirpa(
                                 self.model, self.label_to_index[int(label)], X_batch, self.n_classes,
                                 self.device, eps=eps_scalar, norm=norm, dtype=dtype, lirpa_method=lirpa_method
@@ -401,7 +469,7 @@ class PreimageApproximation:
                     if self.cnn:
                         X_dev = X_dev.view(-1, 1, 28, 28)
 
-                    with torch.no_grad():
+                    with _lirpa_grad_context(lirpa_method):
                         lA, lbias, uA, ubias = run_lirpa(
                             self.model, self.label_to_index[int(label)], X_dev, self.n_classes,
                             self.device, eps=eps_scalar, norm=norm, dtype=dtype, lirpa_method=lirpa_method
@@ -411,45 +479,170 @@ class PreimageApproximation:
                     if self.cnn:
                         X_stored = X_stored.reshape(X_stored.shape[0], -1)
 
+                for i in range(len(X_stored)):
+                    adaptive_center_slack[i] = _center_certification_slack(
+                        lA[i:i + 1],
+                        lbias[i:i + 1],
+                        X_stored[i],
+                        classification_margin=classification_margin,
+                    )
+                    adaptive_center_certified[i] = (
+                        adaptive_center_slack[i] >= -adaptive_eps_center_tol
+                    )
+
             else:
                 # ----------------------------------------------------------------
-                # Per-sample path: loop one sample at a time
+                # Per-sample path: loop one sample at a time. Adaptive epsilon
+                # also uses this path because each sample can end at a different
+                # radius after center-certification retries.
                 # ----------------------------------------------------------------
                 lA_list, lbias_list = [], []
                 uA_list, ubias_list = [], []
                 X_stored_list = []
+                eps_final_list = []
 
                 for i in range(len(X)):
-                    X_single = X[i:i+1].to(dtype).to(self.device)
+                    def _run_single_at_eps(eps_value: float):
+                        X_single_local = X[i:i+1].to(dtype).to(self.device)
 
-                    if self.cnn:
-                        X_single = X_single.view(-1, 1, 28, 28)
+                        if self.cnn:
+                            X_single_local = X_single_local.view(-1, 1, 28, 28)
 
-                    with torch.no_grad():
-                        lA_i, lbias_i, uA_i, ubias_i = run_lirpa(
-                            self.model, self.label_to_index[int(label)], X_single, self.n_classes,
-                            self.device, eps=float(eps_label[i]), norm=norm, dtype=dtype, lirpa_method=lirpa_method
+                        with _lirpa_grad_context(lirpa_method):
+                            lA_local, lbias_local, uA_local, ubias_local = run_lirpa(
+                                self.model, self.label_to_index[int(label)], X_single_local, self.n_classes,
+                                self.device, eps=float(eps_value), norm=norm, dtype=dtype, lirpa_method=lirpa_method
+                            )
+
+                        X_stored_local = X_single_local.cpu().numpy()
+                        if self.cnn:
+                            X_stored_local = X_stored_local.reshape(1, -1)
+
+                        slack_local = _center_certification_slack(
+                            lA_local,
+                            lbias_local,
+                            X_stored_local[0],
+                            classification_margin=classification_margin,
                         )
+                        certified_local = slack_local >= -adaptive_eps_center_tol
+
+                        del X_single_local
+                        if self.device.type == 'cuda':
+                            torch.cuda.empty_cache()
+
+                        return (
+                            lA_local,
+                            lbias_local,
+                            uA_local,
+                            ubias_local,
+                            X_stored_local,
+                            slack_local,
+                            certified_local,
+                        )
+
+                    eps_i = float(eps_label[i])
+                    n_shrinks = 0
+                    n_binary_steps = 0
+                    previous_failed_eps = None
+
+                    while True:
+                        (
+                            lA_i,
+                            lbias_i,
+                            uA_i,
+                            ubias_i,
+                            X_single_stored,
+                            center_slack,
+                            center_certified,
+                        ) = _run_single_at_eps(eps_i)
+
+                        if (
+                            adaptive_eps
+                            and center_certified
+                            and previous_failed_eps is not None
+                            and adaptive_eps_binary_search_steps > 0
+                        ):
+                            low_eps = float(eps_i)
+                            high_eps = float(previous_failed_eps)
+                            best = (
+                                lA_i,
+                                lbias_i,
+                                uA_i,
+                                ubias_i,
+                                X_single_stored,
+                                center_slack,
+                                center_certified,
+                                low_eps,
+                            )
+                            for _ in range(adaptive_eps_binary_search_steps):
+                                mid_eps = 0.5 * (low_eps + high_eps)
+                                (
+                                    mid_lA,
+                                    mid_lbias,
+                                    mid_uA,
+                                    mid_ubias,
+                                    mid_X_stored,
+                                    mid_slack,
+                                    mid_certified,
+                                ) = _run_single_at_eps(mid_eps)
+                                n_binary_steps += 1
+                                if mid_certified:
+                                    low_eps = mid_eps
+                                    best = (
+                                        mid_lA,
+                                        mid_lbias,
+                                        mid_uA,
+                                        mid_ubias,
+                                        mid_X_stored,
+                                        mid_slack,
+                                        mid_certified,
+                                        mid_eps,
+                                    )
+                                else:
+                                    high_eps = mid_eps
+
+                            (
+                                lA_i,
+                                lbias_i,
+                                uA_i,
+                                ubias_i,
+                                X_single_stored,
+                                center_slack,
+                                center_certified,
+                                eps_i,
+                            ) = best
+
+                        if center_certified or not adaptive_eps:
+                            break
+
+                        should_retry = (
+                            n_shrinks < adaptive_eps_max_shrinks
+                            and eps_i * adaptive_eps_shrink_factor >= adaptive_eps_min
+                        )
+                        if not should_retry:
+                            break
+
+                        previous_failed_eps = eps_i
+                        eps_i *= adaptive_eps_shrink_factor
+                        n_shrinks += 1
 
                     lA_list.append(lA_i)
                     lbias_list.append(lbias_i)
                     uA_list.append(uA_i)
                     ubias_list.append(ubias_i)
-
-                    X_single_stored = X_single.cpu().numpy()
-                    if self.cnn:
-                        X_single_stored = X_single_stored.reshape(1, -1)
                     X_stored_list.append(X_single_stored)
-
-                    del X_single
-                    if self.device.type == 'cuda':
-                        torch.cuda.empty_cache()
+                    eps_final_list.append(eps_i)
+                    adaptive_n_shrinks[i] = n_shrinks
+                    adaptive_n_binary_steps[i] = n_binary_steps
+                    adaptive_center_slack[i] = center_slack
+                    adaptive_center_certified[i] = center_certified
 
                 lA = np.concatenate(lA_list, axis=0)
                 lbias = np.concatenate(lbias_list, axis=0)
                 uA = np.concatenate(uA_list, axis=0)
                 ubias = np.concatenate(ubias_list, axis=0)
                 X_stored = np.concatenate(X_stored_list, axis=0)
+                eps_label = np.asarray(eps_final_list, dtype=np.float64)
 
             all_bounds[label] = {
                 'lA': lA,
@@ -458,6 +651,11 @@ class PreimageApproximation:
                 'ubias': ubias,
                 'X': X_stored,
                 'eps': eps_label,
+                'eps_initial': eps_initial_label,
+                'adaptive_eps_n_shrinks': adaptive_n_shrinks,
+                'adaptive_eps_n_binary_steps': adaptive_n_binary_steps,
+                'adaptive_eps_center_slack': adaptive_center_slack,
+                'adaptive_eps_center_certified': adaptive_center_certified,
             }
 
         return all_bounds

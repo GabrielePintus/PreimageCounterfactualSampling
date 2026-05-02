@@ -9,7 +9,7 @@ Poyiadzi et al. (2020):
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Sequence, Union
 
 import networkx as nx
 import numpy as np
@@ -19,6 +19,13 @@ from sklearn.neighbors import radius_neighbors_graph
 from counterfactuals.core.base_classes import BaseCounterfactualMethod, CounterfactualResult
 from counterfactuals.core.interfaces import ModelInterface
 from counterfactuals.density import BaseDensityEstimator, build_density_estimator
+from counterfactuals.methods._constraints import (
+    constraint_metadata,
+    normalize_directional_dims,
+    normalize_fixed_dims,
+    satisfies_directional_constraints,
+    validate_disjoint_directional_dims,
+)
 
 
 ConditionsFn = Callable[[np.ndarray, np.ndarray], bool]
@@ -63,6 +70,12 @@ class FACEMethod(BaseCounterfactualMethod):
         td: float = 0.0,
         conditions_fn: Optional[ConditionsFn] = None,
         weight_fn: Optional[WeightFn] = None,
+        fixed_dims: Optional[Sequence[int]] = None,
+        immutable_features: Optional[Sequence[str]] = None,
+        nondecreasing_dims: Optional[Sequence[int]] = None,
+        nonincreasing_dims: Optional[Sequence[int]] = None,
+        nondecreasing_features: Optional[Sequence[str]] = None,
+        nonincreasing_features: Optional[Sequence[str]] = None,
 
         # Custom downsampling strategy, not mentioned in the original paper
         subsample_method: str = "kmedoids",
@@ -95,8 +108,20 @@ class FACEMethod(BaseCounterfactualMethod):
         self.norm = self._normalize_norm(norm)
         self.tp = tp
         self.td = td
-        if conditions_fn is not None:
-            self.conditions_fn = conditions_fn
+        self._base_conditions_fn = conditions_fn
+        self.fixed_dims = normalize_fixed_dims(fixed_dims)
+        self.immutable_features = tuple(str(name) for name in (immutable_features or ()))
+        self.nondecreasing_dims = normalize_directional_dims(
+            nondecreasing_dims,
+            name="nondecreasing_dims",
+        )
+        self.nonincreasing_dims = normalize_directional_dims(
+            nonincreasing_dims,
+            name="nonincreasing_dims",
+        )
+        validate_disjoint_directional_dims(self.nondecreasing_dims, self.nonincreasing_dims)
+        self.nondecreasing_features = tuple(str(name) for name in (nondecreasing_features or ()))
+        self.nonincreasing_features = tuple(str(name) for name in (nonincreasing_features or ()))
         if weight_fn is not None:
             self.weight_fn = weight_fn
 
@@ -113,7 +138,19 @@ class FACEMethod(BaseCounterfactualMethod):
         return np.linalg.norm(xi - xj, ord=self.norm, axis=axis)
 
     def conditions_fn(self, x_query: np.ndarray, x_candidate: np.ndarray) -> bool:
-        """Default conditions function that allows all candidates."""
+        """Per-query final-candidate actionability filter."""
+        if self._base_conditions_fn is not None and not self._base_conditions_fn(x_query, x_candidate):
+            return False
+        if self.fixed_dims is not None and len(self.fixed_dims) > 0:
+            if not np.allclose(x_candidate[self.fixed_dims], x_query[self.fixed_dims], atol=1e-6):
+                return False
+        if not satisfies_directional_constraints(
+            x_candidate,
+            x_query,
+            self.nondecreasing_dims,
+            self.nonincreasing_dims,
+        ):
+            return False
         return True
 
     def weight_fn(self, xi: np.ndarray, xj: np.ndarray) -> float:
@@ -162,7 +199,12 @@ class FACEMethod(BaseCounterfactualMethod):
                 x_cf=x_query[0],
                 success=False,
                 distance=0.0,
-                metadata={"target_class": target_class, "reason": "no_candidates", "start_node": start_node},
+                metadata={
+                    "target_class": target_class,
+                    "reason": "no_candidates",
+                    "start_node": start_node,
+                    **self._constraint_metadata(),
+                },
             )
 
         # Compute shortest paths from the start node to all candidates, and select the best reachable one.
@@ -173,7 +215,13 @@ class FACEMethod(BaseCounterfactualMethod):
                 x_cf=x_query[0],
                 success=False,
                 distance=0.0,
-                metadata={"target_class": target_class, "reason": "no_reachable_candidate", "start_node": start_node},
+                metadata={
+                    "target_class": target_class,
+                    "reason": "no_reachable_candidate",
+                    "start_node": start_node,
+                    "n_candidates": int(len(candidates)),
+                    **self._constraint_metadata(),
+                },
             )
 
         best_node = path[0]
@@ -192,6 +240,7 @@ class FACEMethod(BaseCounterfactualMethod):
                 "path_indices": [int(i) for i in path],
                 "n_candidates": int(len(candidates)),
                 "norm": self.norm,
+                **self._constraint_metadata(),
             },
         )
 
@@ -241,3 +290,13 @@ class FACEMethod(BaseCounterfactualMethod):
         density_mask = self.density >= self.td
         indices = np.where(conf_mask & density_mask)[0]
         return np.array([i for i in indices if self.conditions_fn(x_query, self._x_train[i])])
+
+    def _constraint_metadata(self) -> dict[str, int | str]:
+        return constraint_metadata(
+            self.fixed_dims,
+            self.immutable_features,
+            self.nondecreasing_dims,
+            self.nonincreasing_dims,
+            self.nondecreasing_features,
+            self.nonincreasing_features,
+        )

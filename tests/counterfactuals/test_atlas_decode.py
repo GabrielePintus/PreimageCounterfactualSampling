@@ -182,6 +182,37 @@ def test_exact_decode_respects_fixed_dimensions():
     assert profile["decode_exact_fallback_used"] is True
 
 
+def test_exact_decode_respects_fixed_ohe_block():
+    if not CVXPY_AVAILABLE:
+        pytest.skip("CVXPY is required to exercise the L2 exact decode path.")
+
+    atlas = _make_atlas(2, [(0, 2), (2, 4)])
+    x_query = np.array([1.0, 0.0, 0.6, 0.4], dtype=np.float64)
+    center = x_query.copy()
+    A_full = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
+    b_full = np.array([-0.2], dtype=np.float64)
+    fixed_dims = np.array([0, 1], dtype=np.int64)
+
+    x_cf, dist, profile = atlas._polytope_aware_decode(
+        x_query,
+        x_query,
+        A_full,
+        b_full,
+        center,
+        box_eps=1.0,
+        ball_eps=_decode_ball_eps(2),
+        maxiter=200,
+        tol=1e-9,
+        fixed_dims=fixed_dims,
+    )
+
+    assert x_cf is not None
+    assert np.allclose(x_cf[fixed_dims], x_query[fixed_dims], atol=1e-9)
+    assert np.allclose(x_cf[2:4], np.array([0.0, 1.0]), atol=1e-7)
+    assert np.isfinite(dist)
+    assert profile["decode_mode"] in {"heuristic", "exact_enum", "exact_bnb"}
+
+
 def test_exact_decode_uses_incumbent_bound_for_early_pruning():
     atlas = _make_atlas(np.inf, [(0, 2)])
     x_query = np.array([0.8, 0.2], dtype=np.float64)

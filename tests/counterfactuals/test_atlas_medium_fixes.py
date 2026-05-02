@@ -499,6 +499,126 @@ def test_preimage_approximation_forwards_lirpa_method(monkeypatch):
     assert seen_methods == ["alpha-crown", "alpha-crown"]
 
 
+def test_preimage_adaptive_eps_halves_until_center_is_certified(monkeypatch):
+    dataset = torch.utils.data.TensorDataset(
+        torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float32),
+        torch.tensor([0, 1], dtype=torch.int64),
+    )
+    seen_eps = []
+
+    def fake_run_lirpa(model, label, X, n_classes, device, eps, norm, dtype, lirpa_method):
+        del model, label, device, norm, dtype, lirpa_method
+        seen_eps.append(float(eps))
+        n_samples, dim = X.shape
+        zeros = np.zeros((n_samples, n_classes - 1, dim), dtype=np.float32)
+        bias_value = 0.25 if eps <= 0.1 else -0.25
+        bias = np.full((n_samples, n_classes - 1), bias_value, dtype=np.float32)
+        return zeros, bias, zeros, bias
+
+    monkeypatch.setattr("certcf.certification.lirpa.run_lirpa", fake_run_lirpa)
+
+    preimage = PreimageApproximation(
+        model=torch.nn.Linear(2, 2),
+        dataset=dataset,
+        device=torch.device("cpu"),
+        cnn=False,
+    )
+    bounds = preimage.compute_all_bounds(
+        eps=0.2,
+        norm=2,
+        adaptive_eps=True,
+        adaptive_eps_max_shrinks=4,
+    )
+
+    assert seen_eps == [0.2, 0.1, 0.2, 0.1]
+    for label_bounds in bounds.values():
+        assert np.allclose(label_bounds["eps_initial"], np.array([0.2]))
+        assert np.allclose(label_bounds["eps"], np.array([0.1]))
+        assert np.array_equal(label_bounds["adaptive_eps_n_shrinks"], np.array([1]))
+        assert np.all(label_bounds["adaptive_eps_center_certified"])
+        assert np.all(label_bounds["adaptive_eps_center_slack"] > 0.0)
+
+
+def test_preimage_adaptive_eps_binary_search_recovers_larger_certified_radius(monkeypatch):
+    dataset = torch.utils.data.TensorDataset(
+        torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float32),
+        torch.tensor([0, 1], dtype=torch.int64),
+    )
+    seen_eps = []
+
+    def fake_run_lirpa(model, label, X, n_classes, device, eps, norm, dtype, lirpa_method):
+        del model, label, device, norm, dtype, lirpa_method
+        seen_eps.append(float(eps))
+        n_samples, dim = X.shape
+        zeros = np.zeros((n_samples, n_classes - 1, dim), dtype=np.float32)
+        bias_value = 0.25 if eps <= 0.1500001 else -0.25
+        bias = np.full((n_samples, n_classes - 1), bias_value, dtype=np.float32)
+        return zeros, bias, zeros, bias
+
+    monkeypatch.setattr("certcf.certification.lirpa.run_lirpa", fake_run_lirpa)
+
+    preimage = PreimageApproximation(
+        model=torch.nn.Linear(2, 2),
+        dataset=dataset,
+        device=torch.device("cpu"),
+        cnn=False,
+    )
+    bounds = preimage.compute_all_bounds(
+        eps=0.2,
+        norm=2,
+        adaptive_eps=True,
+        adaptive_eps_max_shrinks=4,
+        adaptive_eps_binary_search_steps=2,
+    )
+
+    expected_per_label = [0.2, 0.1, 0.15, 0.175]
+    assert np.allclose(seen_eps[:4], expected_per_label)
+    assert np.allclose(seen_eps[4:], expected_per_label)
+    for label_bounds in bounds.values():
+        assert np.allclose(label_bounds["eps_initial"], np.array([0.2]))
+        assert np.allclose(label_bounds["eps"], np.array([0.15]))
+        assert np.array_equal(label_bounds["adaptive_eps_n_shrinks"], np.array([1]))
+        assert np.array_equal(label_bounds["adaptive_eps_n_binary_steps"], np.array([2]))
+        assert np.all(label_bounds["adaptive_eps_center_certified"])
+
+
+def test_preimage_adaptive_eps_keeps_smallest_attempt_when_uncertified(monkeypatch):
+    dataset = torch.utils.data.TensorDataset(
+        torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float32),
+        torch.tensor([0, 1], dtype=torch.int64),
+    )
+
+    def fake_run_lirpa(model, label, X, n_classes, device, eps, norm, dtype, lirpa_method):
+        del model, label, device, eps, norm, dtype, lirpa_method
+        n_samples, dim = X.shape
+        zeros = np.zeros((n_samples, n_classes - 1, dim), dtype=np.float32)
+        bias = np.full((n_samples, n_classes - 1), -0.25, dtype=np.float32)
+        return zeros, bias, zeros, bias
+
+    monkeypatch.setattr("certcf.certification.lirpa.run_lirpa", fake_run_lirpa)
+
+    preimage = PreimageApproximation(
+        model=torch.nn.Linear(2, 2),
+        dataset=dataset,
+        device=torch.device("cpu"),
+        cnn=False,
+    )
+    bounds = preimage.compute_all_bounds(
+        eps=0.2,
+        norm=2,
+        adaptive_eps=True,
+        adaptive_eps_max_shrinks=2,
+    )
+
+    for label_bounds in bounds.values():
+        assert np.allclose(label_bounds["eps_initial"], np.array([0.2]))
+        assert np.allclose(label_bounds["eps"], np.array([0.05]))
+        assert np.array_equal(label_bounds["adaptive_eps_n_shrinks"], np.array([2]))
+        assert np.array_equal(label_bounds["adaptive_eps_n_binary_steps"], np.array([0]))
+        assert not np.any(label_bounds["adaptive_eps_center_certified"])
+        assert np.all(label_bounds["adaptive_eps_center_slack"] < 0.0)
+
+
 def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
     init_calls = []
 
@@ -522,7 +642,18 @@ def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
                 self.model[0].bias.zero_()
             self.device = "cpu"
 
-    method = CertCF(model=TinyTorchModel(), lirpa_method="alpha-crown", random_seed=7)
+    method = CertCF(
+        model=TinyTorchModel(),
+        lirpa_method="alpha-crown",
+        classification_margin=0.123,
+        adaptive_eps=True,
+        adaptive_eps_shrink_factor=0.25,
+        adaptive_eps_max_shrinks=3,
+        adaptive_eps_min=1.0e-5,
+        adaptive_eps_center_tol=1.0e-4,
+        adaptive_eps_binary_search_steps=2,
+        random_seed=7,
+    )
     method.fit(
         x_train=np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
         y_train=np.array([0, 1], dtype=np.int64),
@@ -530,6 +661,13 @@ def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
 
     assert init_calls
     assert init_calls[0]["lirpa_method"] == "alpha-crown"
+    assert init_calls[0]["classification_margin"] == 0.123
+    assert init_calls[0]["adaptive_eps"] is True
+    assert init_calls[0]["adaptive_eps_shrink_factor"] == 0.25
+    assert init_calls[0]["adaptive_eps_max_shrinks"] == 3
+    assert init_calls[0]["adaptive_eps_min"] == 1.0e-5
+    assert init_calls[0]["adaptive_eps_center_tol"] == 1.0e-4
+    assert init_calls[0]["adaptive_eps_binary_search_steps"] == 2
 
 
 def test_find_counterfactual_supports_non_contiguous_target_labels():
@@ -597,7 +735,7 @@ def test_find_counterfactual_nearest_anchor_limits_projection_budget(monkeypatch
     assert result.success is True
     assert result.anchor_idx == 0
     assert result.n_qp_solved == 2
-    assert np.isclose(result.distance, 1.0)
+    assert np.isclose(result.distance, np.linalg.norm(np.array([0.0, 1.0, 0.0]) - np.array([0.2, 0.8, 0.0])))
     assert [idx for idx, _ in calls] == [2, 0]
     assert result.profiling["method"] == "nearest_anchor"
     assert result.profiling["query_k_candidates"] == 2.0
@@ -606,6 +744,11 @@ def test_find_counterfactual_nearest_anchor_limits_projection_budget(monkeypatch
     assert result.profiling["n_candidates_pruned_by_top_k"] == 1.0
     assert result.profiling["n_candidates_pruned_by_bound"] == 0.0
     assert result.profiling["nearest_anchor_fallback_used"] == 0.0
+    assert result.profiling["nearest_anchor_initialization_used"] == 1.0
+    assert result.profiling["nearest_anchor_initial_idx"] == 0.0
+    assert result.profiling["nearest_anchor_candidate_idx"] == 0.0
+    assert result.profiling["nearest_anchor_candidate_certified"] == 1.0
+    assert result.profiling["nearest_anchor_returned"] == 1.0
     assert np.isnan(result.profiling["best_lower_bound_at_termination"])
 
 
@@ -658,18 +801,20 @@ def test_find_counterfactual_nearest_anchor_falls_back_after_topk_failure(monkey
     )
 
     assert result.success is True
-    assert result.anchor_idx == 1
-    assert result.n_qp_solved == 3
-    assert np.isclose(result.distance, 4.0)
-    assert [idx for idx, _ in calls] == [2, 0, 1]
-    assert result.profiling["nearest_anchor_fallback_used"] == 1.0
-    assert result.profiling["n_candidates_considered"] == 3.0
-    assert result.profiling["n_candidates_pruned_by_top_k"] == 0.0
+    assert result.anchor_idx == 0
+    assert result.n_qp_solved == 2
+    assert np.isclose(result.distance, np.linalg.norm(np.array([0.0, 1.0, 0.0]) - np.array([0.2, 0.8, 0.0])))
+    assert [idx for idx, _ in calls] == [2, 0]
+    assert result.profiling["nearest_anchor_fallback_used"] == 0.0
+    assert result.profiling["n_candidates_considered"] == 2.0
+    assert result.profiling["n_candidates_pruned_by_top_k"] == 1.0
     assert result.profiling["n_candidates_pruned_by_bound"] == 0.0
+    assert result.profiling["nearest_anchor_candidate_certified"] == 1.0
+    assert result.profiling["nearest_anchor_returned"] == 1.0
     assert np.isnan(result.profiling["best_lower_bound_at_termination"])
 
 
-def test_find_counterfactual_nearest_anchor_prunes_primary_candidates_by_bound(monkeypatch):
+def test_find_counterfactual_nearest_anchor_skips_uncertified_anchor(monkeypatch):
     atlas = _manual_atlas(
         centers_by_label={
             2: np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
@@ -726,10 +871,18 @@ def test_find_counterfactual_nearest_anchor_prunes_primary_candidates_by_bound(m
     assert result.profiling["n_candidates_pruned_by_bound"] == 2.0
     assert result.profiling["n_candidates_pruned_by_top_k"] == 0.0
     assert result.profiling["nearest_anchor_fallback_used"] == 0.0
-    assert np.isclose(result.profiling["best_lower_bound_at_termination"], np.linalg.norm(np.array([1.0, 1.5, 0.0]) - np.array([0.2, 0.8, 0.0])))
+    assert result.profiling["nearest_anchor_initialization_used"] == 0.0
+    assert np.isnan(result.profiling["nearest_anchor_initial_idx"])
+    assert result.profiling["nearest_anchor_candidate_idx"] == 2.0
+    assert result.profiling["nearest_anchor_candidate_certified"] == 0.0
+    assert result.profiling["nearest_anchor_returned"] == 0.0
+    assert np.isclose(
+        result.profiling["best_lower_bound_at_termination"],
+        np.linalg.norm(np.array([1.0, 1.5, 0.0]) - np.array([0.2, 0.8, 0.0])),
+    )
 
 
-def test_find_counterfactual_nearest_anchor_does_not_prune_before_first_incumbent(monkeypatch):
+def test_find_counterfactual_nearest_anchor_does_not_return_uncertified_anchor(monkeypatch):
     atlas = _manual_atlas(
         centers_by_label={
             2: np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
@@ -782,8 +935,14 @@ def test_find_counterfactual_nearest_anchor_does_not_prune_before_first_incumben
     assert result.anchor_idx == 1
     assert result.n_qp_solved == 3
     assert [idx for idx, _ in calls] == [2, 0, 1]
+    assert np.isclose(result.distance, 4.0)
     assert result.profiling["n_candidates_considered"] == 3.0
     assert result.profiling["n_candidates_pruned_by_bound"] == 0.0
+    assert result.profiling["nearest_anchor_initialization_used"] == 0.0
+    assert np.isnan(result.profiling["nearest_anchor_initial_idx"])
+    assert result.profiling["nearest_anchor_candidate_idx"] == 0.0
+    assert result.profiling["nearest_anchor_candidate_certified"] == 0.0
+    assert result.profiling["nearest_anchor_returned"] == 0.0
 
 
 def test_find_counterfactual_rejects_unknown_target_label():
