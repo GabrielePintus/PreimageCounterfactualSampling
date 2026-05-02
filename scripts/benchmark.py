@@ -212,6 +212,37 @@ def subsample_train(
     return x_train[idx], y_train[idx]
 
 
+def subsample_train_per_class(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    max_per_class: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Randomly cap the training set to at most ``max_per_class`` rows per label."""
+    max_per_class = int(max_per_class)
+    if max_per_class <= 0:
+        raise ValueError("sampling.n_train_per_class must be positive")
+
+    y_arr = np.asarray(y_train, dtype=np.int64)
+    selected_parts: list[np.ndarray] = []
+    changed = False
+    for cls in np.unique(y_arr):
+        idx = np.where(y_arr == cls)[0]
+        if len(idx) > max_per_class:
+            idx = rng.choice(idx, size=max_per_class, replace=False)
+            changed = True
+        selected_parts.append(idx)
+
+    if not changed:
+        return x_train, y_train
+
+    selected = np.concatenate(selected_parts)
+    rng.shuffle(selected)
+    counts = {int(cls): int(np.sum(y_arr[selected] == cls)) for cls in np.unique(y_arr)}
+    print(f"[INFO] Per-class random subsampling: {len(x_train)} -> {len(selected)} samples ({counts}).")
+    return x_train[selected], y_train[selected]
+
+
 # ---------------------------------------------------------------------------
 # Farthest Point Sampling
 # ---------------------------------------------------------------------------
@@ -348,7 +379,7 @@ def _get_tabular_spec(dataset_name: str):
         return None
 
 
-def _normalize_immutable_features(raw_features: Any) -> list[str]:
+def _normalize_feature_name_list(raw_features: Any, *, param_name: str) -> list[str]:
     if raw_features is None:
         return []
     if isinstance(raw_features, str):
@@ -357,20 +388,26 @@ def _normalize_immutable_features(raw_features: Any) -> list[str]:
         try:
             features = list(raw_features)
         except TypeError as exc:
-            raise ValueError("immutable_features must be a string or a sequence of strings") from exc
+            raise ValueError(
+                f"{param_name} must be a string or a sequence of strings"
+            ) from exc
 
     normalized: list[str] = []
     seen: set[str] = set()
     for feature in features:
         if not isinstance(feature, str):
-            raise ValueError("immutable_features entries must be strings")
+            raise ValueError(f"{param_name} entries must be strings")
         name = feature.strip()
         if not name:
-            raise ValueError("immutable_features entries must be non-empty strings")
+            raise ValueError(f"{param_name} entries must be non-empty strings")
         if name not in seen:
             normalized.append(name)
             seen.add(name)
     return normalized
+
+
+def _normalize_immutable_features(raw_features: Any) -> list[str]:
+    return _normalize_feature_name_list(raw_features, param_name="immutable_features")
 
 
 def _resolve_immutable_feature_dims(
@@ -410,6 +447,137 @@ def _resolve_immutable_feature_dims(
     return np.unique(np.asarray(dims, dtype=np.int64)), features
 
 
+def _normalize_directional_feature_lists(
+    nondecreasing_features: Any,
+    nonincreasing_features: Any,
+) -> tuple[list[str], list[str]]:
+    nondecreasing = _normalize_feature_name_list(
+        nondecreasing_features,
+        param_name="nondecreasing_features",
+    )
+    nonincreasing = _normalize_feature_name_list(
+        nonincreasing_features,
+        param_name="nonincreasing_features",
+    )
+    overlap = sorted(set(nondecreasing) & set(nonincreasing))
+    if overlap:
+        names = ", ".join(overlap)
+        raise ValueError(
+            "Directional constraints cannot require the same feature to be both "
+            f"nondecreasing and nonincreasing: {names}."
+        )
+    return nondecreasing, nonincreasing
+
+
+def _resolve_directional_feature_dims(
+    dataset_name: str,
+    nondecreasing_features: Any,
+    nonincreasing_features: Any,
+    preprocessing_name: str = "identity",
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray], list[str], list[str]]:
+    nondecreasing, nonincreasing = _normalize_directional_feature_lists(
+        nondecreasing_features,
+        nonincreasing_features,
+    )
+    if not nondecreasing and not nonincreasing:
+        return None, None, [], []
+    if preprocessing_name != "identity":
+        raise ValueError(
+            "nondecreasing_features/nonincreasing_features are only supported "
+            f"with identity preprocessing (got preprocessing={preprocessing_name!r})."
+        )
+
+    spec = _get_tabular_spec(dataset_name)
+    if spec is None:
+        raise ValueError(
+            "Directional feature constraints require a tabular dataset spec; "
+            f"none found for {dataset_name!r}."
+        )
+
+    feature_to_slice = dict(zip(spec.feature_names, spec.feature_slices))
+    feature_to_type = dict(zip(spec.feature_names, spec.input_types))
+    requested = nondecreasing + nonincreasing
+    unknown = [feature for feature in requested if feature not in feature_to_slice]
+    if unknown:
+        valid = ", ".join(spec.feature_names)
+        missing = ", ".join(unknown)
+        raise ValueError(
+            f"Unknown directional feature(s) for dataset {dataset_name!r}: {missing}. "
+            f"Valid features are: {valid}."
+        )
+
+    categorical = [feature for feature in requested if feature_to_type[feature] != "numerical"]
+    if categorical:
+        names = ", ".join(categorical)
+        raise ValueError(
+            "Directional constraints only support numerical original features. "
+            f"Categorical feature(s) should use immutable_features instead: {names}."
+        )
+
+    def _dims_for(features: list[str]) -> Optional[np.ndarray]:
+        dims: list[int] = []
+        for feature in features:
+            start, end = feature_to_slice[feature]
+            if int(end) - int(start) != 1:
+                raise ValueError(
+                    "Directional constraints only support single-coordinate "
+                    f"numerical features; {feature!r} maps to slice ({start}, {end})."
+                )
+            dims.append(int(start))
+        if not dims:
+            return None
+        return np.unique(np.asarray(dims, dtype=np.int64))
+
+    return _dims_for(nondecreasing), _dims_for(nonincreasing), nondecreasing, nonincreasing
+
+
+def _attach_feature_constraints(
+    *,
+    method_name: str,
+    method_params: Dict[str, Any],
+    dataset_name: str,
+    preprocessing_name: str,
+) -> Dict[str, Any]:
+    """Resolve YAML feature constraints into method-level encoded dimensions."""
+    immutable_features = _normalize_immutable_features(method_params.get("immutable_features"))
+    nondecreasing_features, nonincreasing_features = _normalize_directional_feature_lists(
+        method_params.get("nondecreasing_features"),
+        method_params.get("nonincreasing_features"),
+    )
+    if not immutable_features and not nondecreasing_features and not nonincreasing_features:
+        return method_params
+
+    supported_methods = {"certcf", "face", "nearest_neighbor", "growing_spheres"}
+    if method_name not in supported_methods:
+        supported = ", ".join(sorted(supported_methods))
+        raise ValueError(
+            f"Feature constraints are not supported for method {method_name!r}. "
+            f"Supported methods are: {supported}."
+        )
+
+    constrained_params = dict(method_params)
+    if immutable_features:
+        fixed_dims, resolved_features = _resolve_immutable_feature_dims(
+            dataset_name=dataset_name,
+            immutable_features=immutable_features,
+            preprocessing_name=preprocessing_name,
+        )
+        constrained_params["fixed_dims"] = fixed_dims
+        constrained_params["immutable_features"] = resolved_features
+    if nondecreasing_features or nonincreasing_features:
+        inc_dims, dec_dims, inc_features, dec_features = _resolve_directional_feature_dims(
+            dataset_name=dataset_name,
+            nondecreasing_features=nondecreasing_features,
+            nonincreasing_features=nonincreasing_features,
+            preprocessing_name=preprocessing_name,
+        )
+        constrained_params["nondecreasing_dims"] = inc_dims
+        constrained_params["nonincreasing_dims"] = dec_dims
+        constrained_params["nondecreasing_features"] = inc_features
+        constrained_params["nonincreasing_features"] = dec_features
+    return constrained_params
+
+
 def _attach_immutable_feature_constraints(
     *,
     method_name: str,
@@ -417,28 +585,13 @@ def _attach_immutable_feature_constraints(
     dataset_name: str,
     preprocessing_name: str,
 ) -> Dict[str, Any]:
-    """Resolve YAML immutable feature names into method-level fixed dimensions."""
-    immutable_features = _normalize_immutable_features(method_params.get("immutable_features"))
-    if not immutable_features:
-        return method_params
-
-    supported_methods = {"nearest_neighbor", "growing_spheres"}
-    if method_name not in supported_methods:
-        supported = ", ".join(sorted(["certcf", *supported_methods]))
-        raise ValueError(
-            f"immutable_features are not supported for method {method_name!r}. "
-            f"Supported methods are: {supported}."
-        )
-
-    fixed_dims, resolved_features = _resolve_immutable_feature_dims(
+    """Backward-compatible wrapper for tests and older internal callers."""
+    return _attach_feature_constraints(
+        method_name=method_name,
+        method_params=method_params,
         dataset_name=dataset_name,
-        immutable_features=immutable_features,
         preprocessing_name=preprocessing_name,
     )
-    constrained_params = dict(method_params)
-    constrained_params["fixed_dims"] = fixed_dims
-    constrained_params["immutable_features"] = resolved_features
-    return constrained_params
 
 
 def _sample_balanced_indices(
@@ -645,6 +798,12 @@ def _build_certcf_method(
     cvxpy_solver_options = deepcopy(params["cvxpy_solver_options"]) if "cvxpy_solver_options" in params else None
     cvxpy_accept_statuses = deepcopy(params["cvxpy_accept_statuses"]) if "cvxpy_accept_statuses" in params else None
     classification_margin = float(params.get("classification_margin", 0.0))
+    adaptive_eps = bool(params.get("adaptive_eps", False))
+    adaptive_eps_shrink_factor = float(params.get("adaptive_eps_shrink_factor", 0.5))
+    adaptive_eps_max_shrinks = int(params.get("adaptive_eps_max_shrinks", 8))
+    adaptive_eps_min = float(params.get("adaptive_eps_min", 1.0e-6))
+    adaptive_eps_center_tol = float(params.get("adaptive_eps_center_tol", 1.0e-6))
+    adaptive_eps_binary_search_steps = int(params.get("adaptive_eps_binary_search_steps", 0))
     ohe_decode_mode = params["ohe_decode_mode"] if "ohe_decode_mode" in params else None
     decode_beam_width = params["decode_beam_width"] if "decode_beam_width" in params else None
     decode_beam_branch_top_k = params["decode_beam_branch_top_k"] if "decode_beam_branch_top_k" in params else None
@@ -658,6 +817,17 @@ def _build_certcf_method(
     fixed_dims, immutable_features = _resolve_immutable_feature_dims(
         dataset_name=dataset_module,
         immutable_features=params.get("immutable_features"),
+        preprocessing_name=preprocessing_name,
+    )
+    (
+        nondecreasing_dims,
+        nonincreasing_dims,
+        nondecreasing_features,
+        nonincreasing_features,
+    ) = _resolve_directional_feature_dims(
+        dataset_name=dataset_module,
+        nondecreasing_features=params.get("nondecreasing_features"),
+        nonincreasing_features=params.get("nonincreasing_features"),
         preprocessing_name=preprocessing_name,
     )
 
@@ -718,6 +888,16 @@ def _build_certcf_method(
         classification_margin=classification_margin,
         fixed_dims=fixed_dims,
         immutable_features=immutable_features,
+        nondecreasing_dims=nondecreasing_dims,
+        nonincreasing_dims=nonincreasing_dims,
+        nondecreasing_features=nondecreasing_features,
+        nonincreasing_features=nonincreasing_features,
+        adaptive_eps=adaptive_eps,
+        adaptive_eps_shrink_factor=adaptive_eps_shrink_factor,
+        adaptive_eps_max_shrinks=adaptive_eps_max_shrinks,
+        adaptive_eps_min=adaptive_eps_min,
+        adaptive_eps_center_tol=adaptive_eps_center_tol,
+        adaptive_eps_binary_search_steps=adaptive_eps_binary_search_steps,
         random_seed=seed,
     )
     if cvxpy_solvers is not None:
@@ -835,9 +1015,27 @@ def _build_mnist_model_from_checkpoint(
 # ---------------------------------------------------------------------------
 
 _NON_SWEEP_LIST_PARAMS_BY_METHOD: Dict[str, set[str]] = {
-    "certcf": {"cvxpy_solvers", "immutable_features"},
-    "nearest_neighbor": {"immutable_features"},
-    "growing_spheres": {"immutable_features"},
+    "certcf": {
+        "cvxpy_solvers",
+        "immutable_features",
+        "nondecreasing_features",
+        "nonincreasing_features",
+    },
+    "face": {
+        "immutable_features",
+        "nondecreasing_features",
+        "nonincreasing_features",
+    },
+    "nearest_neighbor": {
+        "immutable_features",
+        "nondecreasing_features",
+        "nonincreasing_features",
+    },
+    "growing_spheres": {
+        "immutable_features",
+        "nondecreasing_features",
+        "nonincreasing_features",
+    },
 }
 
 
@@ -1058,14 +1256,17 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             mad_weights[i] = mad if mad > 0 else 1.0
     # Categorical features keep weight = 1.0 (binary mismatch is already in [0, 1]).
 
-    # --- Train subsampling (shared by all methods EXCEPT certcf) ---
-    # k-medoids is reserved for the CertCF method's own atlas construction (see
-    # k_per_class inside _build_certcf_method). Other methods receive
-    # either the full training set or a *random* subsample if n_train is set.
+    # --- Shared train subsampling ---
+    # Dataset-level caps are applied before all method-specific fitting/building.
+    # CertCF may still apply its own atlas support reduction via k_per_class.
     sampling_cfg = cfg.get("sampling", {})
-    n_train = int(sampling_cfg.get("n_train", len(x_train_full)))
-
-    x_train, y_train = subsample_train(x_train_full, y_train_full, n_train, "random", rng)
+    x_train, y_train = x_train_full, y_train_full
+    if "n_train_per_class" in sampling_cfg:
+        x_train, y_train = subsample_train_per_class(
+            x_train, y_train, int(sampling_cfg["n_train_per_class"]), rng
+        )
+    n_train = int(sampling_cfg.get("n_train", len(x_train)))
+    x_train, y_train = subsample_train(x_train, y_train, n_train, "random", rng)
 
     # --- Shared preprocessing for generation space ---
     transform, transform_name = _build_shared_preprocessing(cfg, seed=seed)
@@ -1233,7 +1434,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                 continue
         else:
             try:
-                method_params = _attach_immutable_feature_constraints(
+                method_params = _attach_feature_constraints(
                     method_name=method_name,
                     method_params=method_params,
                     dataset_name=ds_cfg["name"],

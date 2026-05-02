@@ -1,50 +1,24 @@
 seed: 42
-output: results/benchmark_full_reduced5000_L1.parquet
+output: results/benchmark_constrained_supported_reduced10000_L1.parquet
 timeout_per_sample: 120
 resource_monitor:
   enabled: true
   interval_s: 1.0
 
-
 methods:
-
-  - name: nearest_neighbor
-    run_name: nn
-    params:
-      norm: 1
-
-  - name: growing_spheres
-    run_name: gs
-    params:
-      norm: 1
-      max_radius: 10.0
-      radius_step: 0.25
-      n_in_layer: 1000
-
-  - name: dice
-    run_name: dice
-    params:
-      total_cfs: 1
-      diversity_weight: 0.0
-      proximity_weight: 1.0
-      min_iter: 50
-      max_iter: 500
-      query_batch_size: 250
-
   - name: certcf
-    run_name: certcf
+    run_name: certcf_nn_init_10k_constrained
     params:
       device: cuda
       norm: 1
-      eps_alpha: [0.25, 0.45, 0.65, 0.85, 0.99]
+      eps_alpha: 0.25
       classification_margin: 1.0e-4
       batch_size: 256
       query_method: nearest_anchor
       query_k_candidates: 5
-      atlas_subsample_method: boundary_random
-      atlas_boundary_beta: 0.5
+      atlas_subsample_method: random
       atlas_subsample_space: input
-      k_per_class: 5000
+      k_per_class: 10000
       cvxpy_solvers: [CLARABEL]
       cvxpy_solver_options:
         CLARABEL:
@@ -59,20 +33,22 @@ methods:
       decode_beam_branch_top_k: 3
       decode_beam_max_solver_calls: 32
 
+  - name: nearest_neighbor
+    run_name: nn_10k_constrained
+    params:
+      norm: 1
+      k_per_class: 10000
+      subsample_method: random
+
+  - name: growing_spheres
+    run_name: gs_constrained
+    params:
+      norm: 1
+      max_radius: 10.0
+      radius_step: 0.25
+      n_in_layer: 1000
+
 datasets:
-
-  - name: wisconsin_breast_cancer
-    sampling:
-      n_queries: 1000
-    model:
-      name: tabular_classifier_ckpt
-      params:
-        checkpoint: checkpoints/wisconsin_breast_cancer_classifier/best.ckpt
-        device: cuda
-        dataset_module: wisconsin_breast_cancer
-        hidden_dims: [64, 32]
-        dropout: 0.2
-
   - name: adult
     sampling:
       n_queries: 1000
@@ -84,6 +60,13 @@ datasets:
         dataset_module: adult
         hidden_dims: [64, 32]
         dropout: 0.2
+    method_overrides:
+      certcf_nn_init_10k_constrained:
+        immutable_features: [sex, race, native-country]
+      nn_10k_constrained:
+        immutable_features: [sex, race, native-country]
+      gs_constrained:
+        immutable_features: [sex, race, native-country]
 
   - name: compas
     sampling:
@@ -96,6 +79,16 @@ datasets:
         dataset_module: compas
         hidden_dims: [64, 32]
         dropout: 0.2
+    method_overrides:
+      certcf_nn_init_10k_constrained:
+        immutable_features: [sex, race]
+        nondecreasing_features: [age]
+      nn_10k_constrained:
+        immutable_features: [sex, race]
+        nondecreasing_features: [age]
+      gs_constrained:
+        immutable_features: [sex, race]
+        nondecreasing_features: [age]
 
   - name: german_credit
     sampling:
@@ -108,18 +101,13 @@ datasets:
         dataset_module: german_credit
         hidden_dims: [64, 32]
         dropout: 0.2
-
-  - name: heloc
-    sampling:
-      n_queries: 1000
-    model:
-      name: tabular_classifier_ckpt
-      params:
-        checkpoint: checkpoints/heloc_classifier/best.ckpt
-        device: cuda
-        dataset_module: heloc
-        hidden_dims: [64, 32]
-        dropout: 0.2
+    method_overrides:
+      certcf_nn_init_10k_constrained:
+        immutable_features: [age, personal_status, foreign_worker]
+      nn_10k_constrained:
+        immutable_features: [age, personal_status, foreign_worker]
+      gs_constrained:
+        immutable_features: [age, personal_status, foreign_worker]
 
   - name: give_me_some_credit
     sampling:
@@ -132,15 +120,10 @@ datasets:
         dataset_module: give_me_some_credit
         hidden_dims: [64, 32]
         dropout: 0.2
-
-  - name: lending_club
-    sampling:
-      n_queries: 1000
-    model:
-      name: tabular_classifier_ckpt
-      params:
-        checkpoint: checkpoints/lending_club_classifier/best.ckpt
-        device: cuda
-        dataset_module: lending_club
-        hidden_dims: [64, 32]
-        dropout: 0.2
+    method_overrides:
+      certcf_nn_init_10k_constrained:
+        immutable_features: [age]
+      nn_10k_constrained:
+        immutable_features: [age]
+      gs_constrained:
+        immutable_features: [age]

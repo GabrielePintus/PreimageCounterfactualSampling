@@ -38,6 +38,12 @@ Interactive notebooks for training evaluation, benchmark analysis, and CertCF di
   Tabular benchmark notebook that loads the datasets and checkpoints used by `benchmark_full.yaml`, computes FACE graph and candidate-pool diagnostics, and proposes a per-dataset heuristic for choosing `epsilon` and `tp`.
 - `6.25 - Benchmark result tables and manifoldness plots.ipynb`
   Final benchmark analysis notebook scaffold that loads the main L1 benchmark and separate FACE result files into one combined dataframe for validity-distance plots and manifoldness tables.
+- `6.26 - Counterfactual surrogate probe diagnostics.ipynb`
+  Auxiliary benchmark notebook that trains simple surrogates on generated counterfactuals and evaluates how well they recover real test-label structure and original-model decision structure across datasets and methods.
+- `6.28 - CertCF single-dataset probe.ipynb`
+  Lightweight CertCF notebook that runs one non-Adult dataset through the benchmark path and immediately inspects validity, proximity, query metadata, failures, and feature-level changes.
+- `6.30 - CertCF 2D intuition figure.ipynb`
+  Minimal synthetic 2D notebook for building a CertCF atlas with alpha 0.15 and producing a clean intuition figure with certified regions and counterfactual moves.
 
 ## Archived Notebooks
 

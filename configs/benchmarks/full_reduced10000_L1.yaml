@@ -1,5 +1,5 @@
 seed: 42
-output: results/benchmark_full_reduced5000_L1.parquet
+output: results/benchmark_full_reduced10000_L1.parquet
 timeout_per_sample: 120
 resource_monitor:
   enabled: true
@@ -7,29 +7,6 @@ resource_monitor:
 
 
 methods:
-
-  - name: nearest_neighbor
-    run_name: nn
-    params:
-      norm: 1
-
-  - name: growing_spheres
-    run_name: gs
-    params:
-      norm: 1
-      max_radius: 10.0
-      radius_step: 0.25
-      n_in_layer: 1000
-
-  - name: dice
-    run_name: dice
-    params:
-      total_cfs: 1
-      diversity_weight: 0.0
-      proximity_weight: 1.0
-      min_iter: 50
-      max_iter: 500
-      query_batch_size: 250
 
   - name: certcf
     run_name: certcf
@@ -44,7 +21,7 @@ methods:
       atlas_subsample_method: boundary_random
       atlas_boundary_beta: 0.5
       atlas_subsample_space: input
-      k_per_class: 5000
+      k_per_class: 10000
       cvxpy_solvers: [CLARABEL]
       cvxpy_solver_options:
         CLARABEL:

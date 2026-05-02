@@ -1,0 +1,87 @@
+seed: 42
+timeout_per_sample: 120
+
+resource_monitor:
+  enabled: true
+  interval_s: 1.0
+
+dataset:
+  name: compas
+
+model:
+  name: tabular_classifier_ckpt
+  params:
+    checkpoint: checkpoints/compas_classifier/best.ckpt
+    device: auto
+    dataset_module: compas
+    hidden_dims: [64, 32]
+    dropout: 0.2
+
+sampling:
+  n_queries: 100
+  n_train_per_class: 10000
+
+output:
+  path: results/benchmark_compas_all_supported_constrained.parquet
+
+# DiCE is intentionally not included here: benchmark-level immutable and
+# directional feature constraints are currently implemented for CertCF, NN,
+# Growing Spheres, and FACE.
+methods:
+  - name: certcf
+    run_name: certcf_alpha015_constrained
+    params:
+      checkpoint: checkpoints/compas_classifier/best.ckpt
+      device: auto
+      lirpa_method: backward
+      norm: inf
+      distance_norm: 1
+      eps_alpha: [0.10, 0.15]
+      classification_margin: 1.0e-4
+      batch_size: 128
+      query_method: sorted
+      # query_method: nearest_anchor
+      # query_k_candidates: 10
+      immutable_features: [sex, race]
+      nondecreasing_features: [age]
+      cvxpy_solvers: [CLARABEL]
+      cvxpy_solver_options:
+        CLARABEL:
+          max_iter: 200
+          tol_gap_abs: 1.0e-3
+          tol_gap_rel: 1.0e-5
+          tol_feas: 1.0e-8
+      cvxpy_accept_statuses:
+        CLARABEL: [optimal]
+      ohe_decode_mode: beam_then_exact
+      decode_beam_width: 8
+      decode_beam_branch_top_k: 3
+      decode_beam_max_solver_calls: 32
+
+  - name: nearest_neighbor
+    run_name: nn_constrained
+    params:
+      norm: 1
+      immutable_features: [sex, race]
+      nondecreasing_features: [age]
+
+  # - name: growing_spheres
+  #   run_name: gs_constrained
+  #   params:
+  #     norm: 1
+  #     max_radius: 50.0
+  #     radius_step: 0.25
+  #     n_in_layer: 1000
+  #     immutable_features: [sex, race]
+  #     nondecreasing_features: [age]
+
+  # - name: face
+  #   run_name: face_constrained
+  #   params:
+  #     density_estimator:
+  #       name: knn
+  #     norm: 2
+  #     tp: 0.5
+  #     epsilon: 1.5
+  #     immutable_features: [sex, race]
+  #     nondecreasing_features: [age]
