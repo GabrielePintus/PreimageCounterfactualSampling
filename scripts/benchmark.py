@@ -639,6 +639,34 @@ def _make_failure_query_result(
     )
 
 
+def _persist_completed_benchmark_result(
+    benchmark_result: BenchmarkResult,
+    output_path: Path,
+    *,
+    reason: str,
+) -> Optional[pd.DataFrame]:
+    """Persist completed method runs only.
+
+    This helper is intentionally called only after a MethodResult has been fully
+    appended.  If the process is interrupted during a later method/query, the
+    parquet therefore contains only completed method runs, never the active
+    partially computed one.
+    """
+    df = benchmark_result.to_dataframe()
+    if df.empty:
+        print(f"\n[INFO] No completed benchmark rows to save ({reason}).")
+        return None
+    _write_parquet_atomic(df, output_path)
+    print(f"\n[INFO] Saved benchmark parquet to {output_path} ({reason})")
+    return df
+
+
+def _write_parquet_atomic(df: pd.DataFrame, output_path: Path) -> None:
+    tmp_path = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
+    df.to_parquet(tmp_path, index=False, compression="gzip")
+    os.replace(tmp_path, output_path)
+
+
 def _build_query_tasks(
     *,
     dataset_name: str,
@@ -1431,6 +1459,11 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     method=method_name, run_name=run_name, params=method_params_raw,
                     build_time_s=0.0, space="raw", metadata=method_metadata, query_results=qrs,
                 ))
+                _persist_completed_benchmark_result(
+                    benchmark_result,
+                    output_path,
+                    reason=f"completed build-failure record for {run_name}",
+                )
                 continue
         else:
             try:
@@ -1468,6 +1501,11 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     method=method_name, run_name=run_name, params=method_params_raw,
                     build_time_s=0.0, space="gen", metadata=method_metadata, query_results=qrs,
                 ))
+                _persist_completed_benchmark_result(
+                    benchmark_result,
+                    output_path,
+                    reason=f"completed fit-failure record for {run_name}",
+                )
                 continue
             active_model = model_for_methods
             active_queries = x_queries_gen
@@ -1678,11 +1716,14 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             metadata=method_metadata,
             query_results=query_results,
         ))
+        _persist_completed_benchmark_result(
+            benchmark_result,
+            output_path,
+            reason=f"completed method {run_name}",
+        )
 
     # --- Save ---
-    df = benchmark_result.to_dataframe()
-    df.to_parquet(output_path, index=False, compression="gzip")
-    print(f"\n[INFO] Saved benchmark parquet to {output_path}")
+    _persist_completed_benchmark_result(benchmark_result, output_path, reason="final")
 
     benchmark_result.summary()
     return benchmark_result
@@ -1717,9 +1758,15 @@ def run_multi_dataset(
         df = result.to_dataframe()
         all_dfs.append(df)
         print(f"[INFO] {ds_name}: {len(df)} rows, {df['success'].mean():.1%} valid")
+        combined_so_far = pd.concat(all_dfs, ignore_index=True)
+        _write_parquet_atomic(combined_so_far, global_output)
+        print(
+            f"[INFO] Combined results so far ({len(combined_so_far)} rows) "
+            f"saved to {global_output}"
+        )
 
     combined = pd.concat(all_dfs, ignore_index=True)
-    combined.to_parquet(global_output, index=False, compression="gzip")
+    _write_parquet_atomic(combined, global_output)
     print(f"\n[INFO] Combined results ({len(combined)} rows) saved to {global_output}")
 
     print("\n[SUMMARY PER DATASET]")
