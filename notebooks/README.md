@@ -5,7 +5,6 @@ Interactive notebooks for training evaluation, benchmark analysis, and CertCF di
 ## Current Layout
 
 - `notebooks/`: active notebooks only
-- `archive/notebooks/`: historical notebooks kept for reference
 - `notebooks/utils/`: shared plotting and dataframe helpers for benchmark analysis
 
 ## Active Notebooks
@@ -45,20 +44,10 @@ Interactive notebooks for training evaluation, benchmark analysis, and CertCF di
 - `6.30 - CertCF 2D intuition figure.ipynb`
   Minimal synthetic 2D notebook for building a CertCF atlas with alpha 0.15 and producing a clean intuition figure with certified regions and counterfactual moves.
 
-## Archived Notebooks
-
-The following notebooks were moved to `archive/notebooks/` to reduce clutter in the active workspace:
-
-- early MNIST / spiral / preimage exploration (`1.x`, `2`, `3.x`)
-- older benchmark analysis notebooks (`6.0`, `6.2`–`6.10`)
-
-They are still available in git history and in the archive directory, but they are no longer treated as part of the active research surface.
-
 ## Usage Notes
 
 - Run cells top-to-bottom in a fresh kernel.
 - Some notebooks expect benchmark outputs under `../results/` when launched from the `notebooks/` directory.
-- Some older archived notebooks may expect checkpoints under `../checkpoints/`.
 - For k-medoids experiments, install `scikit-learn-extra`.
 
 ## Benchmark Notebook Helpers

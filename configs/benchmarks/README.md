@@ -10,19 +10,19 @@ It accepts both single-dataset and multi-dataset config schemas.
 
 ```bash
 # Smoke benchmark
-python scripts/benchmark.py --config configs/benchmarks/benchmark_smoke_all.yaml
+python scripts/benchmark.py --config configs/benchmarks/smoke_all.yaml
 
 # Main multi-dataset benchmark
-python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all_200q.yaml
+python scripts/benchmark.py --config configs/benchmarks/meeting_all_200q.yaml
 
 # Subset of datasets
 python scripts/benchmark.py \
-    --config configs/benchmarks/benchmark_meeting_all_200q.yaml \
+    --config configs/benchmarks/meeting_all_200q.yaml \
     --datasets adult compas
 
 # Override output path
 python scripts/benchmark.py \
-    --config configs/benchmarks/benchmark_meeting_all_200q.yaml \
+    --config configs/benchmarks/meeting_all_200q.yaml \
     --output results/my_run.parquet
 ```
 
@@ -55,7 +55,7 @@ Recommended workflow:
 ```bash
 # Run one method only
 python scripts/benchmark.py \
-    --config configs/benchmarks/benchmark_meeting_all_200q.yaml \
+    --config configs/benchmarks/meeting_all_200q.yaml \
     --methods certcf \
     --output results/benchmarks/adult_meeting_all_seed42_v1/methods/certcf.parquet
 
@@ -71,7 +71,7 @@ python scripts/benchmark_databank_refresh.py \
     --family results/benchmarks/adult_meeting_all_seed42_v1 \
     --init-from-parquet results/benchmark_adult_meeting.parquet \
     --dataset adult \
-    --config-path configs/benchmarks/benchmark_meeting_all_200q.yaml \
+    --config-path configs/benchmarks/meeting_all_200q.yaml \
     --seed 42 \
     --task-definition meeting_all_200q
 ```
@@ -275,26 +275,25 @@ directly on the dataset block:
 ## Available Config Files
 
 Active benchmark configs live in `configs/benchmarks/`.
-Historical or superseded configs have been moved to `archive/configs/benchmarks/`.
 
 ### Multi-dataset (run with `benchmark.py`)
 
 | File | Datasets | Methods | Queries |
 |------|----------|---------|---------|
-| `benchmark_meeting_all_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 200 |
-| `benchmark_full_all_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club, wisconsin_breast_cancer | nn, wachter, dice, gs, face, certcf | 200 |
-| `benchmark_smoke_all.yaml` | compas, german_credit, heloc, give_me_some_credit, lending_club | nn, gs, certcf | 50 |
-| `benchmark_meeting_certcf_input_vs_latent_200q.yaml` | adult, compas, german_credit | certcf input kmedoids, certcf latent kmedoids | 200 |
-| `benchmark_meeting_certcf_random_k_sweep_adult.yaml` | adult, compas, german_credit | certcf random anchors, k sweep | 200 |
-| `benchmark_meeting_certcf_boundary_random_k_sweep_adult.yaml` | adult, compas, german_credit | certcf boundary-random anchors, k sweep | 200 |
-| `benchmark_meeting_certcf_boundary_random_nearest_anchor_top3_200q.yaml` | adult, compas, german_credit | certcf boundary-random + nearest-anchor (`k=[3,5]`) | 200 |
-| `benchmark_meeting_certcf_boundary_random_top3_plus_nn_gs_200q.yaml` | adult, compas, german_credit | certcf boundary-random top-3, nn, dice, gs | 200 |
+| `meeting_all_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club | nn, dice, gs, face, certcf | 200 |
+| `full_all_200q.yaml` | adult, compas, german_credit, heloc, give_me_some_credit, lending_club, wisconsin_breast_cancer | nn, wachter, dice, gs, face, certcf | 200 |
+| `smoke_all.yaml` | compas, german_credit, heloc, give_me_some_credit, lending_club | nn, gs, certcf | 50 |
+| `meeting_certcf_input_vs_latent_200q.yaml` | adult, compas, german_credit | certcf input kmedoids, certcf latent kmedoids | 200 |
+| `meeting_certcf_random_k_sweep_adult.yaml` | adult, compas, german_credit | certcf random anchors, k sweep | 200 |
+| `meeting_certcf_boundary_random_k_sweep_adult.yaml` | adult, compas, german_credit | certcf boundary-random anchors, k sweep | 200 |
+| `meeting_certcf_boundary_random_nearest_anchor_top3_200q.yaml` | adult, compas, german_credit | certcf boundary-random + nearest-anchor (`k=[3,5]`) | 200 |
+| `meeting_certcf_boundary_random_top3_plus_nn_gs_200q.yaml` | adult, compas, german_credit | certcf boundary-random top-3, nn, dice, gs | 200 |
 
 ### Single-dataset (run with `benchmark.py`)
 
 | File | Dataset | Purpose |
 |------|---------|---------|
-| `benchmark_mnist.yaml` | mnist | Full benchmark on MNIST (balanced per-class sampling) |
+| `mnist.yaml` | mnist | Full benchmark on MNIST (balanced per-class sampling) |
 
 ---
 

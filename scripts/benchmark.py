@@ -2,12 +2,12 @@
 """Benchmark counterfactual methods from a single- or multi-dataset config.
 
 Usage:
-    python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml
-    python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --output results/run2.parquet
-    python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --seed 123 --n_queries 200
-    python scripts/benchmark.py --config configs/benchmarks/benchmark_adult.yaml --methods dice face nearest_neighbor
-    python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all.yaml
-    python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all.yaml --datasets adult compas
+    python scripts/benchmark.py --config configs/benchmarks/smoke_all.yaml
+    python scripts/benchmark.py --config configs/benchmarks/smoke_all.yaml --output results/run2.parquet
+    python scripts/benchmark.py --config configs/benchmarks/smoke_all.yaml --seed 123 --n_queries 200
+    python scripts/benchmark.py --config configs/benchmarks/smoke_all.yaml --methods dice face nearest_neighbor
+    python scripts/benchmark.py --config configs/benchmarks/meeting_all_200q.yaml
+    python scripts/benchmark.py --config configs/benchmarks/meeting_all_200q.yaml --datasets adult compas
 
 Output:
     Single-dataset config:

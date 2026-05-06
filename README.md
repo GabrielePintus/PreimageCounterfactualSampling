@@ -12,8 +12,7 @@ The repository has two main roles:
 - implement the CertCF method and its lower-level certification/query engine in `src/certcf/`
 - benchmark CertCF against baselines such as DiCE, FACE, nearest-neighbor, and Growing Spheres via `scripts/benchmark.py`
 
-Operational documentation for contributors and coding agents lives in `ops/`.
-This `README.md` remains the main welcome page for the repository.
+This `README.md` is the main welcome page for the repository.
 
 Given a classifier $f: \mathbb{R}^d \to \mathbb{R}^K$ and a query input $\mathbf{x}_0$ classified as class $l$, a **counterfactual explanation** is the closest point $\mathbf{x}'$ that the model classifies as a different target class $t$:
 
@@ -349,10 +348,10 @@ The official benchmark entrypoint is `scripts/benchmark.py`.
 
 ```bash
 # Smoke benchmark
-python scripts/benchmark.py --config configs/benchmarks/benchmark_smoke_all.yaml
+python scripts/benchmark.py --config configs/benchmarks/smoke_all.yaml
 
 # Main multi-dataset benchmark
-python scripts/benchmark.py --config configs/benchmarks/benchmark_meeting_all_200q.yaml
+python scripts/benchmark.py --config configs/benchmarks/meeting_all_200q.yaml
 ```
 
 Results are written as `.parquet` files and loaded directly by the `notebooks/6.x` analysis notebooks.
@@ -367,7 +366,7 @@ If you want to add one new method without rerunning an entire benchmark suite, k
 ```bash
 # 1. Run only the new method into the family folder
 python scripts/benchmark.py \
-  --config configs/benchmarks/benchmark_meeting_all_200q.yaml \
+  --config configs/benchmarks/meeting_all_200q.yaml \
   --methods certcf \
   --output results/benchmarks/adult_meeting_all_seed42_v1/methods/certcf.parquet
 

@@ -9,19 +9,13 @@ This repository contains:
 - A modular counterfactual benchmarking framework under `src/counterfactuals/`.
 
 Primary human-facing docs are in `README.md` and notebooks under `notebooks/`.
-Primary executable training entrypoint is `train.py`.
+Primary executable training entrypoint is `scripts/train_classifier.py`.
 Counterfactual benchmark entrypoint is `scripts/benchmark.py`.
 
 ## Fast Navigation
 
-Read these in order when working on the main project:
-1. `ops/00-repository-map.md`
-2. `ops/01-training-playbook.md`
-3. `ops/02-certified-atlas-playbook.md`
-4. `ops/04-agent-operating-guidelines.md`
-
-Read this for dependencies and subproject notes:
-- `ops/03-subprojects-and-dependencies.md`
+Start with `README.md`, then inspect the relevant modules under `src/`, configs
+under `configs/`, and notebooks under `notebooks/` for the task at hand.
 
 ## Setup Commands
 
@@ -40,17 +34,18 @@ pip install -e .[dev]
 Training is driven by Lightning CLI configs:
 
 ```bash
-python train.py fit --config configs/mnist_classifier.yaml
-python train.py fit --config configs/mnist_ae.yaml
-python train.py fit --config configs/spiral_classifier.yaml
-python train.py fit --config configs/adult_classifier.yaml
+python scripts/train_classifier.py fit --config configs/training/mnist_classifier.yaml
+python scripts/train_classifier.py fit --config configs/training/mnist_ae.yaml
+python scripts/train_classifier.py fit --config configs/training/spiral_classifier.yaml
+python scripts/train_classifier.py fit --config configs/training/adult_classifier.yaml
 ```
 
 ## Testing And Validation
 
 Validation is primarily workflow-based for core CertCF modules:
 - Run focused scripts/notebooks for changed modules.
-- For training changes, run at least one short `train.py fit` command with reduced epochs.
+- For training changes, run at least one short `scripts/train_classifier.py fit`
+  command with reduced epochs.
 - For atlas/sampling changes, run a minimal `CertCFAtlas.build(...)` plus one `find_counterfactual(...)` call.
 
 Automated tests currently available:
@@ -78,5 +73,6 @@ Automated tests currently available:
 
 ## Documentation Pattern
 
-This repo now includes operational docs in `ops/`.
-The structure is intentionally concise and indexable for both humans and LLM agents, following cross-agent conventions similar to AGENTS.md and LLM-oriented context-map practices.
+Keep repository-facing instructions concise and indexable for both humans and
+LLM agents. Prefer updating `README.md`, config READMEs, and focused notebook
+READMEs when repository layout changes.
