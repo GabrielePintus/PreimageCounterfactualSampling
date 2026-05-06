@@ -25,12 +25,4 @@ Benchmark config details live in `configs/benchmarks/README.md`.
 
 ### Benchmarks (`scripts/benchmark.py`)
 
-- `meeting_all_200q.yaml`
-- `full_all_200q.yaml`
-- `smoke_all.yaml`
-- `meeting_certcf_input_vs_latent_200q.yaml`
-- `meeting_certcf_random_k_sweep_adult.yaml`
-- `meeting_certcf_boundary_random_k_sweep_adult.yaml`
-- `meeting_certcf_boundary_random_nearest_anchor_top3_200q.yaml`
-- `meeting_certcf_boundary_random_top3_plus_nn_gs_200q.yaml`
-- `mnist.yaml`
+- `final_benchmark.yaml`

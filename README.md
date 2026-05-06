@@ -347,17 +347,14 @@ A single config file specifies the dataset(s), model checkpoint, methods, and hy
 The official benchmark entrypoint is `scripts/benchmark.py`.
 
 ```bash
-# Smoke benchmark
-python scripts/benchmark.py --config configs/benchmarks/smoke_all.yaml
-
 # Main multi-dataset benchmark
-python scripts/benchmark.py --config configs/benchmarks/meeting_all_200q.yaml
+python scripts/benchmark.py --config configs/benchmarks/final_benchmark.yaml
 ```
 
 Results are written as `.parquet` files and loaded directly by the `notebooks/6.x` analysis notebooks.
 In benchmark configs and output tables, the novel method appears as `certcf`.
 
-See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the full pipeline documentation: config schema, grid expansion, multi-dataset format, and the list of available config files.
+See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the benchmark configuration and output semantics.
 
 ### Incremental benchmark databank
 
@@ -366,13 +363,13 @@ If you want to add one new method without rerunning an entire benchmark suite, k
 ```bash
 # 1. Run only the new method into the family folder
 python scripts/benchmark.py \
-  --config configs/benchmarks/meeting_all_200q.yaml \
+  --config configs/benchmarks/final_benchmark.yaml \
   --methods certcf \
-  --output results/benchmarks/adult_meeting_all_seed42_v1/methods/certcf.parquet
+  --output results/benchmarks/final_seed42_v1/methods/certcf.parquet
 
 # 2. Rebuild combined.parquet + summary.json + index.html
 python scripts/benchmark_databank_refresh.py \
-  --family results/benchmarks/adult_meeting_all_seed42_v1
+  --family results/benchmarks/final_seed42_v1
 ```
 
 The family directory is expected to contain:

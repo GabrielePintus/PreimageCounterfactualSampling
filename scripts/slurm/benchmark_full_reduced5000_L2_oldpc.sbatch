@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REPO_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
-CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/full_reduced5000_L2.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-configs/benchmarks/final_benchmark.yaml}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-py13}"
 
 cd "${REPO_DIR}"

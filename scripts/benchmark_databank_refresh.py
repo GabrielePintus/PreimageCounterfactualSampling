@@ -627,7 +627,7 @@ def main() -> None:
     parser.add_argument(
         "--task-definition",
         default=None,
-        help="Short task-set label used only when bootstrapping a manifest (for example: meeting_all_200q).",
+        help="Short task-set label used only when bootstrapping a manifest (for example: final_benchmark).",
     )
     parser.add_argument("--notes", default=None, help="Optional notes used only when bootstrapping a manifest.")
     args = parser.parse_args()

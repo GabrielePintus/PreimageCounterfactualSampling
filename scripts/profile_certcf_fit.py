@@ -12,9 +12,9 @@ while measuring wall time and memory separately for:
 
 Example:
     python scripts/profile_certcf_fit.py \
-        --config configs/benchmarks/benchmark_meeting_certcf_input_vs_latent_200q.yaml \
+        --config configs/benchmarks/final_benchmark.yaml \
         --dataset adult \
-        --method certcf_input_kmedoids
+        --method certcf_alpha020_lambda1
 """
 
 from __future__ import annotations
@@ -250,14 +250,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
-        default="configs/benchmarks/benchmark_meeting_certcf_input_vs_latent_200q.yaml",
-        help="Benchmark YAML containing the Adult CertCF method config.",
+        default="configs/benchmarks/final_benchmark.yaml",
+        help="Benchmark YAML containing the CertCF method config.",
     )
     parser.add_argument("--dataset", default="adult", help="Dataset to profile. Default: adult.")
     parser.add_argument(
         "--method",
-        default="certcf_input_kmedoids",
-        help="CertCF run_name to profile. Default: certcf_input_kmedoids.",
+        default="certcf_alpha020_lambda1",
+        help="CertCF run_name to profile. Default: certcf_alpha020_lambda1.",
     )
     parser.add_argument("--device", default=None, help="Override device from config, e.g. cpu, cuda, gpu:0.")
     parser.add_argument("--k-per-class", type=int, default=None, help="Override method k_per_class.")
