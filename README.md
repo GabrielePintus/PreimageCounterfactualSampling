@@ -356,36 +356,6 @@ In benchmark configs and output tables, the novel method appears as `certcf`.
 
 See **[configs/benchmarks/README.md](configs/benchmarks/README.md)** for the benchmark configuration and output semantics.
 
-### Incremental benchmark databank
-
-If you want to add one new method without rerunning an entire benchmark suite, keep one parquet per method and refresh a derived benchmark family:
-
-```bash
-# 1. Run only the new method into the family folder
-python scripts/benchmark.py \
-  --config configs/benchmarks/final_benchmark.yaml \
-  --methods certcf \
-  --output results/benchmarks/final_seed42_v1/methods/certcf.parquet
-
-# 2. Rebuild combined.parquet + summary.json + index.html
-python scripts/benchmark_databank_refresh.py \
-  --family results/benchmarks/final_seed42_v1
-```
-
-The family directory is expected to contain:
-
-```text
-results/benchmarks/<family_name>/
-  manifest.json
-  methods/
-    <method_or_run_name>.parquet
-  combined.parquet
-  summary.json
-  index.html
-```
-
-`combined.parquet` is a derived cache, not the source of truth. The refresh step validates each method parquet against the family manifest before including it.
-
 ---
 
 ## Notebooks
