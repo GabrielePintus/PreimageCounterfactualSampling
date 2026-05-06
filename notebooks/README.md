@@ -4,7 +4,7 @@ Paper-facing notebooks and archived exploratory analyses for CertCF.
 
 ## Current Layout
 
-- `6.29 - Final benchmark clean load.ipynb`
+- `Results.ipynb`
   Main paper-results notebook. It loads the final benchmark parquet files and computes the comparison tables and plots used for the main experimental results.
 - `Appendix.ipynb`
   Compact appendix notebook. It collects the paper appendix tables and plots for hyperparameters, robustness, computational cost, CertCF ablations, and LiRPA backend diagnostics.
