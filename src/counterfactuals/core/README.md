@@ -8,8 +8,11 @@ Core contracts used across the modular counterfactual framework.
 - `registry.py`: plugin registry for methods, models, datasets, and metrics.
 
 ## Example
+
 ```python
 from counterfactuals.core.registry import Registry
 
 method_registry = Registry("method")
 ```
+
+Most users should access the prebuilt registries through `counterfactuals.benchmarks.create_default_registries()`.

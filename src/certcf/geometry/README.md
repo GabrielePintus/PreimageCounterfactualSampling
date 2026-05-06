@@ -1,13 +1,15 @@
 # geometry
 
-Geometric operations for polytope conversion, representation, and projection helpers.
+Geometric operations for certified-polytope conversion, validation, and plotting support.
 
 ## Contents
-- `polytopes.py`: polytope structures/utilities.
-- `conversion.py`: representation conversions.
-- `operations.py`: geometric operations.
+
+- `polytopes.py`: Lp-ball constraints and 2D polygon construction helpers.
+- `conversion.py`: halfspace-to-vertex conversion.
+- `operations.py`: class-union construction and cross-class overlap checks.
 
 ## Example
+
 ```python
-from certcf.geometry.operations import project_onto_polytope
+from certcf.geometry.polytopes import ball_box_constraints
 ```

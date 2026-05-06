@@ -1,13 +1,17 @@
 # sampling
 
-Sampling and projection routines used to search certified regions for counterfactuals.
+Lower-level certified-polytope projection utilities.
 
 ## Contents
-- `sampler.py`: `CounterfactualSampler` and atlas-level projection logic.
+
+- `sampler.py`: standalone `CounterfactualSampler` and `PolytopeAtlas` helpers.
+
+The benchmark-facing CertCF path uses `certcf.atlas.CertCFAtlas`, which contains the current OHE decoding, adaptive epsilon, and sparsity-aware selection logic. This subpackage remains useful for direct geometric experiments.
 
 ## Example
+
 ```python
 from certcf.sampling import CounterfactualSampler
 
-sampler = CounterfactualSampler(solver="ECOS")
+sampler = CounterfactualSampler(solver="CLARABEL", distance_norm=1)
 ```

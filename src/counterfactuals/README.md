@@ -1,12 +1,12 @@
 # Counterfactuals Framework
 
-This package provides a modular, extensible framework for running counterfactual experiments with a single interface.
+This package provides a modular framework for fitting, running, and evaluating counterfactual methods with a single interface.
 
 ## Design Goals
 
 - Pluggable methods, models, datasets, and metrics
 - Reproducible experiments via global seeding
-- Config-driven execution via the benchmark pipeline (`python scripts/benchmark.py --config <config.yaml>`)
+- Config-driven execution via the benchmark pipeline (`python scripts/benchmark.py --config configs/benchmarks/final_benchmark.yaml`)
 - Easy extension through registries without modifying runner logic
 
 ## Core Contracts
@@ -21,7 +21,7 @@ This package provides a modular, extensible framework for running counterfactual
 ## Extending
 
 1. Implement a new method class in `counterfactuals/methods/`.
-2. Register it in a method `Registry` in your experiment setup.
+2. Register it in `counterfactuals/benchmarks/registry.py` or in a local experiment registry.
 3. Add method-specific tests under `tests/counterfactuals/`.
 
 For tabular datasets, schema-level metadata now lives in `dataset_specs/`.

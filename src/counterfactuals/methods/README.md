@@ -1,6 +1,6 @@
 # methods
 
-Counterfactual generation methods behind a shared interface.
+Counterfactual generation methods behind the shared `BaseCounterfactualMethod` interface.
 
 ## Methods
 
@@ -12,3 +12,5 @@ Counterfactual generation methods behind a shared interface.
 | `growing_spheres.py` | Growing Spheres | Laugel, Lesot, Marsala, Renard, Detyniecki (2017). "Inverse Classification for Comparison-based Interpretability in Machine Learning". FUZZ-IEEE. |
 | `nearest_neighbor.py` | Nearest Neighbour | Baseline — returns the closest opposite-class training point. |
 | `certcf.py` | CertCF (CertCFAtlas) | This work. |
+
+The final benchmark config evaluates CertCF, DiCE, FACE, Growing Spheres, and Nearest Neighbor. Wachter remains implemented for compatibility and older experiments.
