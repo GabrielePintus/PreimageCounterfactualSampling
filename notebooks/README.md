@@ -1,6 +1,6 @@
 # Notebooks
 
-Paper-facing notebooks and archived exploratory analyses for CertCF.
+Paper-facing notebooks for CertCF.
 
 ## Current Layout
 
@@ -8,8 +8,6 @@ Paper-facing notebooks and archived exploratory analyses for CertCF.
   Main paper-results notebook. It loads the final benchmark parquet files and computes the comparison tables and plots used for the main experimental results.
 - `Appendix.ipynb`
   Compact appendix notebook. It collects the paper appendix tables and plots for hyperparameters, robustness, computational cost, CertCF ablations, and LiRPA backend diagnostics.
-- `archive/`
-  Historical exploratory notebooks kept for provenance. These notebooks are not part of the clean paper reproduction path and may reference older configs or intermediate result files.
 - `utils/`
   Shared plotting and dataframe helpers for benchmark analysis notebooks.
 
@@ -24,5 +22,4 @@ Paper-facing notebooks and archived exploratory analyses for CertCF.
 
 - Keep paper-facing notebooks thin and result-file driven.
 - Add reusable plotting or dataframe logic to `notebooks/utils/` instead of duplicating it across notebooks.
-- Move exploratory notebooks to `archive/` once they are no longer part of the active paper workflow.
 - Avoid committing large generated notebook outputs, figures, or benchmark artifacts.
