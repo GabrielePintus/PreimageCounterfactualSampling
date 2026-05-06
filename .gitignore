@@ -218,5 +218,6 @@ outputs/
 config.yaml
 
 results/
-
+archive/
+papers/*.pdf
 
