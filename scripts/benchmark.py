@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import os
 import signal
 import sys
@@ -644,6 +645,7 @@ def _persist_completed_benchmark_result(
     output_path: Path,
     *,
     reason: str,
+    base_df: Optional[pd.DataFrame] = None,
 ) -> Optional[pd.DataFrame]:
     """Persist completed method runs only.
 
@@ -652,10 +654,16 @@ def _persist_completed_benchmark_result(
     parquet therefore contains only completed method runs, never the active
     partially computed one.
     """
-    df = benchmark_result.to_dataframe()
-    if df.empty:
+    new_df = benchmark_result.to_dataframe()
+    frames = []
+    if base_df is not None and not base_df.empty:
+        frames.append(base_df)
+    if not new_df.empty:
+        frames.append(new_df)
+    if not frames:
         print(f"\n[INFO] No completed benchmark rows to save ({reason}).")
         return None
+    df = pd.concat(frames, ignore_index=True)
     _write_parquet_atomic(df, output_path)
     print(f"\n[INFO] Saved benchmark parquet to {output_path} ({reason})")
     return df
@@ -665,6 +673,143 @@ def _write_parquet_atomic(df: pd.DataFrame, output_path: Path) -> None:
     tmp_path = output_path.with_name(f".{output_path.name}.tmp-{os.getpid()}")
     df.to_parquet(tmp_path, index=False, compression="gzip")
     os.replace(tmp_path, output_path)
+
+
+def _json_normalized(value: Any) -> str:
+    return json.dumps(BenchmarkResult._json_safe_value(value or {}), sort_keys=True)
+
+
+def _task_counts_frame(query_indices: np.ndarray, target_classes: np.ndarray) -> pd.Series:
+    task_df = pd.DataFrame({
+        "query_idx": np.asarray(query_indices, dtype=np.int64),
+        "target_class": np.asarray(target_classes, dtype=np.int64),
+    })
+    return task_df.value_counts(sort=False).sort_index()
+
+
+def _existing_run_is_complete(
+    grp: pd.DataFrame,
+    *,
+    expected_task_counts: pd.Series,
+    expected_params: Dict[str, Any],
+) -> bool:
+    if len(grp) != int(expected_task_counts.sum()):
+        return False
+    required_cols = {"query_idx", "target_class", "params"}
+    if not required_cols.issubset(grp.columns):
+        return False
+    try:
+        observed = pd.DataFrame({
+            "query_idx": grp["query_idx"].to_numpy(dtype=np.int64),
+            "target_class": grp["target_class"].to_numpy(dtype=np.int64),
+        })
+    except (TypeError, ValueError):
+        return False
+    observed_task_counts = observed.value_counts(sort=False).sort_index()
+    if not observed_task_counts.equals(expected_task_counts):
+        return False
+
+    existing_params_raw = grp["params"].iloc[0]
+    try:
+        existing_params = (
+            json.loads(existing_params_raw)
+            if isinstance(existing_params_raw, str)
+            else existing_params_raw
+        )
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return _json_normalized(existing_params) == _json_normalized(expected_params)
+
+
+def _load_resume_base_df(
+    output_path: Path,
+    *,
+    methods_cfg: List[Dict[str, Any]],
+    query_indices: np.ndarray,
+    target_classes: np.ndarray,
+    force_redo: bool,
+) -> tuple[Optional[pd.DataFrame], set[str]]:
+    if force_redo:
+        if output_path.exists():
+            print(f"[INFO] --force set: ignoring existing benchmark parquet at {output_path}")
+        return None, set()
+    if not output_path.exists():
+        return None, set()
+
+    try:
+        existing_df = pd.read_parquet(output_path)
+    except Exception as exc:
+        print(f"[WARNING] Could not read existing benchmark parquet {output_path}: {exc}")
+        return None, set()
+    if existing_df.empty:
+        return None, set()
+
+    run_column = "run_name" if "run_name" in existing_df.columns else "method"
+    expected_task_counts = _task_counts_frame(query_indices, target_classes)
+    completed_run_names: set[str] = set()
+    current_runs = {
+        str(method_cfg.get("run_name", method_cfg["name"])): dict(method_cfg.get("params") or {})
+        for method_cfg in methods_cfg
+    }
+
+    for run_name, expected_params in current_runs.items():
+        grp = existing_df[existing_df[run_column].astype(str).eq(run_name)]
+        if grp.empty:
+            continue
+        if _existing_run_is_complete(
+            grp,
+            expected_task_counts=expected_task_counts,
+            expected_params=expected_params,
+        ):
+            completed_run_names.add(run_name)
+
+    if not completed_run_names:
+        print(f"[INFO] Existing parquet found at {output_path}, but no complete matching runs can be resumed.")
+        return None, set()
+
+    base_df = existing_df[existing_df[run_column].astype(str).isin(completed_run_names)].copy()
+    skipped = ", ".join(sorted(completed_run_names))
+    print(
+        f"[INFO] Resuming from {output_path}: "
+        f"{len(completed_run_names)} complete method run(s) will be skipped ({skipped})."
+    )
+    return base_df, completed_run_names
+
+
+def _print_flat_benchmark_summary(df: pd.DataFrame) -> None:
+    if df.empty:
+        print("\nBENCHMARK SUMMARY\n(no completed rows)")
+        return
+    try:
+        from tabulate import tabulate
+    except ImportError:
+        print("[WARNING] tabulate not installed; skipping summary table.")
+        return
+
+    rows = []
+    for run_name, grp in df.groupby("run_name", sort=False):
+        ok = grp[grp["success"].astype(bool)]
+        n_total = len(grp)
+        n_ok = len(ok)
+        validity = 100.0 * n_ok / n_total if n_total else float("nan")
+        rows.append([
+            run_name,
+            f"{validity:.1f}%",
+            f"{float(ok['l2_distance'].mean()):.3f}" if n_ok else "nan",
+            f"{float(ok['l1_distance'].mean()):.3f}" if n_ok else "nan",
+            f"{100.0 * float(ok['l0_sparsity'].mean()):.1f}%" if n_ok else "nan",
+            f"{float(grp['build_time_s'].iloc[0]):.2f}" if "build_time_s" in grp else "nan",
+            f"{float(grp['runtime_s'].mean()):.3f}" if "runtime_s" in grp else "nan",
+            n_total - n_ok,
+        ])
+
+    print("\nBENCHMARK SUMMARY")
+    print(tabulate(
+        rows,
+        headers=["method", "validity%", "l2_mean", "l1_mean", "sparsity%",
+                 "build_s", "query_s", "n_failed"],
+        tablefmt="simple",
+    ))
 
 
 def _build_query_tasks(
@@ -832,6 +977,11 @@ def _build_certcf_method(
     adaptive_eps_min = float(params.get("adaptive_eps_min", 1.0e-6))
     adaptive_eps_center_tol = float(params.get("adaptive_eps_center_tol", 1.0e-6))
     adaptive_eps_binary_search_steps = int(params.get("adaptive_eps_binary_search_steps", 0))
+    sparsity_penalty = str(params.get("sparsity_penalty", "none"))
+    sparsity_lambda = float(params.get("sparsity_lambda", 0.0))
+    sparsity_reweight_iters = int(params.get("sparsity_reweight_iters", 0))
+    sparsity_eps = float(params.get("sparsity_eps", 1.0e-3))
+    sparsity_group_ohe = bool(params.get("sparsity_group_ohe", True))
     ohe_decode_mode = params["ohe_decode_mode"] if "ohe_decode_mode" in params else None
     decode_beam_width = params["decode_beam_width"] if "decode_beam_width" in params else None
     decode_beam_branch_top_k = params["decode_beam_branch_top_k"] if "decode_beam_branch_top_k" in params else None
@@ -926,6 +1076,11 @@ def _build_certcf_method(
         adaptive_eps_min=adaptive_eps_min,
         adaptive_eps_center_tol=adaptive_eps_center_tol,
         adaptive_eps_binary_search_steps=adaptive_eps_binary_search_steps,
+        sparsity_penalty=sparsity_penalty,
+        sparsity_lambda=sparsity_lambda,
+        sparsity_reweight_iters=sparsity_reweight_iters,
+        sparsity_eps=sparsity_eps,
+        sparsity_group_ohe=sparsity_group_ohe,
         random_seed=seed,
     )
     if cvxpy_solvers is not None:
@@ -1143,6 +1298,8 @@ def _apply_cli_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[
             m for m in cfg.get("methods", [])
             if m.get("run_name", m["name"]) in allowed or m["name"] in allowed
         ]
+    if getattr(args, "force", False):
+        cfg["force_redo"] = True
     return cfg
 
 
@@ -1232,6 +1389,7 @@ def _build_dataset_cfg(
             "timeout_per_sample", global_cfg.get("timeout_per_sample", 0)
         ),
         "resource_monitor": deepcopy(global_cfg.get("resource_monitor", {})),
+        "force_redo": bool(ds_cfg.get("force_redo", global_cfg.get("force_redo", False))),
         "output": {"path": str(per_ds_output)},
         "methods": merged_methods,
     }
@@ -1370,6 +1528,10 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
     timeout_s = int(cfg.get("timeout_per_sample", 0))
     output_path = Path(cfg.get("output", {}).get("path", "results/benchmark.parquet"))
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    force_redo = bool(cfg.get("force_redo", False))
+    if force_redo and output_path.exists():
+        output_path.unlink()
+        print(f"[INFO] --force set: removed existing benchmark parquet at {output_path}")
     resource_cfg = cfg.get("resource_monitor") or {}
     ram_monitor_enabled = bool(resource_cfg.get("enabled", False))
     ram_monitor_interval_s = float(resource_cfg.get("interval_s", 1.0))
@@ -1384,12 +1546,27 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         y_orig=y_orig_all,
         y_true=y_true_all,
     )
+    resume_target_classes = (
+        target_classes_all
+        if target_classes_all is not None
+        else np.asarray([1 - int(y) for y in y_orig_all], dtype=np.int64)
+    )
+    resume_base_df, completed_run_names = _load_resume_base_df(
+        output_path,
+        methods_cfg=methods_cfg,
+        query_indices=query_indices,
+        target_classes=resume_target_classes,
+        force_redo=force_redo,
+    )
 
     for method_cfg in methods_cfg:
         method_name: str = method_cfg["name"]        # registry key — selects the implementation
         run_name: str = method_cfg.get("run_name", method_name)  # label used in results
         method_params_raw: Dict[str, Any] = dict(method_cfg.get("params") or {})
         method_params: Dict[str, Any] = dict(method_params_raw)
+        if run_name in completed_run_names:
+            print(f"\n[METHOD] {run_name} -- already complete, skipping")
+            continue
         query_batch_size = 1
         if method_name == "dice":
             query_batch_size = max(1, int(method_params.pop("query_batch_size", 1)))
@@ -1463,6 +1640,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     benchmark_result,
                     output_path,
                     reason=f"completed build-failure record for {run_name}",
+                    base_df=resume_base_df,
                 )
                 continue
         else:
@@ -1505,6 +1683,7 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
                     benchmark_result,
                     output_path,
                     reason=f"completed fit-failure record for {run_name}",
+                    base_df=resume_base_df,
                 )
                 continue
             active_model = model_for_methods
@@ -1720,12 +1899,21 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             benchmark_result,
             output_path,
             reason=f"completed method {run_name}",
+            base_df=resume_base_df,
         )
 
     # --- Save ---
-    _persist_completed_benchmark_result(benchmark_result, output_path, reason="final")
+    final_df = _persist_completed_benchmark_result(
+        benchmark_result,
+        output_path,
+        reason="final",
+        base_df=resume_base_df,
+    )
 
-    benchmark_result.summary()
+    if final_df is not None:
+        _print_flat_benchmark_summary(final_df)
+    else:
+        benchmark_result.summary()
     return benchmark_result
 
 
@@ -1736,6 +1924,9 @@ def run_multi_dataset(
     """Run a multi-dataset benchmark config and return the combined dataframe."""
     global_output = Path(global_cfg.get("output", "results/benchmark_multi.parquet"))
     global_output.parent.mkdir(parents=True, exist_ok=True)
+    if bool(global_cfg.get("force_redo", False)) and global_output.exists():
+        global_output.unlink()
+        print(f"[INFO] --force set: removed existing combined parquet at {global_output}")
 
     datasets_cfg: List[Dict[str, Any]] = global_cfg.get("datasets", [])
     if dataset_filter is not None:
@@ -1755,7 +1946,11 @@ def run_multi_dataset(
 
         cfg = _build_dataset_cfg(global_cfg, ds_cfg, global_output)
         result = run_single_dataset(cfg)
-        df = result.to_dataframe()
+        per_dataset_output = Path(cfg["output"]["path"])
+        if per_dataset_output.exists():
+            df = pd.read_parquet(per_dataset_output)
+        else:
+            df = result.to_dataframe()
         all_dfs.append(df)
         print(f"[INFO] {ds_name}: {len(df)} rows, {df['success'].mean():.1%} valid")
         combined_so_far = pd.concat(all_dfs, ignore_index=True)
@@ -1800,6 +1995,11 @@ def main() -> None:
     parser.add_argument(
         "--datasets", nargs="+", default=None,
         help="For multi-dataset configs, run only these datasets by name.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore existing result parquet files and recompute all configured runs.",
     )
     args = parser.parse_args()
     cfg = _apply_cli_overrides(read_yaml(args.config), args)

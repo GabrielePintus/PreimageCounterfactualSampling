@@ -76,6 +76,11 @@ class CertCF(BaseCounterfactualMethod):
         decode_beam_width: int = 8,
         decode_beam_branch_top_k: int = 3,
         decode_beam_max_solver_calls: int = 32,
+        sparsity_penalty: str = "none",
+        sparsity_lambda: float = 0.0,
+        sparsity_reweight_iters: int = 0,
+        sparsity_eps: float = 1.0e-3,
+        sparsity_group_ohe: bool = True,
         fixed_dims: Optional[Sequence[int]] = None,
         immutable_features: Optional[Sequence[str]] = None,
         nondecreasing_dims: Optional[Sequence[int]] = None,
@@ -169,6 +174,29 @@ class CertCF(BaseCounterfactualMethod):
             decode_beam_width=decode_beam_width,
             decode_beam_branch_top_k=decode_beam_branch_top_k,
             decode_beam_max_solver_calls=decode_beam_max_solver_calls,
+        )
+        atlas_cls_for_sparsity = CertCFAtlas
+        normalize_sparsity_config = getattr(atlas_cls_for_sparsity, "_normalize_sparsity_config", None)
+        if normalize_sparsity_config is None:
+            atlas_cls_for_sparsity = __import__(
+                "certcf.atlas",
+                fromlist=["CertCFAtlas"],
+            ).CertCFAtlas
+            normalize_sparsity_config = atlas_cls_for_sparsity._normalize_sparsity_config
+        normalize_lp_norm = getattr(atlas_cls_for_sparsity, "_normalize_lp_norm")
+        (
+            self.sparsity_penalty,
+            self.sparsity_lambda,
+            self.sparsity_reweight_iters,
+            self.sparsity_eps,
+            self.sparsity_group_ohe,
+        ) = normalize_sparsity_config(
+            sparsity_penalty=sparsity_penalty,
+            sparsity_lambda=sparsity_lambda,
+            sparsity_reweight_iters=sparsity_reweight_iters,
+            sparsity_eps=sparsity_eps,
+            sparsity_group_ohe=sparsity_group_ohe,
+            distance_norm=normalize_lp_norm(distance_norm if distance_norm is not None else norm),
         )
         self.subsample_space = subsample_space
         self.boundary_beta = float(boundary_beta)
@@ -461,6 +489,11 @@ class CertCF(BaseCounterfactualMethod):
             decode_beam_width=self.decode_beam_width,
             decode_beam_branch_top_k=self.decode_beam_branch_top_k,
             decode_beam_max_solver_calls=self.decode_beam_max_solver_calls,
+            sparsity_penalty=self.sparsity_penalty,
+            sparsity_lambda=self.sparsity_lambda,
+            sparsity_reweight_iters=self.sparsity_reweight_iters,
+            sparsity_eps=self.sparsity_eps,
+            sparsity_group_ohe=self.sparsity_group_ohe,
         )
         self.atlas.build()
 
@@ -518,6 +551,14 @@ class CertCF(BaseCounterfactualMethod):
         nonincreasing_dims = getattr(self, "nonincreasing_dims", None)
         nondecreasing_features = getattr(self, "nondecreasing_features", ())
         nonincreasing_features = getattr(self, "nonincreasing_features", ())
+        metadata.setdefault("sparsity_penalty", getattr(self, "sparsity_penalty", "none"))
+        metadata.setdefault("sparsity_lambda", float(getattr(self, "sparsity_lambda", 0.0)))
+        metadata.setdefault("sparsity_reweight_iters", int(getattr(self, "sparsity_reweight_iters", 0)))
+        metadata.setdefault("sparsity_eps", float(getattr(self, "sparsity_eps", 1.0e-3)))
+        metadata.setdefault("sparsity_group_count", 0)
+        metadata.setdefault("sparsity_active_groups", 0)
+        metadata.setdefault("sparsity_selection_score", np.inf)
+        metadata.setdefault("sparsity_solver_calls", 0)
         metadata["fixed_dims_count"] = int(0 if fixed_dims is None else len(fixed_dims))
         metadata["immutable_features"] = ",".join(immutable_features)
         metadata.update(

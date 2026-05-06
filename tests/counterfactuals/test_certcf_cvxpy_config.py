@@ -39,6 +39,11 @@ def _manual_cvxpy_atlas() -> CertCFAtlas:
         "CLARABEL": ["optimal"],
         "SCS": ["optimal", "optimal_inaccurate"],
     }
+    atlas.sparsity_penalty = "none"
+    atlas.sparsity_lambda = 0.0
+    atlas.sparsity_reweight_iters = 0
+    atlas.sparsity_eps = 1.0e-3
+    atlas.sparsity_group_ohe = True
     return atlas
 
 
@@ -68,6 +73,11 @@ def test_certcf_defaults_cvxpy_solver_config():
     assert method.adaptive_eps_min == 1.0e-6
     assert method.adaptive_eps_center_tol == 1.0e-6
     assert method.adaptive_eps_binary_search_steps == 0
+    assert method.sparsity_penalty == "none"
+    assert method.sparsity_lambda == 0.0
+    assert method.sparsity_reweight_iters == 0
+    assert method.sparsity_eps == 1.0e-3
+    assert method.sparsity_group_ohe is True
 
 
 def test_certcf_normalizes_fixed_dims():
@@ -158,6 +168,11 @@ def test_atlas_direct_constructor_defaults_cvxpy_solver_config():
     assert atlas.adaptive_eps_min == 1.0e-6
     assert atlas.adaptive_eps_center_tol == 1.0e-6
     assert atlas.adaptive_eps_binary_search_steps == 0
+    assert atlas.sparsity_penalty == "none"
+    assert atlas.sparsity_lambda == 0.0
+    assert atlas.sparsity_reweight_iters == 0
+    assert atlas.sparsity_eps == 1.0e-3
+    assert atlas.sparsity_group_ohe is True
 
 
 def test_certcf_rejects_negative_classification_margin():
@@ -188,6 +203,42 @@ def test_certcf_rejects_invalid_adaptive_eps_config():
 
     with pytest.raises(ValueError, match="adaptive_eps_binary_search_steps"):
         CertCF(model=object(), adaptive_eps_binary_search_steps=-1)
+
+
+def test_certcf_normalizes_sparsity_config():
+    method = CertCF(
+        model=object(),
+        norm=1,
+        distance_norm=1,
+        sparsity_penalty=" ReWeighted_L1 ",
+        sparsity_lambda=0.2,
+        sparsity_reweight_iters=3,
+        sparsity_eps=1.0e-4,
+        sparsity_group_ohe=False,
+    )
+
+    assert method.sparsity_penalty == "reweighted_l1"
+    assert method.sparsity_lambda == 0.2
+    assert method.sparsity_reweight_iters == 3
+    assert method.sparsity_eps == 1.0e-4
+    assert method.sparsity_group_ohe is False
+
+
+def test_certcf_rejects_invalid_sparsity_config():
+    with pytest.raises(ValueError, match="distance_norm=1"):
+        CertCF(model=object(), distance_norm=2, sparsity_penalty="reweighted_l1")
+
+    with pytest.raises(ValueError, match="sparsity_lambda"):
+        CertCF(model=object(), sparsity_lambda=-1e-3)
+
+    with pytest.raises(ValueError, match="sparsity_reweight_iters"):
+        CertCF(model=object(), sparsity_reweight_iters=-1)
+
+    with pytest.raises(ValueError, match="sparsity_eps"):
+        CertCF(model=object(), sparsity_eps=0.0)
+
+    with pytest.raises(ValueError, match="sparsity_penalty"):
+        CertCF(model=object(), sparsity_penalty="l0")
 
 
 def test_atlas_build_forwards_adaptive_eps_config(monkeypatch):
@@ -346,6 +397,34 @@ def test_atlas_direct_constructor_normalizes_cvxpy_solver_config():
     }
 
 
+def test_atlas_sparsity_groups_use_ohe_blocks_and_skip_fixed_dims():
+    atlas = _manual_cvxpy_atlas()
+    atlas.ohe_slices = [(1, 3)]
+    atlas.sparsity_group_ohe = True
+
+    groups = atlas._build_sparsity_groups(d=5, fixed_dims=np.array([4], dtype=np.int64))
+
+    assert [group.tolist() for group in groups] == [[1, 2], [0], [3]]
+
+
+def test_atlas_sparsity_score_is_l1_plus_group_surrogate():
+    atlas = _manual_cvxpy_atlas()
+    atlas.sparsity_penalty = "reweighted_l1"
+    atlas.sparsity_lambda = 0.5
+    atlas.sparsity_reweight_iters = 2
+    atlas.sparsity_eps = 1.0e-3
+    groups = [np.array([0], dtype=np.int64), np.array([1, 2], dtype=np.int64)]
+
+    score = atlas._sparsity_surrogate_score(
+        np.array([1.0, 0.5, 0.5], dtype=np.float64),
+        np.array([0.0, 0.0, 0.0], dtype=np.float64),
+        groups,
+    )
+
+    expected = 2.0 + 0.5 * (1.0 / 1.001 + 1.0 / 1.001)
+    assert score == pytest.approx(expected)
+
+
 @pytest.mark.skipif(not CVXPY_AVAILABLE, reason="CVXPY is required to exercise the configurable solve loop.")
 def test_project_cvxpy_respects_solver_order_kwargs_and_accept_statuses(monkeypatch):
     atlas = _manual_cvxpy_atlas()
@@ -421,6 +500,30 @@ def test_project_cvxpy_accepts_small_postsolve_ball_residual(monkeypatch):
     assert np.isclose(dist, 1.0 + 5e-7)
     assert profile["cvxpy_solver_status"] == "optimal"
     assert profile["cvxpy_fallback_used"] is False
+
+
+@pytest.mark.skipif(not CVXPY_AVAILABLE, reason="CVXPY is required to exercise sparsity-weighted projection.")
+def test_project_cvxpy_weighted_group_l1_changes_objective():
+    atlas = _manual_cvxpy_atlas()
+    atlas.norm = 1
+    atlas.distance_norm = 1
+
+    x_proj, dist, profile = atlas._project_cvxpy(
+        x0=np.array([0.0, 0.0], dtype=np.float64),
+        A_full=np.array([[1.0, 1.0]], dtype=np.float64),
+        b_full=np.array([-1.0], dtype=np.float64),
+        center=np.array([0.0, 0.0], dtype=np.float64),
+        box_eps=2.0,
+        ball_eps=2.0,
+        sparsity_groups=[np.array([0], dtype=np.int64), np.array([1], dtype=np.int64)],
+        sparsity_group_weights=np.array([100.0, 1.0], dtype=np.float64),
+    )
+
+    assert x_proj is not None
+    assert dist == pytest.approx(1.0, abs=1e-5)
+    assert x_proj[0] <= 1e-4
+    assert x_proj[1] == pytest.approx(1.0, abs=1e-4)
+    assert np.isfinite(profile["sparsity_selection_score"])
 
 
 @pytest.mark.skipif(not CVXPY_AVAILABLE, reason="CVXPY is required to exercise directional projection constraints.")
@@ -507,6 +610,34 @@ def test_project_onto_polytope_merges_cvxpy_solver_profile(monkeypatch):
     assert profile["cvxpy_solver_status"] == "optimal"
     assert profile["cvxpy_solver_attempts"] == 1
     assert profile["cvxpy_fallback_used"] is False
+
+
+@pytest.mark.skipif(not CVXPY_AVAILABLE, reason="CVXPY is required to exercise sparse projection profiling.")
+def test_project_onto_polytope_reports_sparse_profile_and_true_distance():
+    atlas = _manual_cvxpy_atlas()
+    atlas.norm = 1
+    atlas.distance_norm = 1
+    atlas.sparsity_penalty = "reweighted_l1"
+    atlas.sparsity_lambda = 0.1
+    atlas.sparsity_reweight_iters = 2
+    atlas.sparsity_eps = 1.0e-3
+
+    x_proj, dist, profile = atlas._project_onto_polytope(
+        x0=np.array([0.0, 0.0], dtype=np.float64),
+        A=np.array([[1.0, 1.0]], dtype=np.float64),
+        b=np.array([-1.0], dtype=np.float64),
+        center=np.array([0.0, 0.0], dtype=np.float64),
+        eps_i=2.0,
+    )
+
+    assert x_proj is not None
+    assert dist == pytest.approx(np.linalg.norm(x_proj, ord=1), abs=1e-5)
+    assert profile["sparsity_penalty"] == "reweighted_l1"
+    assert profile["sparsity_lambda"] == 0.1
+    assert profile["sparsity_reweight_iters"] == 2
+    assert profile["sparsity_group_count"] == 2
+    assert profile["sparsity_solver_calls"] == 3
+    assert profile["sparsity_selection_score"] >= dist
 
 
 def test_erode_constraints_applies_classification_margin_to_lirpa_rows_only():

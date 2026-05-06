@@ -143,6 +143,11 @@ class CertCFAtlas:
         decode_beam_width: int = 8,
         decode_beam_branch_top_k: int = 3,
         decode_beam_max_solver_calls: int = 32,
+        sparsity_penalty: str = "none",
+        sparsity_lambda: float = 0.0,
+        sparsity_reweight_iters: int = 0,
+        sparsity_eps: float = 1.0e-3,
+        sparsity_group_ohe: bool = True,
     ):
         self.model = model
         self.device = torch.device(device) if isinstance(device, str) else device
@@ -198,6 +203,20 @@ class CertCFAtlas:
             decode_beam_width=decode_beam_width,
             decode_beam_branch_top_k=decode_beam_branch_top_k,
             decode_beam_max_solver_calls=decode_beam_max_solver_calls,
+        )
+        (
+            self.sparsity_penalty,
+            self.sparsity_lambda,
+            self.sparsity_reweight_iters,
+            self.sparsity_eps,
+            self.sparsity_group_ohe,
+        ) = self._normalize_sparsity_config(
+            sparsity_penalty=sparsity_penalty,
+            sparsity_lambda=sparsity_lambda,
+            sparsity_reweight_iters=sparsity_reweight_iters,
+            sparsity_eps=sparsity_eps,
+            sparsity_group_ohe=sparsity_group_ohe,
+            distance_norm=self.distance_norm,
         )
 
         allowed_methods = {"sorted", "bvh", "nearest_anchor"}
@@ -338,6 +357,62 @@ class CertCFAtlas:
             normalized_ints.append(value)
 
         return normalized_mode, normalized_ints[0], normalized_ints[1], normalized_ints[2]
+
+    @staticmethod
+    def _normalize_sparsity_config(
+        *,
+        sparsity_penalty: str,
+        sparsity_lambda: float,
+        sparsity_reweight_iters: int,
+        sparsity_eps: float,
+        sparsity_group_ohe: bool,
+        distance_norm: Union[int, float],
+    ) -> Tuple[str, float, int, float, bool]:
+        if not isinstance(sparsity_penalty, str):
+            raise ValueError("sparsity_penalty must be a string")
+        penalty = sparsity_penalty.strip().lower()
+        if penalty in {"", "none", "off", "false"}:
+            penalty = "none"
+        if penalty not in {"none", "reweighted_l1"}:
+            raise ValueError("sparsity_penalty must be one of {'none', 'reweighted_l1'}")
+
+        lambda_value = float(sparsity_lambda)
+        if lambda_value < 0.0:
+            raise ValueError("sparsity_lambda must be non-negative")
+        reweight_iters = int(sparsity_reweight_iters)
+        if reweight_iters < 0:
+            raise ValueError("sparsity_reweight_iters must be non-negative")
+        eps_value = float(sparsity_eps)
+        if eps_value <= 0.0:
+            raise ValueError("sparsity_eps must be positive")
+        group_ohe = bool(sparsity_group_ohe)
+
+        if penalty == "reweighted_l1":
+            if distance_norm != 1:
+                raise ValueError("sparsity_penalty='reweighted_l1' requires distance_norm=1")
+            if not CVXPY_AVAILABLE:
+                raise ValueError("sparsity_penalty='reweighted_l1' requires CVXPY")
+
+        return penalty, lambda_value, reweight_iters, eps_value, group_ohe
+
+    def _sparsity_active(self) -> bool:
+        return (
+            getattr(self, "sparsity_penalty", "none") == "reweighted_l1"
+            and getattr(self, "sparsity_lambda", 0.0) > 0.0
+            and getattr(self, "sparsity_reweight_iters", 0) > 0
+        )
+
+    def _sparsity_metadata_defaults(self) -> Dict[str, ProfileValue]:
+        return {
+            "sparsity_penalty": getattr(self, "sparsity_penalty", "none"),
+            "sparsity_lambda": float(getattr(self, "sparsity_lambda", 0.0)),
+            "sparsity_reweight_iters": int(getattr(self, "sparsity_reweight_iters", 0)),
+            "sparsity_eps": float(getattr(self, "sparsity_eps", 1.0e-3)),
+            "sparsity_group_count": 0,
+            "sparsity_active_groups": 0,
+            "sparsity_selection_score": np.inf,
+            "sparsity_solver_calls": 0,
+        }
 
     @staticmethod
     def _normalize_lp_norm(norm_value: Union[int, float, str]) -> Union[int, float]:
@@ -649,6 +724,80 @@ class CertCFAtlas:
                 return False
         return True
 
+    def _build_sparsity_groups(
+        self,
+        d: int,
+        fixed_dims: Optional[np.ndarray] = None,
+    ) -> List[np.ndarray]:
+        fixed_set = set() if fixed_dims is None else {int(i) for i in fixed_dims}
+        grouped_dims: set[int] = set()
+        groups: List[np.ndarray] = []
+
+        if getattr(self, "sparsity_group_ohe", True) and self.ohe_slices:
+            for start, end in self.ohe_slices:
+                dims = [i for i in range(int(start), int(end)) if i not in fixed_set]
+                grouped_dims.update(range(int(start), int(end)))
+                if dims:
+                    groups.append(np.asarray(dims, dtype=np.int64))
+
+        for dim in range(int(d)):
+            if dim in fixed_set or dim in grouped_dims:
+                continue
+            groups.append(np.asarray([dim], dtype=np.int64))
+
+        return groups
+
+    def _sparsity_group_changes(
+        self,
+        x: np.ndarray,
+        x_query: np.ndarray,
+        groups: Sequence[np.ndarray],
+    ) -> np.ndarray:
+        if not groups:
+            return np.empty((0,), dtype=np.float64)
+        diff = np.asarray(x, dtype=np.float64).reshape(-1) - np.asarray(x_query, dtype=np.float64).reshape(-1)
+        return np.asarray([float(np.sum(np.abs(diff[group]))) for group in groups], dtype=np.float64)
+
+    def _sparsity_surrogate_score(
+        self,
+        x: Optional[np.ndarray],
+        x_query: np.ndarray,
+        groups: Optional[Sequence[np.ndarray]] = None,
+    ) -> float:
+        if x is None:
+            return np.inf
+        x_arr = np.asarray(x, dtype=np.float64)
+        x_query_arr = np.asarray(x_query, dtype=np.float64)
+        true_l1 = float(np.linalg.norm(x_arr - x_query_arr, ord=1))
+        if not self._sparsity_active():
+            return float(np.linalg.norm(x_arr - x_query_arr, ord=getattr(self, "distance_norm", 1)))
+        groups = groups or self._build_sparsity_groups(len(np.asarray(x).reshape(-1)))
+        changes = self._sparsity_group_changes(x, x_query, groups)
+        lambda_value = float(getattr(self, "sparsity_lambda", 0.0))
+        eps_value = float(getattr(self, "sparsity_eps", 1.0e-3))
+        return float(true_l1 + lambda_value * np.sum(changes / (changes + eps_value)))
+
+    def _sparsity_group_weights(
+        self,
+        x: np.ndarray,
+        x_query: np.ndarray,
+        groups: Sequence[np.ndarray],
+    ) -> np.ndarray:
+        changes = self._sparsity_group_changes(x, x_query, groups)
+        lambda_value = float(getattr(self, "sparsity_lambda", 0.0))
+        eps_value = float(getattr(self, "sparsity_eps", 1.0e-3))
+        return 1.0 + lambda_value / (changes + eps_value)
+
+    @staticmethod
+    def _score_from_profile(profile: Optional[Dict[str, ProfileValue]], fallback_dist: float) -> float:
+        if profile is None:
+            return float(fallback_dist)
+        score = profile.get("sparsity_selection_score", fallback_dist)
+        try:
+            return float(score)
+        except (TypeError, ValueError):
+            return float(fallback_dist)
+
     @staticmethod
     def _ohe_product_size(ohe_slices: Optional[List[Tuple[int, int]]]) -> int:
         if not ohe_slices:
@@ -828,6 +977,8 @@ class CertCFAtlas:
         nonincreasing_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
+        sparsity_groups: Optional[Sequence[np.ndarray]] = None,
+        sparsity_group_weights: Optional[np.ndarray] = None,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         """
         Project using CVXPY — handles L2 (SOCP) and L1 ball constraints natively.
@@ -849,7 +1000,14 @@ class CertCFAtlas:
         )
 
         diff = z - x0
-        if self.distance_norm == 1:
+        if sparsity_groups is not None and sparsity_group_weights is not None:
+            terms = [
+                float(weight) * cp.norm(diff[np.asarray(group, dtype=np.int64)], 1)
+                for group, weight in zip(sparsity_groups, sparsity_group_weights)
+                if len(group) > 0
+            ]
+            objective = cp.Minimize(cp.sum(terms) if terms else cp.Constant(0.0))
+        elif self.distance_norm == 1:
             objective = cp.Minimize(cp.norm(diff, 1))
         elif self.distance_norm == 2:
             objective = cp.Minimize(cp.sum_squares(diff))
@@ -941,6 +1099,11 @@ class CertCFAtlas:
         if not in_ball:
             return None, np.inf, solver_profile
         dist = float(np.linalg.norm(x_proj - x0, ord=self.distance_norm))
+        solver_profile["sparsity_selection_score"] = self._sparsity_surrogate_score(
+            x_proj,
+            x0,
+            sparsity_groups,
+        )
         return x_proj, dist, solver_profile
 
     def _project_slsqp(
@@ -1083,9 +1246,13 @@ class CertCFAtlas:
         nonincreasing_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
+        sparsity_groups: Optional[Sequence[np.ndarray]] = None,
+        sparsity_group_weights: Optional[np.ndarray] = None,
         profile_out: Optional[Dict[str, ProfileValue]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         use_cvxpy = CVXPY_AVAILABLE and (self.norm in (1, 2) or self.distance_norm != 2)
+        if sparsity_group_weights is not None and not use_cvxpy:
+            raise RuntimeError("Sparsity-weighted projection requires CVXPY")
         if use_cvxpy:
             x_proj, dist, solver_profile = self._project_cvxpy(
                 x0,
@@ -1099,6 +1266,8 @@ class CertCFAtlas:
                 nonincreasing_dims=nonincreasing_dims,
                 ohe_slices=ohe_slices,
                 fixed_ohe_assignments=fixed_ohe_assignments,
+                sparsity_groups=sparsity_groups,
+                sparsity_group_weights=sparsity_group_weights,
             )
             if profile_out is not None:
                 profile_out.clear()
@@ -1146,6 +1315,8 @@ class CertCFAtlas:
         nonincreasing_dims: Optional[np.ndarray] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         fixed_ohe_assignments: Optional[Dict[int, int]] = None,
+        sparsity_groups: Optional[Sequence[np.ndarray]] = None,
+        sparsity_group_weights: Optional[np.ndarray] = None,
         profile_out: Optional[Dict[str, ProfileValue]] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         """Call projection with old-compatible kwargs when directional dims are absent."""
@@ -1157,6 +1328,9 @@ class CertCFAtlas:
             "fixed_ohe_assignments": fixed_ohe_assignments,
             "profile_out": profile_out,
         }
+        if sparsity_groups is not None or sparsity_group_weights is not None:
+            kwargs["sparsity_groups"] = sparsity_groups
+            kwargs["sparsity_group_weights"] = sparsity_group_weights
         has_directional = (
             (nondecreasing_dims is not None and len(nondecreasing_dims) > 0)
             or (nonincreasing_dims is not None and len(nonincreasing_dims) > 0)
@@ -1184,6 +1358,7 @@ class CertCFAtlas:
         ball_eps: float,
         nondecreasing_dims: Optional[np.ndarray] = None,
         nonincreasing_dims: Optional[np.ndarray] = None,
+        sparsity_groups: Optional[Sequence[np.ndarray]] = None,
         top_k: int = 3,
         tol: float = 1e-6,
     ) -> Tuple[Optional[np.ndarray], float]:
@@ -1219,6 +1394,7 @@ class CertCFAtlas:
             candidates.append(x_alt)
 
         best_x, best_dist = None, np.inf
+        best_score = np.inf
         for cand in candidates:
             if not self._directional_constraints_satisfied(
                 cand,
@@ -1230,8 +1406,10 @@ class CertCFAtlas:
                 continue
             if self._is_certified_candidate(cand, A_full, b_full, center, ball_eps, tol=tol):
                 d_cand = float(np.linalg.norm(cand - x_query, ord=self.distance_norm))
-                if d_cand < best_dist:
+                score_cand = self._sparsity_surrogate_score(cand, x_query, sparsity_groups)
+                if score_cand < best_score:
                     best_x, best_dist = cand, d_cand
+                    best_score = score_cand
 
         return best_x, best_dist
 
@@ -1249,6 +1427,8 @@ class CertCFAtlas:
         fixed_dims: Optional[np.ndarray],
         nondecreasing_dims: Optional[np.ndarray] = None,
         nonincreasing_dims: Optional[np.ndarray] = None,
+        sparsity_groups: Optional[Sequence[np.ndarray]] = None,
+        sparsity_group_weights: Optional[np.ndarray] = None,
         incumbent_upper_bound: float = np.inf,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         ohe_slices = self.ohe_slices or []
@@ -1266,23 +1446,26 @@ class CertCFAtlas:
 
         block_indices = [i for i, (s, e) in enumerate(ohe_slices) if e - s > 1]
         root_dist = float(np.linalg.norm(x_star - x_query, ord=self.distance_norm))
+        root_score = self._sparsity_surrogate_score(x_star, x_query, sparsity_groups)
         if not block_indices:
-            if root_dist >= incumbent_upper_bound:
+            if root_score >= incumbent_upper_bound:
                 profile["decode_nodes_pruned"] = 1
                 return None, np.inf, profile
+            profile["sparsity_selection_score"] = root_score
             return x_star.copy(), root_dist, profile
 
-        if root_dist >= incumbent_upper_bound:
+        if root_score >= incumbent_upper_bound:
             profile["decode_nodes_pruned"] = 1
             return None, np.inf, profile
 
-        beam: List[Tuple[Dict[int, int], np.ndarray, float]] = [({}, x_star.copy(), root_dist)]
+        beam: List[Tuple[Dict[int, int], np.ndarray, float, float]] = [({}, x_star.copy(), root_dist, root_score)]
         best_x: Optional[np.ndarray] = None
         best_dist = float(incumbent_upper_bound)
+        best_true_dist = np.inf
 
         while beam:
-            next_beam: List[Tuple[Dict[int, int], np.ndarray, float]] = []
-            for fixed_assignments, relaxed_point, lower_bound in beam:
+            next_beam: List[Tuple[Dict[int, int], np.ndarray, float, float]] = []
+            for fixed_assignments, relaxed_point, true_dist, lower_bound in beam:
                 if lower_bound >= best_dist:
                     profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
                     continue
@@ -1290,6 +1473,7 @@ class CertCFAtlas:
                 if len(fixed_assignments) == len(block_indices):
                     best_x = relaxed_point
                     best_dist = float(lower_bound)
+                    best_true_dist = float(true_dist)
                     continue
 
                 branch_block = None
@@ -1324,6 +1508,7 @@ class CertCFAtlas:
                     child_assignments[branch_block] = category
                     profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
                     profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
+                    child_profile: Dict[str, ProfileValue] = {}
                     child_x, child_dist = self._solve_projection_subproblem_for_constraints(
                         x_query,
                         A_full,
@@ -1338,15 +1523,20 @@ class CertCFAtlas:
                         nonincreasing_dims=nonincreasing_dims,
                         ohe_slices=ohe_slices,
                         fixed_ohe_assignments=child_assignments,
+                        sparsity_groups=sparsity_groups,
+                        sparsity_group_weights=sparsity_group_weights,
+                        profile_out=child_profile,
                     )
-                    if child_x is None or child_dist >= best_dist:
+                    child_score = self._score_from_profile(child_profile, child_dist)
+                    if child_x is None or child_score >= best_dist:
                         profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
                         continue
                     if len(child_assignments) == len(block_indices):
                         best_x = child_x
-                        best_dist = float(child_dist)
+                        best_dist = float(child_score)
+                        best_true_dist = float(child_dist)
                         continue
-                    next_beam.append((child_assignments, child_x, float(child_dist)))
+                    next_beam.append((child_assignments, child_x, float(child_dist), float(child_score)))
                 if bool(profile["decode_beam_budget_exhausted"]):
                     break
 
@@ -1354,12 +1544,13 @@ class CertCFAtlas:
                 break
             if not next_beam:
                 break
-            next_beam.sort(key=lambda item: item[2])
+            next_beam.sort(key=lambda item: item[3])
             beam = next_beam[: self.decode_beam_width]
 
         if best_x is None:
             return None, np.inf, profile
-        return best_x, best_dist, profile
+        profile["sparsity_selection_score"] = float(best_dist)
+        return best_x, best_true_dist, profile
 
     def _polytope_aware_decode(
         self,
@@ -1375,6 +1566,8 @@ class CertCFAtlas:
         fixed_dims: Optional[np.ndarray],
         nondecreasing_dims: Optional[np.ndarray] = None,
         nonincreasing_dims: Optional[np.ndarray] = None,
+        sparsity_groups: Optional[Sequence[np.ndarray]] = None,
+        sparsity_group_weights: Optional[np.ndarray] = None,
         incumbent_upper_bound: float = np.inf,
         top_k: int = 3,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
@@ -1397,6 +1590,7 @@ class CertCFAtlas:
             ball_eps,
             nondecreasing_dims=nondecreasing_dims,
             nonincreasing_dims=nonincreasing_dims,
+            sparsity_groups=sparsity_groups,
             top_k=top_k,
             tol=tol,
         )
@@ -1409,6 +1603,11 @@ class CertCFAtlas:
                 solver_calls=0,
                 product_size=product_size,
                 heuristic_success=True,
+            )
+            profile["sparsity_selection_score"] = self._sparsity_surrogate_score(
+                best_x,
+                x_query,
+                sparsity_groups,
             )
             return best_x, best_dist, profile
 
@@ -1427,6 +1626,8 @@ class CertCFAtlas:
                 fixed_dims=fixed_dims,
                 nondecreasing_dims=nondecreasing_dims,
                 nonincreasing_dims=nonincreasing_dims,
+                sparsity_groups=sparsity_groups,
+                sparsity_group_weights=sparsity_group_weights,
                 incumbent_upper_bound=incumbent,
             )
             if beam_x is not None:
@@ -1448,6 +1649,8 @@ class CertCFAtlas:
                 fixed_dims=fixed_dims,
                 nondecreasing_dims=nondecreasing_dims,
                 nonincreasing_dims=nonincreasing_dims,
+                sparsity_groups=sparsity_groups,
+                sparsity_group_weights=sparsity_group_weights,
                 incumbent_upper_bound=incumbent,
             )
         else:
@@ -1464,6 +1667,8 @@ class CertCFAtlas:
                 fixed_dims=fixed_dims,
                 nondecreasing_dims=nondecreasing_dims,
                 nonincreasing_dims=nonincreasing_dims,
+                sparsity_groups=sparsity_groups,
+                sparsity_group_weights=sparsity_group_weights,
                 incumbent_upper_bound=incumbent,
             )
         if self.ohe_decode_mode == "beam_then_exact":
@@ -1486,6 +1691,8 @@ class CertCFAtlas:
         fixed_dims: Optional[np.ndarray],
         nondecreasing_dims: Optional[np.ndarray] = None,
         nonincreasing_dims: Optional[np.ndarray] = None,
+        sparsity_groups: Optional[Sequence[np.ndarray]] = None,
+        sparsity_group_weights: Optional[np.ndarray] = None,
         incumbent_upper_bound: float = np.inf,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         ohe_slices = self.ohe_slices or []
@@ -1501,7 +1708,8 @@ class CertCFAtlas:
         )
 
         root_dist = float(np.linalg.norm(x_star - x_query, ord=self.distance_norm))
-        if root_dist >= incumbent_upper_bound:
+        root_score = self._sparsity_surrogate_score(x_star, x_query, sparsity_groups)
+        if root_score >= incumbent_upper_bound:
             profile["decode_nodes_pruned"] = 1
             return None, np.inf, profile
 
@@ -1514,10 +1722,12 @@ class CertCFAtlas:
 
         best_x = None
         best_dist = float(incumbent_upper_bound)
+        best_true_dist = np.inf
         for assignment in product(*category_orders):
             fixed_ohe_assignments = {block_idx: int(cat) for block_idx, cat in zip(block_indices, assignment)}
             profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
             profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
+            leaf_profile: Dict[str, ProfileValue] = {}
             x_leaf, dist_leaf = self._solve_projection_subproblem_for_constraints(
                 x_query,
                 A_full,
@@ -1532,16 +1742,22 @@ class CertCFAtlas:
                 nonincreasing_dims=nonincreasing_dims,
                 ohe_slices=ohe_slices,
                 fixed_ohe_assignments=fixed_ohe_assignments,
+                sparsity_groups=sparsity_groups,
+                sparsity_group_weights=sparsity_group_weights,
+                profile_out=leaf_profile,
             )
-            if x_leaf is None or dist_leaf >= best_dist:
+            score_leaf = self._score_from_profile(leaf_profile, dist_leaf)
+            if x_leaf is None or score_leaf >= best_dist:
                 profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
                 continue
             best_x = x_leaf
-            best_dist = float(dist_leaf)
+            best_dist = float(score_leaf)
+            best_true_dist = float(dist_leaf)
 
         if best_x is None:
             return None, np.inf, profile
-        return best_x, best_dist, profile
+        profile["sparsity_selection_score"] = float(best_dist)
+        return best_x, best_true_dist, profile
 
     def _exact_polytope_decode_branch_and_bound(
         self,
@@ -1557,6 +1773,8 @@ class CertCFAtlas:
         fixed_dims: Optional[np.ndarray],
         nondecreasing_dims: Optional[np.ndarray] = None,
         nonincreasing_dims: Optional[np.ndarray] = None,
+        sparsity_groups: Optional[Sequence[np.ndarray]] = None,
+        sparsity_group_weights: Optional[np.ndarray] = None,
         incumbent_upper_bound: float = np.inf,
     ) -> Tuple[Optional[np.ndarray], float, Dict[str, ProfileValue]]:
         ohe_slices = self.ohe_slices or []
@@ -1574,25 +1792,29 @@ class CertCFAtlas:
         block_indices = [i for i, (s, e) in enumerate(ohe_slices) if e - s > 1]
         if not block_indices:
             root_dist = float(np.linalg.norm(x_star - x_query, ord=self.distance_norm))
-            if root_dist >= incumbent_upper_bound:
+            root_score = self._sparsity_surrogate_score(x_star, x_query, sparsity_groups)
+            if root_score >= incumbent_upper_bound:
                 profile["decode_nodes_pruned"] = 1
                 return None, np.inf, profile
+            profile["sparsity_selection_score"] = root_score
             return x_star.copy(), root_dist, profile
 
         root_dist = float(np.linalg.norm(x_star - x_query, ord=self.distance_norm))
-        if root_dist >= incumbent_upper_bound:
+        root_score = self._sparsity_surrogate_score(x_star, x_query, sparsity_groups)
+        if root_score >= incumbent_upper_bound:
             profile["decode_nodes_pruned"] = 1
             return None, np.inf, profile
 
-        pq: List[Tuple[float, int, Dict[int, int], np.ndarray]] = []
+        pq: List[Tuple[float, int, Dict[int, int], np.ndarray, float]] = []
         ticket = count()
-        heapq.heappush(pq, (root_dist, next(ticket), {}, x_star.copy()))
+        heapq.heappush(pq, (root_score, next(ticket), {}, x_star.copy(), root_dist))
 
         best_x = None
         best_dist = float(incumbent_upper_bound)
+        best_true_dist = np.inf
 
         while pq:
-            lower_bound, _, fixed_assignments, relaxed_point = heapq.heappop(pq)
+            lower_bound, _, fixed_assignments, relaxed_point, true_dist = heapq.heappop(pq)
             if lower_bound >= best_dist:
                 profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
                 continue
@@ -1600,6 +1822,7 @@ class CertCFAtlas:
             if len(fixed_assignments) == len(block_indices):
                 best_x = relaxed_point
                 best_dist = float(lower_bound)
+                best_true_dist = float(true_dist)
                 continue
 
             branch_block = None
@@ -1630,6 +1853,7 @@ class CertCFAtlas:
                 child_assignments[branch_block] = category
                 profile["decode_nodes_visited"] = int(profile["decode_nodes_visited"]) + 1
                 profile["decode_solver_calls"] = int(profile["decode_solver_calls"]) + 1
+                child_profile: Dict[str, ProfileValue] = {}
                 child_x, child_dist = self._solve_projection_subproblem_for_constraints(
                     x_query,
                     A_full,
@@ -1644,18 +1868,23 @@ class CertCFAtlas:
                     nonincreasing_dims=nonincreasing_dims,
                     ohe_slices=ohe_slices,
                     fixed_ohe_assignments=child_assignments,
+                    sparsity_groups=sparsity_groups,
+                    sparsity_group_weights=sparsity_group_weights,
+                    profile_out=child_profile,
                 )
-                if child_x is None or child_dist >= best_dist:
+                child_score = self._score_from_profile(child_profile, child_dist)
+                if child_x is None or child_score >= best_dist:
                     profile["decode_nodes_pruned"] = int(profile["decode_nodes_pruned"]) + 1
                     continue
                 heapq.heappush(
                     pq,
-                    (float(child_dist), next(ticket), child_assignments, child_x),
+                    (float(child_score), next(ticket), child_assignments, child_x, float(child_dist)),
                 )
 
         if best_x is None:
             return None, np.inf, profile
-        return best_x, best_dist, profile
+        profile["sparsity_selection_score"] = float(best_dist)
+        return best_x, best_true_dist, profile
 
     def _project_onto_polytope(
         self,
@@ -1730,40 +1959,20 @@ class CertCFAtlas:
             profile.update(self._default_cvxpy_solver_profile())
             return None, np.inf, profile
 
-        solver_profile = self._default_cvxpy_solver_profile()
-        x_proj, dist = self._solve_projection_subproblem_for_constraints(
-            x0,
-            A_full,
-            b_full,
-            center,
-            box_eps,
-            ball_eps,
-            maxiter=maxiter,
-            tol=tol,
-            fixed_dims=fixed_dims,
-            nondecreasing_dims=nondecreasing_dims,
-            nonincreasing_dims=nonincreasing_dims,
-            ohe_slices=self.ohe_slices,
-            fixed_ohe_assignments=None,
-            profile_out=solver_profile,
-        )
+        sparsity_active = self._sparsity_active()
+        sparsity_groups = self._build_sparsity_groups(d, fixed_dims) if sparsity_active else None
+        n_projection_solves = 0
+        best_x: Optional[np.ndarray] = None
+        best_dist = np.inf
+        best_score = np.inf
+        best_solver_profile = self._default_cvxpy_solver_profile()
+        best_decode_profile: Optional[Dict[str, ProfileValue]] = None
+        current_weights: Optional[np.ndarray] = None
+        n_attempts = 1 + (self.sparsity_reweight_iters if sparsity_active else 0)
 
-        if x_proj is None:
-            profile = self._build_decode_profile(
-                mode="heuristic",
-                exact_fallback_used=False,
-                nodes_visited=0,
-                nodes_pruned=0,
-                solver_calls=0,
-                product_size=self._ohe_product_size(self.ohe_slices),
-                heuristic_success=False,
-            )
-            profile.update(solver_profile)
-            return None, np.inf, profile
-
-        if self.ohe_slices:
-            x_proj, dist, decode_profile = self._polytope_aware_decode(
-                x_proj,
+        for attempt_idx in range(n_attempts):
+            solver_profile = self._default_cvxpy_solver_profile()
+            x_relaxed, _ = self._solve_projection_subproblem_for_constraints(
                 x0,
                 A_full,
                 b_full,
@@ -1775,21 +1984,100 @@ class CertCFAtlas:
                 fixed_dims=fixed_dims,
                 nondecreasing_dims=nondecreasing_dims,
                 nonincreasing_dims=nonincreasing_dims,
-                incumbent_upper_bound=incumbent_upper_bound,
+                ohe_slices=self.ohe_slices,
+                fixed_ohe_assignments=None,
+                sparsity_groups=sparsity_groups,
+                sparsity_group_weights=current_weights,
+                profile_out=solver_profile,
             )
-        else:
-            decode_profile = self._build_decode_profile(
+            n_projection_solves += 1
+            if x_relaxed is None:
+                if attempt_idx == 0:
+                    best_solver_profile = solver_profile
+                break
+
+            if self.ohe_slices:
+                x_candidate, dist_candidate, decode_profile = self._polytope_aware_decode(
+                    x_relaxed,
+                    x0,
+                    A_full,
+                    b_full,
+                    center,
+                    box_eps,
+                    ball_eps,
+                    maxiter=maxiter,
+                    tol=tol,
+                    fixed_dims=fixed_dims,
+                    nondecreasing_dims=nondecreasing_dims,
+                    nonincreasing_dims=nonincreasing_dims,
+                    sparsity_groups=sparsity_groups,
+                    sparsity_group_weights=current_weights,
+                    incumbent_upper_bound=best_score,
+                )
+            else:
+                x_candidate = x_relaxed
+                dist_candidate = float(np.linalg.norm(x_candidate - x0, ord=self.distance_norm))
+                decode_profile = self._build_decode_profile(
+                    mode="heuristic",
+                    exact_fallback_used=False,
+                    nodes_visited=0,
+                    nodes_pruned=0,
+                    solver_calls=0,
+                    product_size=1,
+                    heuristic_success=True,
+                )
+
+            if x_candidate is not None and np.isfinite(dist_candidate):
+                candidate_score = self._sparsity_surrogate_score(x_candidate, x0, sparsity_groups)
+                decode_profile["sparsity_selection_score"] = candidate_score
+                if candidate_score < best_score:
+                    best_x = x_candidate
+                    best_dist = float(dist_candidate)
+                    best_score = float(candidate_score)
+                    best_solver_profile = solver_profile
+                    best_decode_profile = decode_profile
+
+            if not sparsity_active:
+                break
+
+            weight_source = x_candidate if x_candidate is not None else x_relaxed
+            current_weights = self._sparsity_group_weights(weight_source, x0, sparsity_groups or [])
+
+        if best_x is None:
+            profile = self._build_decode_profile(
                 mode="heuristic",
                 exact_fallback_used=False,
                 nodes_visited=0,
                 nodes_pruned=0,
                 solver_calls=0,
-                product_size=1,
-                heuristic_success=True,
+                product_size=self._ohe_product_size(self.ohe_slices),
+                heuristic_success=False,
             )
+            profile.update(self._sparsity_metadata_defaults())
+            profile.update(best_solver_profile)
+            profile["sparsity_group_count"] = int(0 if sparsity_groups is None else len(sparsity_groups))
+            profile["sparsity_solver_calls"] = int(n_projection_solves)
+            return None, np.inf, profile
 
-        decode_profile.update(solver_profile)
-        return x_proj, dist, decode_profile
+        decode_profile = best_decode_profile or self._build_decode_profile(
+            mode="heuristic",
+            exact_fallback_used=False,
+            nodes_visited=0,
+            nodes_pruned=0,
+            solver_calls=0,
+            product_size=1,
+            heuristic_success=True,
+        )
+        changes = self._sparsity_group_changes(best_x, x0, sparsity_groups or [])
+        decode_profile.update(self._sparsity_metadata_defaults())
+        decode_profile.update(best_solver_profile)
+        decode_profile["sparsity_group_count"] = int(0 if sparsity_groups is None else len(sparsity_groups))
+        decode_profile["sparsity_active_groups"] = int(
+            np.sum(changes > float(getattr(self, "sparsity_eps", 1.0e-3)))
+        )
+        decode_profile["sparsity_selection_score"] = float(best_score)
+        decode_profile["sparsity_solver_calls"] = int(n_projection_solves)
+        return best_x, best_dist, decode_profile
 
     def _make_project_fn(
         self,
@@ -1806,7 +2094,7 @@ class CertCFAtlas:
         projection_time_s = [0.0]
         best_projection_dist = [np.inf]
         profile_recorded = [False]
-        best_decode_profile = [self._build_decode_profile(
+        initial_profile = self._build_decode_profile(
             mode="heuristic",
             exact_fallback_used=False,
             nodes_visited=0,
@@ -1814,7 +2102,9 @@ class CertCFAtlas:
             solver_calls=0,
             product_size=self._ohe_product_size(self.ohe_slices),
             heuristic_success=not bool(self.ohe_slices),
-        )]
+        )
+        initial_profile.update(self._sparsity_metadata_defaults())
+        best_decode_profile = [initial_profile]
 
         def project_fn(idx: int, incumbent_upper_bound: float) -> Tuple[Optional[np.ndarray], float]:
             t0 = time.perf_counter()
@@ -1828,7 +2118,8 @@ class CertCFAtlas:
                 incumbent_upper_bound=incumbent_upper_bound,
             )
             projection_time_s[0] += time.perf_counter() - t0
-            improved_dist = dist < best_projection_dist[0]
+            selection_score = self._score_from_profile(decode_profile, dist)
+            improved_dist = selection_score < best_projection_dist[0]
             if (
                 improved_dist
                 or not profile_recorded[0]
@@ -1845,8 +2136,8 @@ class CertCFAtlas:
                 best_decode_profile[0] = decode_profile
                 profile_recorded[0] = True
             if improved_dist:
-                best_projection_dist[0] = dist
-            return x_proj, dist
+                best_projection_dist[0] = selection_score
+            return x_proj, selection_score
 
         return project_fn, projection_time_s, best_decode_profile
 
@@ -2046,7 +2337,7 @@ class CertCFAtlas:
             best_source = "projection"
         else:
             best_point = centers[nearest_anchor_idx].copy()
-            best_dist = nearest_anchor_dist
+            best_dist = self._sparsity_surrogate_score(best_point, x_query)
             best_idx = nearest_anchor_idx
             best_source = "nearest_anchor"
 
@@ -2166,15 +2457,15 @@ class CertCFAtlas:
         t_total_start = time.perf_counter()
 
         if resolved_method == 'bvh':
-            x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_bvh(
+            x_cf, selection_score, anchor_idx, n_qp, search_profiling = self._search_bvh(
                 x_query, bd, target_class, delta, robust_norm, solver_maxiter,
                 fixed_dims, nondecreasing_dims, nonincreasing_dims)
         elif resolved_method == 'sorted':
-            x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_sorted(
+            x_cf, selection_score, anchor_idx, n_qp, search_profiling = self._search_sorted(
                 x_query, bd, target_class, delta, robust_norm, solver_maxiter,
                 fixed_dims, nondecreasing_dims, nonincreasing_dims)
         elif resolved_method == 'nearest_anchor':
-            x_cf, dist, anchor_idx, n_qp, search_profiling = self._search_nearest_anchor(
+            x_cf, selection_score, anchor_idx, n_qp, search_profiling = self._search_nearest_anchor(
                 x_query, bd, target_class, delta, robust_norm, solver_maxiter,
                 fixed_dims, query_k_candidates, nondecreasing_dims, nonincreasing_dims)
         else:
@@ -2183,11 +2474,16 @@ class CertCFAtlas:
         profiling.update(search_profiling)
 
         total_time_s = time.perf_counter() - t_total_start
+        if x_cf is not None and self._sparsity_active():
+            dist = float(np.linalg.norm(np.asarray(x_cf, dtype=np.float64) - x_query, ord=self.distance_norm))
+        else:
+            dist = float(selection_score)
         profiling.update({
             "total_time_ms": 1e3 * total_time_s,
             "n_qp_solved": float(n_qp),
             "success": float(x_cf is not None),
             "distance": float(dist),
+            "sparsity_selection_score": float(selection_score),
         })
 
         return CounterfactualResult(

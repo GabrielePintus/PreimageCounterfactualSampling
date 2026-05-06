@@ -1,5 +1,5 @@
 seed: 42
-output: results/final_benchmark_noface_certcf_shrink.parquet
+output: results/final_benchmark_noface_certcf_shrink_sparsity.parquet
 timeout_per_sample: 120
 resource_monitor:
   enabled: false
@@ -9,13 +9,13 @@ sampling:
 
 methods:
   - name: certcf
-    run_name: certcf_backward_shrink
+    run_name: certcf_backward_shrink_sparsity
     params:
       device: auto
       lirpa_method: backward
       norm: 1
       distance_norm: 1
-      eps_alpha: [0.10, 0.15, 0.20]
+      eps_alpha: [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
       classification_margin: 1.0e-4
       adaptive_eps: true
       adaptive_eps_shrink_factor: 0.5
@@ -23,6 +23,11 @@ methods:
       adaptive_eps_min: 1.0e-6
       adaptive_eps_center_tol: 1.0e-6
       adaptive_eps_binary_search_steps: 0
+      sparsity_penalty: reweighted_l1
+      sparsity_lambda: [ 0.1, 0.2, 0.5, 1.0 ]
+      sparsity_reweight_iters: 2
+      sparsity_eps: 1.0e-3
+      sparsity_group_ohe: true
       batch_size: 128
       query_method: nearest_anchor
       query_k_candidates: 5

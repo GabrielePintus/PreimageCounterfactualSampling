@@ -42,6 +42,7 @@ setup(
         "pandas>=2.0.0",
         "pyarrow>=14.0.0",
         "networkx>=3.0",
+        "psutil>=5.9.0",
         "PyYAML>=6.0",
         "scikit-learn>=1.3.0",
         "lightning>=2.0.0",
