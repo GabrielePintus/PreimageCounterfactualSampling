@@ -34,10 +34,9 @@ pip install -e .[dev]
 Training is driven by Lightning CLI configs:
 
 ```bash
-python scripts/train_classifier.py fit --config configs/training/mnist_classifier.yaml
-python scripts/train_classifier.py fit --config configs/training/mnist_ae.yaml
-python scripts/train_classifier.py fit --config configs/training/spiral_classifier.yaml
 python scripts/train_classifier.py fit --config configs/training/adult_classifier.yaml
+python scripts/train_classifier.py fit --config configs/training/compas_classifier.yaml
+python scripts/train_classifier.py fit --config configs/training/heloc_classifier.yaml
 ```
 
 ## Testing And Validation

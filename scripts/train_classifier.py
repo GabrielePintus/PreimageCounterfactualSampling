@@ -4,18 +4,18 @@ LightningCLI entrypoint for training NN models.
 
 Usage
 -----
-Train MNIST classifier:
-    python scripts/train_classifier.py fit --config configs/training/mnist_classifier.yaml
+Train Adult classifier:
+    python scripts/train_classifier.py fit --config configs/training/adult_classifier.yaml
 
-Train convolutional VAE:
-    python scripts/train_classifier.py fit --config configs/training/mnist_ae.yaml
+Train COMPAS classifier:
+    python scripts/train_classifier.py fit --config configs/training/compas_classifier.yaml
 
 Override parameters on the fly:
-    python scripts/train_classifier.py fit --config configs/training/mnist_classifier.yaml --trainer.max_epochs=100
+    python scripts/train_classifier.py fit --config configs/training/adult_classifier.yaml --trainer.max_epochs=20
 
 Test (after training):
-    python scripts/train_classifier.py test --config configs/training/mnist_classifier.yaml \
-        --ckpt_path "data/Trained Models/mnist_classifier.ckpt"
+    python scripts/train_classifier.py test --config configs/training/adult_classifier.yaml \
+        --ckpt_path checkpoints/adult_classifier/best.ckpt
 """
 
 import sys

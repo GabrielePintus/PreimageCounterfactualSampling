@@ -4,13 +4,9 @@ Lightning and experiment configuration files.
 
 ## Training (`configs/training/`)
 
-Classifier and autoencoder training configs for
+Tabular classifier training configs for
 `python scripts/train_classifier.py fit --config configs/training/<name>.yaml`.
 
-- `mnist_classifier.yaml`
-- `mnist_classifier_benchmark.yaml`
-- `mnist_ae.yaml`
-- `spiral_classifier.yaml`
 - `adult_classifier.yaml`
 - `compas_classifier.yaml`
 - `german_credit_classifier.yaml`
