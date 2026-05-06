@@ -219,5 +219,6 @@ config.yaml
 
 results/
 archive/
+!notebooks/archive/
+!notebooks/archive/**
 papers/*.pdf
-
