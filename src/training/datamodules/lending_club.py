@@ -80,10 +80,13 @@ class LendingClubDataModule(L.LightningDataModule):
         # Target: Fully Paid → 0, Charged Off → 1
         y = (df["loan_status"] == "Charged Off").values.astype(np.int64)
 
-        # Clean string columns: strip "%" and whitespace
+        # Clean percentage columns. Depending on the parquet writer, these can
+        # arrive as object/string dtype or already numeric.
         for col in ["int_rate", "revol_util"]:
-            if df[col].dtype == object:
-                df[col] = df[col].str.rstrip("%").astype(np.float32)
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.strip().str.rstrip("%"),
+                errors="coerce",
+            ).astype(np.float32)
         for col in _CATEGORICAL_COLS:
             df[col] = df[col].astype(str).str.strip()
 
