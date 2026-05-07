@@ -47,6 +47,7 @@ CertCF supports:
 | `scripts/` | Executable training and benchmark entrypoints. |
 | `notebooks/Results.ipynb` | Main paper result tables and plots. |
 | `notebooks/Appendix.ipynb` | Appendix tables, ablations, and diagnostics. |
+| `notebooks/DatasetMetrics.ipynb` | Non-aggregated per-dataset appendix metrics. |
 | `tests/counterfactuals/` | Unit tests for the benchmark framework and CertCF integration. |
 
 For more detailed module-level notes, see [src/README.md](src/README.md), [configs/README.md](configs/README.md), [scripts/README.md](scripts/README.md), and [notebooks/README.md](notebooks/README.md).
@@ -54,7 +55,7 @@ For more detailed module-level notes, see [src/README.md](src/README.md), [confi
 ## Installation
 
 ```bash
-git clone https://github.com/gabrielepintus/PreimageCounterfactualSampling.git
+git clone <repo-url>
 cd PreimageCounterfactualSampling
 uv venv --python 3.11
 source .venv/bin/activate
@@ -116,7 +117,8 @@ hf download printf261/certcf-reproducibility \
 ```
 
 This restores the paths expected by the training configs, benchmark config, and
-paper notebooks:
+paper notebooks. The downloaded files populate ignored local artifact
+directories and are intentionally not versioned in git.
 
 | Artifact | Local path |
 | --- | --- |

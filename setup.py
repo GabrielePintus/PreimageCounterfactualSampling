@@ -10,11 +10,10 @@ long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists
 setup(
     name="certcf",
     version="0.2.0",
-    author="Gabriele Pintus",
+    author="Anonymous",
     description="CertCF for robust counterfactual explanations",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/gabrielepintus/PreimageCounterfactualSampling",
     package_dir={"": "src"},
     packages=find_packages(where="src"),
     classifiers=[
