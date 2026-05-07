@@ -36,6 +36,8 @@ All configs train `training.lit_classifier.LitClassifier` around a tabular neura
 - AdamW optimization through the Lightning module
 - cosine learning-rate decay from `5e-3` to `1e-6`
 - validation-loss checkpointing with `save_top_k: 1`
+- deterministic best-checkpoint path `checkpoints/<dataset>_classifier/best.ckpt`
+- no `last.ckpt` tracking
 
 The final benchmark loads the resulting checkpoints from `checkpoints/<dataset>_classifier/best.ckpt`.
 

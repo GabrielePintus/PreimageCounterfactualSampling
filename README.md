@@ -56,18 +56,150 @@ For more detailed module-level notes, see [src/README.md](src/README.md), [confi
 ```bash
 git clone https://github.com/gabrielepintus/PreimageCounterfactualSampling.git
 cd PreimageCounterfactualSampling
-pip install -e .
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -e .
 ```
 
 For notebooks and development tools:
 
 ```bash
-pip install -e .[dev]
+uv pip install -e ".[dev]"
 ```
 
-The project depends on PyTorch, auto_LiRPA, CVXPY/CLARABEL, Lightning, scikit-learn, pandas, NumPy, SciPy, and related scientific Python packages declared in [setup.py](setup.py).
+If `uv` is not available, the same commands can be run with `python -m venv`
+and `pip install -e .[dev]`.
+
+The project depends on PyTorch, auto_LiRPA, CVXPY/CLARABEL, Lightning, scikit-learn, pandas, NumPy, SciPy, and related scientific Python packages declared in [setup.py](setup.py). The required auto_LiRPA version is installed directly from the upstream GitHub repository because the needed release is not available on the standard package index.
 
 Generated data, checkpoints, results, and notebook outputs are intentionally kept out of git. The benchmark configs expect trained classifier checkpoints under `checkpoints/<dataset>_classifier/best.ckpt`.
+
+## Reproducibility
+
+This section is the reproducibility checklist for the paper experiments. The
+fastest path is to install the code, download the prepared artifacts from
+Hugging Face, and run the analysis notebooks. To recompute everything from
+scratch, train the classifiers first and then run the final benchmark.
+
+### 1. Environment Setup
+
+Use `uv` to create a local virtual environment and install the package:
+
+```bash
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+```
+
+The required auto_LiRPA version is installed from the upstream GitHub
+repository during `uv pip install`; this requires network access.
+
+Verify the environment with:
+
+```bash
+python -c "import certcf, counterfactuals; print('ok')"
+python scripts/benchmark.py --help
+python scripts/train_classifier.py --help
+pytest tests/counterfactuals -q
+```
+
+### 2. Data
+
+Download the processed tabular datasets, trained checkpoints, and selected
+benchmark result files from the Hugging Face artifact repository:
+
+```bash
+uv pip install huggingface_hub
+hf download printf261/certcf-reproducibility \
+  --repo-type dataset \
+  --local-dir .
+```
+
+This restores the paths expected by the training configs, benchmark config, and
+paper notebooks:
+
+| Artifact | Local path |
+| --- | --- |
+| Adult data | `data/Adult/raw.parquet` |
+| COMPAS data | `data/Compas/raw.parquet` |
+| German Credit data | `data/GermanCredit/raw.parquet` |
+| Give Me Some Credit data | `data/Give Me Some Credit/raw.parquet` |
+| HELOC data | `data/Heloc/raw.parquet` |
+| Lending Club data | `data/LendingClub/raw.parquet` |
+| Wisconsin Breast Cancer data | `data/WisconsinBreastCancer/raw.parquet` |
+| Classifier checkpoints | `checkpoints/<dataset>_classifier/best.ckpt` |
+| Benchmark outputs | `results/*.parquet` |
+
+### 3. Classifier Training
+
+If you downloaded the Hugging Face artifacts, trained checkpoints are already
+available and this step can be skipped. To retrain a classifier, run:
+
+```bash
+python scripts/train_classifier.py fit --config configs/training/compas_classifier.yaml
+```
+
+The seven training configs under `configs/training/` save the best validation
+checkpoint to:
+
+```text
+checkpoints/<dataset>_classifier/best.ckpt
+```
+
+### 4. Running The Final Benchmark
+
+If you downloaded the Hugging Face artifacts, selected benchmark outputs are
+already available and this step can be skipped for plot/table reproduction. To
+rerun the full benchmark:
+
+```bash
+python scripts/benchmark.py --config configs/benchmarks/final_benchmark.yaml
+```
+
+The benchmark resumes automatically when the configured output parquet already
+exists. Use `--force` to recompute all configured runs from scratch.
+
+### 5. Reproducing Paper Results
+
+Run the paper-facing notebooks after downloading artifacts or recomputing the
+benchmark:
+
+| Notebook | Purpose |
+| --- | --- |
+| `notebooks/Results.ipynb` | Main paper result plots and tables. |
+| `notebooks/Appendix.ipynb` | Appendix plots, ablations, and diagnostics. |
+| `notebooks/DatasetMetrics.ipynb` | Per-dataset appendix metrics and table exports. |
+
+### 6. Expected Outputs
+
+The Hugging Face artifacts include the result files used by the paper notebooks:
+
+```text
+results/final_benchmark_face.parquet
+results/final_benchmark_noface.parquet
+results/final_benchmark_noface_certcf_shrink_sparsity.parquet
+results/dice_query_batch1_20queries.parquet
+```
+
+When notebook export flags are enabled, generated CSV/LaTeX snippets are written
+under:
+
+```text
+notebooks/data/generated/
+```
+
+### 7. Runtime Notes
+
+The recommended reproducibility path is to use the downloaded artifacts for
+checkpoints and paper tables, then rerun only the experiments you need to
+inspect. Classifier training is usually lightweight on these tabular datasets.
+The expensive parts are the reusable offline structures: CertCF builds one
+LiRPA-certified atlas per dataset, while FACE builds a density-weighted graph
+over the training data. Query time depends strongly on the method: nearest
+neighbor and Growing Spheres are usually fast, CertCF solves a small number of
+convex projections, FACE performs graph search, and DiCE runs a query-time
+optimization. The reported paper timings are available in
+`notebooks/Results.ipynb` and `notebooks/Appendix.ipynb`.
 
 ## Train Classifiers
 
@@ -140,12 +272,13 @@ For multi-dataset runs, the benchmark also writes one per-dataset parquet next t
 
 ## Paper Analysis Notebooks
 
-The cleaned repository keeps two paper-facing notebooks:
+The cleaned repository keeps three paper-facing notebooks:
 
 | Notebook | Purpose |
 | --- | --- |
 | `notebooks/Results.ipynb` | Loads benchmark parquet files and computes the main result plots/tables. |
 | `notebooks/Appendix.ipynb` | Collects appendix hyperparameters, robustness heatmaps, computational cost tables, CertCF ablations, and LiRPA backend diagnostics. |
+| `notebooks/DatasetMetrics.ipynb` | Recomputes non-aggregated per-dataset appendix metrics and exports table snippets. |
 
 Run notebooks from either the repository root or the `notebooks/` directory. They expect local benchmark outputs under `results/`; expensive recomputations are disabled by explicit flags.
 

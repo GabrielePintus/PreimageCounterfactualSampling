@@ -34,7 +34,7 @@ setup(
         "torchvision>=0.15.0",
         "numpy>=1.24.0",
         "scipy>=1.10.0",
-        "auto-LiRPA>=0.4.0",
+        "auto-LiRPA @ git+https://github.com/Verified-Intelligence/auto_LiRPA.git",
         "shapely>=2.0.0",
         "cvxpy>=1.4.0",
         "matplotlib>=3.7.0",
@@ -51,6 +51,8 @@ setup(
         "dev": [
             "jupyter>=1.0.0",
             "notebook>=7.0.0",
+            "jsonargparse[signatures]>=4.27.7",
+            "seaborn>=0.13.0",
             "pytest>=7.0.0",
             "pytest-cov>=4.0.0",
             "black>=23.0.0",

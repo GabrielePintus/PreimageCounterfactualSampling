@@ -8,6 +8,8 @@ Paper-facing notebooks for CertCF.
   Main paper-results notebook. It loads the final benchmark parquet files and computes the comparison tables and plots used for the main experimental results.
 - `Appendix.ipynb`
   Compact appendix notebook. It collects the paper appendix tables and plots for hyperparameters, robustness, computational cost, CertCF ablations, and LiRPA backend diagnostics.
+- `DatasetMetrics.ipynb`
+  Per-dataset appendix metrics notebook. It recomputes the non-aggregated tables requested for the appendix, with one row per dataset and method.
 - `utils/`
   Shared plotting and dataframe helpers for benchmark analysis notebooks.
 
