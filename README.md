@@ -4,6 +4,8 @@ This repository contains the research code for **CertCF**, a counterfactual expl
 
 CertCF builds certified polytopic under-approximations of a target class preimage using LiRPA/CROWN bounds. At query time, counterfactual search becomes projection onto certified regions rather than an unconstrained pointwise search. Returned counterfactuals are accepted only when they satisfy the certified target-class constraints, giving validity by construction.
 
+![CertCF certified atlas demo](assets/readme_certcf_atlas_demo.png)
+
 The current paper experiments focus on binary tabular datasets with one-hot encoded categorical features, actionability constraints, adaptive epsilon shrinkage, and a group-aware sparsity objective.
 
 ## Method At A Glance
