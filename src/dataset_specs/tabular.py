@@ -105,6 +105,14 @@ class TabularDatasetSpec:
 
 
 TABULAR_DATASET_SPECS: dict[str, TabularDatasetSpec] = {
+    "network_complexity": TabularDatasetSpec(
+        name="network_complexity",
+        feature_names=tuple(f"x_{i}" for i in range(32)),
+        target_name="class",
+        numerical_features=tuple(f"x_{i}" for i in range(32)),
+        categorical_features=(),
+        cardinalities=(),
+    ),
     "adult": TabularDatasetSpec(
         name="adult",
         feature_names=(

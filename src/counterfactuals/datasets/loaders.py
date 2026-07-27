@@ -299,6 +299,38 @@ class WisconsinBreastCancerDataset(BaseDataset):
         return self._x_test, self._y_test
 
 
+class NetworkComplexityDataset(BaseDataset):
+    """Benchmark adapter for the exact cache used by Lightning training."""
+
+    spec = get_tabular_dataset_spec("network_complexity")
+
+    def __init__(
+        self,
+        cache_path: str = "results/network_complexity/data/dataset.npz",
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.cache_path = cache_path
+        self.seed = seed
+
+    def load(self) -> None:
+        with np.load(self.cache_path, allow_pickle=False) as cached:
+            self._x_train = cached["x_train"].astype(np.float32)
+            self._y_train = cached["y_train"].astype(np.int64)
+            self._x_test = cached["x_test"].astype(np.float32)
+            self._y_test = cached["y_test"].astype(np.int64)
+            self.query_indices = cached["query_indices"].astype(np.int64)
+        self._loaded = True
+
+    def get_train(self) -> tuple[np.ndarray, np.ndarray]:
+        self._check_loaded()
+        return self._x_train, self._y_train
+
+    def get_test(self) -> tuple[np.ndarray, np.ndarray]:
+        self._check_loaded()
+        return self._x_test, self._y_test
+
+
 class MNISTDataset(BaseDataset):
     """Adapter that wraps the MNIST LightningDataModule and flattens images."""
 

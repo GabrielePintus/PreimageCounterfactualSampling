@@ -1,0 +1,72 @@
+# Official one-seed CertCF network-complexity scaling grid.
+experiment:
+  seed: 42
+  widths: [16, 32, 64, 128, 256]
+  depths: [1, 2, 3, 4, 5]
+  input_dim: 32
+  num_classes: 2
+  accuracy_gate: 0.90
+
+dataset:
+  n_train: 10000
+  n_validation: 1000
+  n_test: 1000
+  class_sep: 1.5
+  flip_y: 0.01
+  n_queries: 1000
+  queries_per_class: 500
+
+training:
+  max_epochs: 50
+  batch_size: 128
+  num_workers: 0
+  dropout: 0.1
+  initial_lr: 5.0e-3
+  final_lr: 1.0e-6
+  weight_decay: 1.0e-5
+  accelerator: gpu
+  devices: 1
+  deterministic: true
+
+certcf:
+  device: auto
+  train_pool_per_true_class: 5000
+  anchors_per_predicted_class: 500
+  atlas_subsample_method: random
+  eps_alpha: 0.20
+  norm: 1
+  distance_norm: 1
+  lirpa_method: backward
+  lirpa_batch_size: 128
+  lirpa_batch_size_candidates: [128, 64, 32, 16, 8]
+  classification_margin: 1.0e-4
+  adaptive_eps: true
+  adaptive_eps_shrink_factor: 0.5
+  adaptive_eps_max_shrinks: 8
+  adaptive_eps_min: 1.0e-6
+  adaptive_eps_center_tol: 1.0e-6
+  adaptive_eps_binary_search_steps: 0
+  sparsity_penalty: reweighted_l1
+  sparsity_lambda: 1.0
+  sparsity_reweight_iters: 2
+  sparsity_eps: 1.0e-3
+  query_method: nearest_anchor
+  query_k_candidates: 3
+  query_parallelism: 1
+  timeout_s_per_query: 120
+  solver_maxiter: 500
+  cvxpy_solvers: [CLARABEL]
+  cvxpy_solver_options:
+    CLARABEL:
+      max_iter: 100
+      tol_gap_abs: 1.0e-3
+      tol_gap_rel: 1.0e-5
+      tol_feas: 1.0e-8
+  cvxpy_accept_statuses:
+    CLARABEL: [optimal]
+
+resources:
+  rss_sample_interval_s: 0.05
+
+artifacts:
+  output_dir: results/network_complexity

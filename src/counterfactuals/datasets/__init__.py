@@ -9,6 +9,7 @@ from .loaders import (
     HELOCDataset,
     LendingClubDataset,
     MNISTDataset,
+    NetworkComplexityDataset,
     WisconsinBreastCancerDataset,
 )
 
@@ -22,5 +23,6 @@ __all__ = [
     "HELOCDataset",
     "LendingClubDataset",
     "MNISTDataset",
+    "NetworkComplexityDataset",
     "WisconsinBreastCancerDataset",
 ]

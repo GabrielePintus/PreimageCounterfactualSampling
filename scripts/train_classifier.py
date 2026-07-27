@@ -40,6 +40,7 @@ import training.datamodules.heloc                # noqa: F401
 import training.datamodules.give_me_some_credit  # noqa: F401
 import training.datamodules.lending_club         # noqa: F401
 import training.datamodules.wisconsin_breast_cancer  # noqa: F401
+import training.datamodules.network_complexity  # noqa: F401
 import models.classifiers           # noqa: F401
 import models.ae                    # noqa: F401
 import models.ae_channels           # noqa: F401
