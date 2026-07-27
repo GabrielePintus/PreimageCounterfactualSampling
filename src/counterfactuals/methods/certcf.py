@@ -55,6 +55,7 @@ class CertCF(BaseCounterfactualMethod):
         eps_strategy: Optional[EpsStrategy] = None,
         batch_size: Optional[int] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
+        input_bounds: Optional[Sequence[float]] = None,
 
         # Model / atlas configuration
         cnn: bool = False,
@@ -113,6 +114,13 @@ class CertCF(BaseCounterfactualMethod):
         self.eps_strategy = eps_strategy
         self.batch_size = batch_size
         self.ohe_slices = ohe_slices
+        normalize_input_bounds = getattr(CertCFAtlas, "_normalize_input_bounds", None)
+        if normalize_input_bounds is None:
+            normalize_input_bounds = __import__(
+                "certcf.atlas",
+                fromlist=["CertCFAtlas"],
+            ).CertCFAtlas._normalize_input_bounds
+        self.input_bounds = normalize_input_bounds(input_bounds)
         self.fixed_dims = normalize_fixed_dims(fixed_dims)
         self.immutable_features = tuple(str(name) for name in (immutable_features or ()))
         self.nondecreasing_dims = normalize_directional_dims(
@@ -472,6 +480,7 @@ class CertCF(BaseCounterfactualMethod):
             eps_strategy=self.eps_strategy,
             batch_size=self.batch_size,
             ohe_slices=self.ohe_slices,
+            input_bounds=self.input_bounds,
             default_query_method=self.default_query_method,
             solver_maxiter=self.solver_maxiter,
             query_parallelism=self.query_parallelism,

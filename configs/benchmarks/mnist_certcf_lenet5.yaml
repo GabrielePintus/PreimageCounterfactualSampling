@@ -1,0 +1,47 @@
+seed: 42
+timeout_per_sample: 120
+
+resource_monitor:
+  enabled: true
+  interval_s: 1.0
+
+sampling:
+  n_train_per_class: 1000
+  n_queries: 1000
+  target_policy: all_other_classes
+
+dataset:
+  name: mnist
+  params:
+    data_dir: data/
+
+model:
+  name: mnist_classifier_ckpt
+  params:
+    checkpoint: checkpoints/mnist_lenet5_classifier/best.ckpt
+    device: auto
+    architecture: lenet5
+    num_classes: 10
+
+methods:
+  - name: certcf
+    run_name: certcf_lenet5
+    params:
+      checkpoint: checkpoints/mnist_lenet5_classifier/best.ckpt
+      device: auto
+      norm: inf
+      distance_norm: 1
+      eps_alpha: 0.20
+      adaptive_eps: true
+      adaptive_eps_shrink_factor: 0.5
+      adaptive_eps_max_shrinks: 8
+      query_method: nearest_anchor
+      query_k_candidates: 3
+      batch_size: 8
+      k_per_class: 1000
+      cvxpy_solvers: [CLARABEL]
+      input_bounds: [0.0, 1.0]
+      sparsity_penalty: none
+
+output:
+  path: results/mnist_certcf_lenet5.parquet

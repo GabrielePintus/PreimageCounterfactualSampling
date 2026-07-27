@@ -1,0 +1,40 @@
+trainer:
+  max_epochs: 50
+  accelerator: auto
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: checkpoints/mnist_lenet5_classifier/
+      filename: "best"
+      monitor: val/loss
+      mode: min
+      save_top_k: 1
+      save_last: false
+      auto_insert_metric_name: false
+      enable_version_counter: false
+      every_n_epochs: 1
+      save_on_train_epoch_end: false
+  logger: false
+
+model:
+  class_path: training.lit_classifier.LitClassifier
+  init_args:
+    model:
+      class_path: models.classifiers.LeNet5Classifier
+      init_args:
+        num_classes: 10
+    # Per-step cosine decay over the full training run.
+    initial_lr: 5e-3
+    final_lr: 1e-6
+    weight_decay: 1e-4
+
+data:
+  class_path: training.datamodules.mnist.MNISTDataModule
+  init_args:
+    data_dir: data/
+    batch_size: 128
+    val_size: 5000
+    num_workers: 4
+    augment: false
+
+seed_everything: 42

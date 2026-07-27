@@ -125,6 +125,7 @@ class CertCFAtlas:
         eps_strategy: Optional[EpsStrategy] = None,
         batch_size: Optional[int] = None,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
+        input_bounds: Optional[Sequence[float]] = None,
         # Query configuration
         default_query_method: str = "sorted",
         solver_maxiter: int = 500,
@@ -160,6 +161,7 @@ class CertCFAtlas:
         self.eps_strategy = eps_strategy
         self.batch_size = batch_size
         self.ohe_slices = ohe_slices
+        self.input_bounds = self._normalize_input_bounds(input_bounds)
 
         self.solver_maxiter = solver_maxiter
         self.query_parallelism = int(query_parallelism)
@@ -425,6 +427,33 @@ class CertCFAtlas:
                 return np.inf
             return int(lowered)
         return int(norm_value)
+
+    @staticmethod
+    def _normalize_input_bounds(
+        input_bounds: Optional[Sequence[float]],
+    ) -> Optional[Tuple[float, float]]:
+        """Validate and normalize optional global bounds for every input dimension."""
+        if input_bounds is None:
+            return None
+        if isinstance(input_bounds, (str, bytes)):
+            raise ValueError("input_bounds must be a two-element sequence [lower, upper]")
+        try:
+            values = list(input_bounds)
+        except TypeError as exc:
+            raise ValueError(
+                "input_bounds must be a two-element sequence [lower, upper]"
+            ) from exc
+        if len(values) != 2:
+            raise ValueError("input_bounds must contain exactly two values [lower, upper]")
+        try:
+            lower, upper = (float(values[0]), float(values[1]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("input_bounds values must be finite numbers") from exc
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            raise ValueError("input_bounds values must be finite numbers")
+        if lower > upper:
+            raise ValueError("input_bounds lower value must not exceed upper value")
+        return lower, upper
 
     def build(self, build_unions: bool = False, verbose: bool = True) -> 'CertCFAtlas':
         """Compute LiRPA bounds and build BVH spatial indices from the dataset."""
@@ -960,6 +989,11 @@ class CertCFAtlas:
     ) -> bool:
         if np.any(A_full @ x_cand + b_full < -tol):
             return False
+        input_bounds = getattr(self, "input_bounds", None)
+        if input_bounds is not None:
+            lower, upper = input_bounds
+            if np.any(x_cand < lower - tol) or np.any(x_cand > upper + tol):
+                return False
         if self.norm == np.inf:
             return bool(np.max(np.abs(x_cand - center)) <= ball_eps + tol)
         return bool(np.linalg.norm(x_cand - center, ord=self.norm) <= ball_eps + tol)
@@ -985,7 +1019,7 @@ class CertCFAtlas:
         """
         d = len(x0)
         z = cp.Variable(d)
-        z.value = self._projection_initial_guess(
+        initial_guess = self._projection_initial_guess(
             x0,
             A_full,
             b_full,
@@ -998,6 +1032,10 @@ class CertCFAtlas:
             ohe_slices=ohe_slices,
             fixed_ohe_assignments=fixed_ohe_assignments,
         )
+        input_bounds = getattr(self, "input_bounds", None)
+        if input_bounds is not None:
+            initial_guess = np.clip(initial_guess, *input_bounds)
+        z.value = initial_guess
 
         diff = z - x0
         if sparsity_groups is not None and sparsity_group_weights is not None:
@@ -1021,6 +1059,9 @@ class CertCFAtlas:
             z >= center - box_eps,
             z <= center + box_eps,
         ]
+        if input_bounds is not None:
+            lower, upper = input_bounds
+            constraints.extend([z >= lower, z <= upper])
 
         # Add the Lp ball constraint (handled natively by CVXPY)
         if self.norm == 2:
@@ -1084,6 +1125,10 @@ class CertCFAtlas:
             return None, np.inf, solver_profile
         if np.any(x_proj < center - box_eps - tol) or np.any(x_proj > center + box_eps + tol):
             return None, np.inf, solver_profile
+        if input_bounds is not None:
+            lower, upper = input_bounds
+            if np.any(x_proj < lower - tol) or np.any(x_proj > upper + tol):
+                return None, np.inf, solver_profile
         if not self._directional_constraints_satisfied(
             x_proj,
             x0,
@@ -1143,12 +1188,28 @@ class CertCFAtlas:
             'jac': lambda x: A_full
         }]
 
-        bounds = [(center[i] - box_eps, center[i] + box_eps) for i in range(d)]
+        input_bounds = getattr(self, "input_bounds", None)
+        if input_bounds is None:
+            bounds = [(center[i] - box_eps, center[i] + box_eps) for i in range(d)]
+        else:
+            input_lower, input_upper = input_bounds
+            bounds = [
+                (
+                    max(center[i] - box_eps, input_lower),
+                    min(center[i] + box_eps, input_upper),
+                )
+                for i in range(d)
+            ]
 
         # Fix specified dimensions: tighten bounds to a single value
         if fixed_dims is not None:
             for i in fixed_dims:
-                bounds[i] = (x0[i], x0[i])
+                i = int(i)
+                lo, hi = bounds[i]
+                value = float(x0[i])
+                if value < lo - _PROJECTION_FEASIBILITY_TOL or value > hi + _PROJECTION_FEASIBILITY_TOL:
+                    return None, np.inf
+                bounds[i] = (value, value)
 
         if nondecreasing_dims is not None:
             for i in nondecreasing_dims:
@@ -1177,6 +1238,12 @@ class CertCFAtlas:
                     fixed_cat = int(fixed_cat)
                     for i in range(s, e):
                         target = 1.0 if i == s + fixed_cat else 0.0
+                        lo, hi = bounds[i]
+                        if (
+                            target < lo - _PROJECTION_FEASIBILITY_TOL
+                            or target > hi + _PROJECTION_FEASIBILITY_TOL
+                        ):
+                            return None, np.inf
                         bounds[i] = (target, target)
 
         if any(lo > hi + _PROJECTION_FEASIBILITY_TOL for lo, hi in bounds):
@@ -1195,6 +1262,8 @@ class CertCFAtlas:
             ohe_slices=ohe_slices,
             fixed_ohe_assignments=fixed_ohe_assignments,
         )
+        if input_bounds is not None:
+            x_init = np.clip(x_init, *input_bounds)
 
         result = minimize(
             objective,
@@ -1219,6 +1288,10 @@ class CertCFAtlas:
         if np.any(x_proj < center - box_eps - tol) or \
            np.any(x_proj > center + box_eps + tol):
             return None, np.inf
+        if input_bounds is not None:
+            lower, upper = input_bounds
+            if np.any(x_proj < lower - tol) or np.any(x_proj > upper + tol):
+                return None, np.inf
         if not self._directional_constraints_satisfied(
             x_proj,
             x0,

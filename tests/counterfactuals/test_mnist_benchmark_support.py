@@ -16,6 +16,7 @@ from counterfactuals.core.registry import Registry
 from counterfactuals.datasets.loaders import MNISTDataset
 from counterfactuals.methods.certcf import _strip_dropout_modules
 from counterfactuals.models.torch_model import TorchModelWrapper
+from models.classifiers import LeNet5Classifier, MNISTClassifier
 
 
 def _load_benchmark_module():
@@ -41,6 +42,44 @@ class DummyMulticlassModel:
         return proba
 
 
+def test_lenet5_classifier_forward_shape():
+    torch = pytest.importorskip("torch")
+
+    logits = LeNet5Classifier()(torch.randn(4, 1, 28, 28))
+
+    assert logits.shape == (4, 10)
+
+
+@pytest.mark.parametrize(
+    ("architecture", "expected_type"),
+    [(None, MNISTClassifier), ("lenet5", LeNet5Classifier)],
+)
+def test_mnist_checkpoint_loader_selects_architecture(
+    monkeypatch,
+    architecture,
+    expected_type,
+):
+    benchmark = _load_benchmark_module()
+    captured = {}
+
+    def fake_load(_lit_cls, _checkpoint, backbone, map_location):
+        captured["backbone"] = backbone
+        captured["map_location"] = map_location
+        return SimpleNamespace(model=backbone)
+
+    monkeypatch.setattr(benchmark, "_load_lit_checkpoint_resilient", fake_load)
+
+    wrapper = benchmark._build_mnist_model_from_checkpoint(
+        "unused.ckpt",
+        device="cpu",
+        architecture=architecture,
+    )
+
+    assert isinstance(captured["backbone"], expected_type)
+    assert isinstance(wrapper.model.model, expected_type)
+    assert captured["map_location"] == "cpu"
+
+
 def test_build_query_tasks_expands_all_other_classes():
     benchmark = _load_benchmark_module()
     x_test = np.zeros((20, 4), dtype=np.float32)
@@ -63,6 +102,31 @@ def test_build_query_tasks_expands_all_other_classes():
     assert set(np.unique(y_true)) == set(range(10))
     for source, target in zip(y_orig, target_classes):
         assert source != target
+
+
+def test_build_query_tasks_honors_total_mnist_query_budget():
+    benchmark = _load_benchmark_module()
+    x_test = np.zeros((120, 4), dtype=np.float32)
+    y_test = np.repeat(np.arange(10, dtype=np.int64), 12)
+    x_test[:, 0] = y_test
+
+    query_idx, y_true, y_orig, target_classes = benchmark._build_query_tasks(
+        dataset_name="mnist",
+        x_test=x_test,
+        y_test=y_test,
+        model=DummyMulticlassModel(),
+        sampling_cfg={"n_queries": 1000, "target_policy": "all_other_classes"},
+        rng=np.random.default_rng(0),
+    )
+
+    assert len(query_idx) == 1000
+    assert len(y_true) == 1000
+    assert len(y_orig) == 1000
+    assert len(target_classes) == 1000
+    assert dict(zip(*np.unique(y_true, return_counts=True))) == {
+        cls: 100 for cls in range(10)
+    }
+    assert np.all(y_orig != target_classes)
 
 
 def test_subsample_train_per_class_caps_each_label():
@@ -346,6 +410,52 @@ def test_build_certcf_method_forwards_atlas_subsample_space(monkeypatch):
     assert np.array_equal(atlas_method.y_train, np.array([1, 0], dtype=np.int64))
 
 
+def test_build_certcf_method_uses_lenet5_and_forwards_input_bounds(monkeypatch):
+    benchmark = _load_benchmark_module()
+    captured = {}
+    init_calls = []
+
+    def fake_load(_lit_cls, _checkpoint, backbone, map_location):
+        captured["backbone"] = backbone
+        captured["map_location"] = map_location
+        return SimpleNamespace(model=backbone)
+
+    class FakeCertCF:
+        def __init__(self, **kwargs):
+            init_calls.append(kwargs)
+
+        def fit(self, x_train, y_train):
+            self.x_train = x_train
+            self.y_train = y_train
+
+    monkeypatch.setattr(benchmark, "_load_lit_checkpoint_resilient", fake_load)
+    monkeypatch.setattr("counterfactuals.methods.certcf.CertCF", FakeCertCF)
+
+    method, *_ = benchmark._build_certcf_method(
+        params={
+            "checkpoint": "unused.ckpt",
+            "device": "cpu",
+            "input_bounds": [0.0, 1.0],
+        },
+        model_params={
+            "dataset_module": "mnist",
+            "architecture": "lenet5",
+            "num_classes": 10,
+        },
+        dataset_name="mnist",
+        x_train=np.zeros((2, 28 * 28), dtype=np.float32),
+        y_train=np.array([0, 1], dtype=np.int64),
+        x_queries=np.zeros((1, 28 * 28), dtype=np.float32),
+        seed=7,
+    )
+
+    assert isinstance(captured["backbone"], LeNet5Classifier)
+    assert captured["map_location"] == "cpu"
+    assert init_calls[0]["input_bounds"] == [0.0, 1.0]
+    assert init_calls[0]["cnn"] is True
+    assert np.array_equal(method.y_train, np.array([0, 1], dtype=np.int64))
+
+
 def test_build_certcf_method_does_not_inject_cvxpy_defaults(monkeypatch):
     torch = pytest.importorskip("torch")
     benchmark = _load_benchmark_module()
@@ -427,6 +537,25 @@ def test_expand_grid_keeps_certcf_cvxpy_solvers_as_atomic_list():
     ]
     assert expanded[0]["params"]["cvxpy_solvers"] == ["CLARABEL", "SCS"]
     assert expanded[1]["params"]["cvxpy_solvers"] == ["CLARABEL", "SCS"]
+
+
+def test_expand_grid_keeps_certcf_input_bounds_as_atomic_list():
+    benchmark = _load_benchmark_module()
+
+    expanded = benchmark._expand_grid(
+        [
+            {
+                "name": "certcf",
+                "params": {
+                    "eps_alpha": [0.2, 0.3],
+                    "input_bounds": [0.0, 1.0],
+                },
+            }
+        ]
+    )
+
+    assert len(expanded) == 2
+    assert all(entry["params"]["input_bounds"] == [0.0, 1.0] for entry in expanded)
 
 
 def test_expand_grid_keeps_immutable_features_as_atomic_list():

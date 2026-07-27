@@ -20,11 +20,11 @@ class LitClassifier(L.LightningModule):
     model : nn.Module
         The classifier to train (e.g. MNISTClassifier, SimpleClassifier).
     initial_lr : float
-        Peak learning rate reached after warmup; starting point of cosine decay.
+        Starting learning rate for cosine decay.
     weight_decay : float
         L2 regularization coefficient for AdamW.
     final_lr : float
-        Minimum learning rate at the end of cosine annealing.
+        Learning rate reached at the end of cosine annealing.
     """
 
     def __init__(

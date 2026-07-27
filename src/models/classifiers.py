@@ -5,6 +5,32 @@ import torch
 import torch.nn as nn
 
 
+def infer_tabular_classifier_dims_from_state_dict(state_dict) -> tuple[list[int], int]:
+    """Infer all hidden widths and the output size from a tabular state dict.
+
+    Both Lightning keys (``model.net.*``) and bare model keys (``net.*``) are
+    accepted. Sorting by sequential-module index preserves compatibility with
+    the historical two-hidden-layer layout.
+    """
+    import re
+
+    linear_weights = []
+    for key, value in state_dict.items():
+        match = re.fullmatch(r"(?:model\.)?net\.(\d+)\.weight", str(key))
+        if match is not None and getattr(value, "ndim", 0) == 2:
+            linear_weights.append((int(match.group(1)), value))
+    linear_weights.sort(key=lambda item: item[0])
+    if len(linear_weights) < 2:
+        raise KeyError(
+            "Could not infer TabularClassifier dimensions: expected at least "
+            "one hidden Linear weight and one output Linear weight."
+        )
+    return (
+        [int(weight.shape[0]) for _, weight in linear_weights[:-1]],
+        int(linear_weights[-1][1].shape[0]),
+    )
+
+
 class SimpleClassifier(nn.Module):
     """
     Simple feedforward neural network for classification.
@@ -113,6 +139,43 @@ class MNISTClassifier(nn.Module):
         return self.classifier(h)
 
 
+class LeNet5Classifier(nn.Module):
+    """ReLU LeNet-5-style classifier adapted to 28x28 MNIST images.
+
+    The two average-pooling stages reduce the convolutional representation to
+    ``16 x 5 x 5`` before the three fully connected layers.
+
+    Parameters
+    ----------
+    num_classes : int, optional
+        Number of output classes (default: 10).
+    """
+
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 6, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(6, 16, kernel_size=5),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(16 * 5 * 5, 120),
+            nn.ReLU(),
+            nn.Linear(120, 84),
+            nn.ReLU(),
+            nn.Linear(84, num_classes),
+        )
+
+    def forward(self, x):
+        """Return logits for a batch shaped ``(N, 1, 28, 28)``."""
+        h = self.features(x)
+        h = h.view(h.size(0), -1)
+        return self.classifier(h)
+
+
 
 
 
@@ -122,7 +185,9 @@ class TabularClassifier(nn.Module):
 
     Input features are a flat float vector where numerical columns are
     StandardScaler-normalized and categorical columns are one-hot encoded (OHE).
-    The network is: Dropout → Linear → ReLU → Dropout → Linear → ReLU → Linear.
+    The forward network is: ``(Linear → ReLU → Dropout) × depth → Linear``.
+    Modules retain the historical ``Dropout, Linear, ReLU`` registration order
+    so existing two-layer checkpoint keys remain loadable.
     The first Linear layer is lazy, so input dimensionality is inferred at
     runtime and can match either raw OHE features or PCA-projected features.
 
@@ -133,7 +198,7 @@ class TabularClassifier(nn.Module):
     cardinalities : list[int]
         Number of OHE categories for each categorical feature, in order.
         Length must equal the number of "categorical" entries in input_types.
-    hidden_dims : tuple[int, ...], optional
+    hidden_dims : sequence[int], optional
         Hidden layer dimensions (default: (64, 32)).
     num_classes : int, optional
         Number of output classes (default: 2).
@@ -143,8 +208,14 @@ class TabularClassifier(nn.Module):
 
     def __init__(self, input_types, cardinalities, hidden_dims=(64, 32), num_classes=2, dropout=0.0):
         super(TabularClassifier, self).__init__()
+        hidden_dims = tuple(int(dim) for dim in hidden_dims)
+        if not hidden_dims:
+            raise ValueError("hidden_dims must contain at least one hidden layer")
+        if any(dim <= 0 for dim in hidden_dims):
+            raise ValueError("hidden_dims entries must be positive")
         self.input_types = input_types
         self.cardinalities = list(cardinalities)
+        self.hidden_dims = hidden_dims
 
         # Precompute slice boundaries in the OHE feature vector.
         self._slices = []  # (start, end) per original column
@@ -164,15 +235,18 @@ class TabularClassifier(nn.Module):
         self._ohe_dim = pos
         self.embed_dim = pos
         self._input_dim_observed = None
-        self.net = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.LazyLinear(hidden_dims[0]),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dims[0], hidden_dims[1]),
-            nn.ReLU(),
-            nn.Linear(hidden_dims[1], num_classes),
-        )
+        layers = []
+        previous_dim = None
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Dropout(dropout))
+            if previous_dim is None:
+                layers.append(nn.LazyLinear(hidden_dim))
+            else:
+                layers.append(nn.Linear(previous_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            previous_dim = hidden_dim
+        layers.append(nn.Linear(previous_dim, num_classes))
+        self.net = nn.Sequential(*layers)
 
     def _resolved_input_dim(self):
         first_linear = self.net[1]
@@ -297,4 +371,11 @@ class TabularClassifier(nn.Module):
         """
         if self._input_dim_observed is None:
             self._input_dim_observed = int(x.shape[-1])
-        return self.net(x)
+        # Execute dropout after each hidden activation while keeping the module
+        # registration indices used by historical checkpoints.
+        for hidden_index in range(len(self.hidden_dims)):
+            dropout = self.net[3 * hidden_index]
+            linear = self.net[3 * hidden_index + 1]
+            relu = self.net[3 * hidden_index + 2]
+            x = dropout(relu(linear(x)))
+        return self.net[3 * len(self.hidden_dims)](x)

@@ -1,0 +1,164 @@
+seed: 42
+output: results/certcf_query_norm_ablation.parquet
+timeout_per_sample: 120
+
+resource_monitor:
+  enabled: true
+  interval_s: 1.0
+
+# Match the final paper benchmark exactly: cap test queries at 1,000 (using the
+# complete test split when it is smaller) and training support at 10,000 points
+# per class for every dataset.
+sampling:
+  n_queries: 1000
+  n_train_per_class: 10000
+
+# Isolate the query-distance norm. The certified atlas remains L1 in both
+# variants, while the L1-specific reweighted sparsity penalty is disabled in
+# both arms so it cannot confound the comparison.
+methods:
+  - name: certcf
+    run_name: certcf_query_l1_no_sparsity
+    params:
+      device: auto
+      lirpa_method: backward
+      norm: 1
+      distance_norm: 1
+      eps_alpha: 0.20
+      classification_margin: 1.0e-4
+      adaptive_eps: true
+      adaptive_eps_shrink_factor: 0.5
+      adaptive_eps_max_shrinks: 8
+      adaptive_eps_min: 1.0e-6
+      adaptive_eps_center_tol: 1.0e-6
+      adaptive_eps_binary_search_steps: 0
+      sparsity_penalty: none
+      sparsity_lambda: 0.0
+      sparsity_reweight_iters: 0
+      sparsity_eps: 1.0e-3
+      sparsity_group_ohe: true
+      batch_size: 128
+      query_method: nearest_anchor
+      query_k_candidates: 5
+      cvxpy_solvers: [CLARABEL]
+      cvxpy_solver_options:
+        CLARABEL:
+          max_iter: 100
+          tol_gap_abs: 1.0e-3
+          tol_gap_rel: 1.0e-5
+          tol_feas: 1.0e-8
+      cvxpy_accept_statuses:
+        CLARABEL: [optimal]
+      ohe_decode_mode: beam_then_exact
+      decode_beam_width: 8
+      decode_beam_branch_top_k: 3
+      decode_beam_max_solver_calls: 32
+
+  - name: certcf
+    run_name: certcf_query_l2_no_sparsity
+    params:
+      device: auto
+      lirpa_method: backward
+      norm: 1
+      distance_norm: 2
+      eps_alpha: 0.20
+      classification_margin: 1.0e-4
+      adaptive_eps: true
+      adaptive_eps_shrink_factor: 0.5
+      adaptive_eps_max_shrinks: 8
+      adaptive_eps_min: 1.0e-6
+      adaptive_eps_center_tol: 1.0e-6
+      adaptive_eps_binary_search_steps: 0
+      sparsity_penalty: none
+      sparsity_lambda: 0.0
+      sparsity_reweight_iters: 0
+      sparsity_eps: 1.0e-3
+      sparsity_group_ohe: true
+      batch_size: 128
+      query_method: nearest_anchor
+      query_k_candidates: 5
+      cvxpy_solvers: [CLARABEL]
+      cvxpy_solver_options:
+        CLARABEL:
+          max_iter: 100
+          tol_gap_abs: 1.0e-3
+          tol_gap_rel: 1.0e-5
+          tol_feas: 1.0e-8
+      cvxpy_accept_statuses:
+        CLARABEL: [optimal]
+      ohe_decode_mode: beam_then_exact
+      decode_beam_width: 8
+      decode_beam_branch_top_k: 3
+      decode_beam_max_solver_calls: 32
+
+datasets:
+  - name: adult
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/adult_classifier/best.ckpt
+        device: auto
+        dataset_module: adult
+        hidden_dims: [64, 32]
+        dropout: 0.2
+
+  - name: compas
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/compas_classifier/best.ckpt
+        device: auto
+        dataset_module: compas
+        hidden_dims: [64, 32]
+        dropout: 0.2
+
+  - name: german_credit
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/german_credit_classifier/best.ckpt
+        device: auto
+        dataset_module: german_credit
+        hidden_dims: [64, 32]
+        dropout: 0.2
+
+  - name: give_me_some_credit
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/give_me_some_credit_classifier/best.ckpt
+        device: auto
+        dataset_module: give_me_some_credit
+        hidden_dims: [64, 32]
+        dropout: 0.2
+
+  - name: heloc
+    dataset_params: {}
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/heloc_classifier/best.ckpt
+        device: auto
+        dataset_module: heloc
+        hidden_dims: [64, 32]
+        dropout: 0.2
+
+  - name: lending_club
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/lending_club_classifier/best.ckpt
+        device: auto
+        dataset_module: lending_club
+        hidden_dims: [64, 32]
+        dropout: 0.2
+
+  - name: wisconsin_breast_cancer
+    model:
+      name: tabular_classifier_ckpt
+      params:
+        checkpoint: checkpoints/wisconsin_breast_cancer_classifier/best.ckpt
+        device: auto
+        dataset_module: wisconsin_breast_cancer
+        hidden_dims: [64, 32]
+        dropout: 0.2

@@ -155,21 +155,11 @@ def _load_lit_checkpoint_resilient(lit_cls, checkpoint: str, backbone, map_locat
 def _infer_tabular_classifier_dims_from_checkpoint(checkpoint: str) -> tuple[list[int], int]:
     """Infer TabularClassifier hidden dims and class count from a checkpoint state dict."""
     import torch
+    from models.classifiers import infer_tabular_classifier_dims_from_state_dict
 
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state_dict = ckpt.get("state_dict", {})
-
-    hidden_1 = state_dict.get("model.net.4.weight")
-    output = state_dict.get("model.net.6.weight")
-    if hidden_1 is None or output is None:
-        raise KeyError(
-            "Could not infer tabular classifier dims from checkpoint: "
-            "expected model.net.4.weight and model.net.6.weight."
-        )
-
-    hidden_dims = [int(hidden_1.shape[1]), int(hidden_1.shape[0])]
-    num_classes = int(output.shape[0])
-    return hidden_dims, num_classes
+    return infer_tabular_classifier_dims_from_state_dict(state_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -843,14 +833,26 @@ def _build_query_tasks(
         y_orig = model.predict(x_test[query_indices])
         return query_indices, y_test[query_indices], y_orig, None
 
-    per_class = int(sampling_cfg.get("balanced_per_class", 10))
     target_policy = str(sampling_cfg.get("target_policy", "all_other_classes")).lower()
+    n_classes = int(model.predict_proba(x_test[:1]).shape[1])
+    total_query_limit = int(sampling_cfg["n_queries"]) if "n_queries" in sampling_cfg else None
+    if total_query_limit is not None and total_query_limit <= 0:
+        raise ValueError("sampling.n_queries must be positive")
+
+    per_class = int(sampling_cfg.get("balanced_per_class", 10))
+    if total_query_limit is not None:
+        n_source_classes = max(1, len(np.unique(y_test)))
+        tasks_per_source = max(1, n_classes - 1)
+        required_per_class = int(
+            np.ceil(total_query_limit / (n_source_classes * tasks_per_source))
+        )
+        per_class = max(per_class, required_per_class)
+
     source_indices = _sample_balanced_indices(y=y_test, per_class=per_class, rng=rng)
     if source_indices.size == 0:
         raise ValueError("No MNIST source queries were selected.")
 
     source_preds = model.predict(x_test[source_indices])
-    n_classes = int(model.predict_proba(x_test[source_indices[:1]]).shape[1])
     if target_policy != "all_other_classes":
         raise ValueError(
             "MNIST benchmark currently supports only sampling.target_policy='all_other_classes'."
@@ -869,6 +871,47 @@ def _build_query_tasks(
             task_orig.append(int(source_pred))
             task_targets.append(int(target_class))
 
+    if total_query_limit is not None:
+        if len(task_indices) < total_query_limit:
+            raise ValueError(
+                f"MNIST sampling produced only {len(task_indices)} source-target tasks, "
+                f"fewer than sampling.n_queries={total_query_limit}."
+            )
+
+        # Balance the final task budget across source classes. For 1,000 MNIST
+        # queries this selects exactly 100 tasks per source class.
+        task_true_array = np.asarray(task_true, dtype=np.int64)
+        source_classes = np.unique(task_true_array)
+        base_quota, remainder = divmod(total_query_limit, len(source_classes))
+        remainder_classes = set(
+            rng.choice(source_classes, size=remainder, replace=False).tolist()
+        )
+        selected_parts: List[np.ndarray] = []
+        for source_class in source_classes:
+            candidates = np.where(task_true_array == source_class)[0]
+            quota = base_quota + int(source_class in remainder_classes)
+            take = min(quota, len(candidates))
+            selected_parts.append(rng.choice(candidates, size=take, replace=False))
+
+        selected = np.concatenate(selected_parts)
+        if len(selected) < total_query_limit:
+            remaining = np.setdiff1d(
+                np.arange(len(task_indices), dtype=np.int64),
+                selected,
+                assume_unique=False,
+            )
+            extra = rng.choice(
+                remaining,
+                size=total_query_limit - len(selected),
+                replace=False,
+            )
+            selected = np.concatenate([selected, extra])
+        selected = np.sort(selected)
+        task_indices = np.asarray(task_indices, dtype=np.int64)[selected].tolist()
+        task_true = task_true_array[selected].tolist()
+        task_orig = np.asarray(task_orig, dtype=np.int64)[selected].tolist()
+        task_targets = np.asarray(task_targets, dtype=np.int64)[selected].tolist()
+
     return (
         np.asarray(task_indices, dtype=np.int64),
         np.asarray(task_true, dtype=np.int64),
@@ -880,6 +923,21 @@ def _build_query_tasks(
 # ---------------------------------------------------------------------------
 # CertCFAtlas builder
 # ---------------------------------------------------------------------------
+
+def _build_mnist_backbone(architecture: str | None = None, num_classes: int = 10):
+    """Construct the configured MNIST classifier, preserving the legacy default."""
+    from models.classifiers import LeNet5Classifier, MNISTClassifier
+
+    normalized = "mnist" if architecture is None else str(architecture).strip().lower()
+    if normalized in {"mnist", "default", "mnist_classifier"}:
+        return MNISTClassifier(num_classes=num_classes)
+    if normalized == "lenet5":
+        return LeNet5Classifier(num_classes=num_classes)
+    raise ValueError(
+        "Unsupported MNIST architecture "
+        f"{architecture!r}; expected one of {{'mnist', 'lenet5'}}."
+    )
+
 
 def _build_certcf_method(
     params: Dict[str, Any],
@@ -969,6 +1027,7 @@ def _build_certcf_method(
     cvxpy_solvers = deepcopy(params["cvxpy_solvers"]) if "cvxpy_solvers" in params else None
     cvxpy_solver_options = deepcopy(params["cvxpy_solver_options"]) if "cvxpy_solver_options" in params else None
     cvxpy_accept_statuses = deepcopy(params["cvxpy_accept_statuses"]) if "cvxpy_accept_statuses" in params else None
+    input_bounds = deepcopy(params["input_bounds"]) if "input_bounds" in params else None
     classification_margin = float(params.get("classification_margin", 0.0))
     adaptive_eps = bool(params.get("adaptive_eps", False))
     adaptive_eps_shrink_factor = float(params.get("adaptive_eps_shrink_factor", 0.5))
@@ -1013,10 +1072,12 @@ def _build_certcf_method(
     cat_slices = None
 
     if dataset_module == "mnist":
-        from models.classifiers import MNISTClassifier
-
         num_classes = int(model_params.get("num_classes", 10))
-        backbone = MNISTClassifier(num_classes=num_classes)
+        architecture = model_params.get("architecture")
+        backbone = _build_mnist_backbone(
+            architecture=architecture,
+            num_classes=num_classes,
+        )
         lit = _load_lit_checkpoint_resilient(LitClassifier, ckpt, backbone, map_location=device)
         model = lit.model.eval().to(device)
         atlas_model = TorchModelWrapper(model=model, device=device)
@@ -1088,6 +1149,8 @@ def _build_certcf_method(
         certcf_kwargs["cvxpy_solver_options"] = cvxpy_solver_options
     if cvxpy_accept_statuses is not None:
         certcf_kwargs["cvxpy_accept_statuses"] = cvxpy_accept_statuses
+    if input_bounds is not None:
+        certcf_kwargs["input_bounds"] = input_bounds
     if ohe_decode_mode is not None:
         certcf_kwargs["ohe_decode_mode"] = ohe_decode_mode
     if decode_beam_width is not None:
@@ -1173,10 +1236,10 @@ def _build_mnist_model_from_checkpoint(
     device: str = "cpu",
     num_classes: int = 10,
     input_shape: tuple[int, ...] | None = (1, 28, 28),
+    architecture: str | None = None,
 ) -> "TorchModelWrapper":
-    """Load MNISTClassifier from checkpoint and optionally wrap flat inputs."""
+    """Load a configured MNIST classifier and optionally wrap flat inputs."""
     from counterfactuals.models.torch_model import TorchModelWrapper
-    from models.classifiers import MNISTClassifier
     from training.lit_classifier import LitClassifier
 
     requested_device = device
@@ -1184,7 +1247,10 @@ def _build_mnist_model_from_checkpoint(
     if str(requested_device).strip().lower() != device:
         print(f"[INFO] model device normalized: {requested_device!r} -> {device!r}")
 
-    backbone = MNISTClassifier(num_classes=num_classes)
+    backbone = _build_mnist_backbone(
+        architecture=architecture,
+        num_classes=num_classes,
+    )
     lit = _load_lit_checkpoint_resilient(
         LitClassifier, checkpoint, backbone, map_location=device
     )
@@ -1199,6 +1265,7 @@ def _build_mnist_model_from_checkpoint(
 _NON_SWEEP_LIST_PARAMS_BY_METHOD: Dict[str, set[str]] = {
     "certcf": {
         "cvxpy_solvers",
+        "input_bounds",
         "immutable_features",
         "nondecreasing_features",
         "nonincreasing_features",
@@ -1483,12 +1550,18 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
         ckpt = _model_params.get("checkpoint")
         device = _model_params.get("device", "cpu")
         num_classes = int(_model_params.get("num_classes", 10))
-        print(f"[INFO] Loading MNISTClassifier from checkpoint: {ckpt}")
+        architecture = _model_params.get("architecture")
+        architecture_label = "mnist" if architecture is None else str(architecture)
+        print(
+            f"[INFO] Loading MNIST classifier ({architecture_label}) "
+            f"from checkpoint: {ckpt}"
+        )
         model = _build_mnist_model_from_checkpoint(
             ckpt,
             device=device,
             num_classes=num_classes,
             input_shape=(1, 28, 28),
+            architecture=architecture,
         )
         acc = float(np.mean(model.predict(x_train) == y_train))
         print(f"[INFO] Train accuracy: {acc:.3f}")

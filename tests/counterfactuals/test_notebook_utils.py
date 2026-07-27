@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -31,6 +32,20 @@ from notebooks.utils.io import (
     prepare_benchmark_df,
 )
 from notebooks.utils.manifoldness import load_tabular_manifold_resources
+from notebooks.utils.mnist import (
+    add_mnist_pixel_metrics,
+    attach_target_confidence,
+    cache_fingerprint,
+    clustered_bootstrap_ci,
+    evaluate_mnist_robustness,
+    extract_lenet5_embeddings,
+    load_or_compute_dataframe,
+    mnist_task_coverage_table,
+    predict_lenet5_logits,
+    relative_proximity_summary,
+    same_class_neighbor_metrics,
+    validate_mnist_benchmark_df,
+)
 from notebooks.utils.plots import (
     plot_conditioned_proximity_kdes,
     plot_proximity_kdes_by_dataset,
@@ -47,6 +62,7 @@ from notebooks.utils.summaries import (
     validity_proximity_curve,
     validity_summary,
 )
+from models.classifiers import LeNet5Classifier
 
 
 def _demo_df() -> pd.DataFrame:
@@ -69,6 +85,190 @@ def _demo_df() -> pd.DataFrame:
             "x_cf_0": [0.4, 0.6, 0.7, np.nan],
         }
     )
+
+
+def _mnist_demo_df() -> pd.DataFrame:
+    x_orig = np.zeros((2, 784), dtype=np.float32)
+    x_cf = x_orig.copy()
+    x_cf[0, :3] = [1.0 / 255.0, 0.02, 0.10]
+    x_cf[1, 0] = -5.0e-7
+    return pd.DataFrame(
+        {
+            "dataset": ["mnist", "mnist"],
+            "method": ["certcf", "certcf"],
+            "query_idx": [10, 10],
+            "source_class": [0, 0],
+            "target_class": [1, 2],
+            "y_true": [0, 0],
+            "y_cf": [1, 2],
+            "success": [True, True],
+            **{f"x_orig_{idx}": x_orig[:, idx] for idx in range(784)},
+            **{f"x_cf_{idx}": x_cf[:, idx] for idx in range(784)},
+        }
+    )
+
+
+def test_validate_mnist_benchmark_uses_source_target_task_identity():
+    df = _mnist_demo_df()
+
+    audit = validate_mnist_benchmark_df(df, expected_tasks=2)
+
+    assert audit["n_tasks"] == 2
+    assert audit["n_source_images"] == 1
+    assert audit["target_prediction_mismatches"] == 0
+    coverage = mnist_task_coverage_table(df)
+    assert int(coverage.loc[0, 1]) == 1
+    assert int(coverage.loc[0, 2]) == 1
+
+
+def test_validate_mnist_benchmark_rejects_duplicate_source_target_task():
+    df = pd.concat([_mnist_demo_df(), _mnist_demo_df().iloc[[0]]], ignore_index=True)
+
+    with np.testing.assert_raises_regex(ValueError, "duplicate source-target"):
+        validate_mnist_benchmark_df(df)
+
+
+def test_add_mnist_pixel_metrics_uses_image_thresholds_and_clipping():
+    enriched = add_mnist_pixel_metrics(_mnist_demo_df())
+
+    assert np.isclose(float(enriched.loc[0, "image_l1"]), 1 / 255 + 0.02 + 0.10)
+    assert int(enriched.loc[0, "image_l0_count_1_over_255"]) == 2
+    assert int(enriched.loc[0, "image_l0_count_0p01"]) == 2
+    assert int(enriched.loc[0, "image_l0_count_0p05"]) == 1
+    assert float(enriched.loc[1, "image_l1"]) == 0.0
+    assert int(enriched.loc[1, "cf_out_of_bounds_pixels"]) == 0
+
+
+def test_clustered_bootstrap_resamples_complete_source_images():
+    stats = clustered_bootstrap_ci(
+        values=np.array([0.0, 0.0, 10.0]),
+        clusters=np.array([1, 1, 2]),
+        n_resamples=2_000,
+        seed=7,
+    )
+
+    assert stats["n"] == 3
+    assert stats["n_clusters"] == 2
+    assert np.isclose(float(stats["estimate"]), 10.0 / 3.0)
+    assert float(stats["ci_low"]) <= float(stats["estimate"]) <= float(stats["ci_high"])
+
+
+def test_clustered_metric_summary_accepts_boolean_metrics():
+    from notebooks.utils.mnist import clustered_metric_summary
+
+    summary = clustered_metric_summary(
+        pd.DataFrame(
+            {
+                "query_idx": [1, 1, 2],
+                "exact_hit": [False, True, False],
+            }
+        ),
+        ["exact_hit"],
+        n_resamples=50,
+    )
+
+    assert np.isclose(float(summary.loc[0, "estimate"]), 1.0 / 3.0)
+    assert np.isfinite(float(summary.loc[0, "q25"]))
+
+
+def test_lenet5_embedding_matches_final_classifier_input():
+    torch.manual_seed(0)
+    model = LeNet5Classifier().eval()
+    x = np.random.default_rng(0).random((3, 784), dtype=np.float32)
+
+    embedding = extract_lenet5_embeddings(model, x, batch_size=2)
+    logits = predict_lenet5_logits(model, x, batch_size=2)
+    with torch.no_grad():
+        reconstructed = model.classifier[-1](torch.from_numpy(embedding)).numpy()
+
+    assert embedding.shape == (3, 84)
+    assert logits.shape == (3, 10)
+    np.testing.assert_allclose(reconstructed, logits, rtol=1e-5, atol=1e-6)
+
+
+def test_attach_target_confidence_computes_margin_against_best_other():
+    df = pd.DataFrame({"target_class": [1, 0]})
+    logits = np.array([[0.0, 2.0, 1.0], [3.0, 2.0, 0.0]], dtype=np.float32)
+
+    out = attach_target_confidence(df, logits)
+
+    np.testing.assert_allclose(out["target_logit_margin"], [1.0, 1.0])
+    assert (out["analysis_prediction"].to_numpy() == np.array([1, 0])).all()
+    assert ((out["target_confidence"] > 0) & (out["target_confidence"] < 1)).all()
+
+
+def test_mnist_robustness_clips_and_is_reproducible_for_constant_model():
+    model = LeNet5Classifier().eval()
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+        model.classifier[-1].bias[0] = 1.0
+    x_cf = np.zeros((2, 784), dtype=np.float32)
+    kwargs = dict(
+        model=model,
+        x_cf=x_cf,
+        targets=np.zeros(2, dtype=np.int64),
+        query_idx=np.array([3, 4]),
+        perturbation="gaussian",
+        levels=[0.0, 0.1],
+        n_samples=3,
+        seed=5,
+        query_batch_size=1,
+    )
+
+    first = evaluate_mnist_robustness(**kwargs)
+    second = evaluate_mnist_robustness(**kwargs)
+
+    pd.testing.assert_frame_equal(first, second)
+    assert len(first) == 4
+    assert first["all_preserved"].all()
+    assert np.allclose(first["preservation_rate"], 1.0)
+
+
+def test_same_class_neighbor_metrics_excludes_train_self_neighbor():
+    x_train = np.array([[0.0], [1.0], [10.0], [12.0]], dtype=np.float32)
+    y_train = np.array([0, 0, 1, 1])
+    x_cf = np.array([[0.1], [11.0]], dtype=np.float32)
+    targets = np.array([0, 1])
+
+    reference, cf_metrics = same_class_neighbor_metrics(
+        x_train, y_train, x_cf, targets, metric="euclidean"
+    )
+    summary = relative_proximity_summary(reference, cf_metrics)
+
+    np.testing.assert_allclose(
+        reference.sort_values(["class_label", "same_class_train_d1"])[
+            "same_class_train_d1"
+        ],
+        [1.0, 1.0, 2.0, 2.0],
+    )
+    np.testing.assert_allclose(cf_metrics["same_class_d1"], [0.1, 1.0])
+    assert 0.0 < summary["rpr_pooled"] < 1.0
+
+
+def test_dataframe_cache_hits_and_invalidates(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("v1")
+    cache = tmp_path / "metric.parquet"
+    calls = {"count": 0}
+
+    def compute():
+        calls["count"] += 1
+        return pd.DataFrame({"value": [calls["count"]]})
+
+    first_fingerprint = cache_fingerprint([source], settings={"metric": 1})
+    first, first_hit = load_or_compute_dataframe(cache, first_fingerprint, compute)
+    second, second_hit = load_or_compute_dataframe(cache, first_fingerprint, compute)
+    source.write_text("v2")
+    second_fingerprint = cache_fingerprint([source], settings={"metric": 1})
+    third, third_hit = load_or_compute_dataframe(cache, second_fingerprint, compute)
+
+    assert first_hit is False
+    assert second_hit is True
+    assert third_hit is False
+    assert calls["count"] == 2
+    assert int(first.loc[0, "value"]) == int(second.loc[0, "value"]) == 1
+    assert int(third.loc[0, "value"]) == 2
 
 
 def test_normalize_benchmark_df_adds_standard_columns():

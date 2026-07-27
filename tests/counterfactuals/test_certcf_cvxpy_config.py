@@ -44,6 +44,7 @@ def _manual_cvxpy_atlas() -> CertCFAtlas:
     atlas.sparsity_reweight_iters = 0
     atlas.sparsity_eps = 1.0e-3
     atlas.sparsity_group_ohe = True
+    atlas.input_bounds = None
     return atlas
 
 
@@ -78,6 +79,7 @@ def test_certcf_defaults_cvxpy_solver_config():
     assert method.sparsity_reweight_iters == 0
     assert method.sparsity_eps == 1.0e-3
     assert method.sparsity_group_ohe is True
+    assert method.input_bounds is None
 
 
 def test_certcf_normalizes_fixed_dims():
@@ -173,6 +175,52 @@ def test_atlas_direct_constructor_defaults_cvxpy_solver_config():
     assert atlas.sparsity_reweight_iters == 0
     assert atlas.sparsity_eps == 1.0e-3
     assert atlas.sparsity_group_ohe is True
+    assert atlas.input_bounds is None
+
+
+def test_certcf_normalizes_and_validates_input_bounds():
+    method = CertCF(model=object(), input_bounds=[0, 1])
+
+    assert method.input_bounds == (0.0, 1.0)
+
+    with pytest.raises(ValueError, match="exactly two"):
+        CertCF(model=object(), input_bounds=[0.0])
+    with pytest.raises(ValueError, match="must not exceed"):
+        CertCF(model=object(), input_bounds=[1.0, 0.0])
+    with pytest.raises(ValueError, match="finite"):
+        CertCFAtlas(
+            _tiny_model(),
+            _tiny_dataset(),
+            device="cpu",
+            input_bounds=[0.0, np.inf],
+        )
+
+
+def test_certcf_fit_forwards_input_bounds_to_atlas(monkeypatch):
+    init_calls = []
+
+    class TinyTorchModel:
+        def __init__(self):
+            self.model = _tiny_model()
+            self.device = "cpu"
+
+    class FakeAtlas:
+        def __init__(self, *args, **kwargs):
+            del args
+            init_calls.append(kwargs)
+
+        def build(self):
+            return self
+
+    method = CertCF(model=TinyTorchModel(), input_bounds=[0.0, 1.0])
+    monkeypatch.setattr("counterfactuals.methods.certcf.CertCFAtlas", FakeAtlas)
+
+    method.fit(
+        np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32),
+        np.array([0, 1], dtype=np.int64),
+    )
+
+    assert init_calls[0]["input_bounds"] == (0.0, 1.0)
 
 
 def test_certcf_rejects_negative_classification_margin():
@@ -524,6 +572,27 @@ def test_project_cvxpy_weighted_group_l1_changes_objective():
     assert x_proj[0] <= 1e-4
     assert x_proj[1] == pytest.approx(1.0, abs=1e-4)
     assert np.isfinite(profile["sparsity_selection_score"])
+
+
+@pytest.mark.skipif(not CVXPY_AVAILABLE, reason="CVXPY is required to exercise input bounds.")
+def test_project_cvxpy_respects_input_bounds():
+    atlas = _manual_cvxpy_atlas()
+    atlas.input_bounds = (0.0, 1.0)
+
+    x_proj, dist, _ = atlas._project_cvxpy(
+        x0=np.array([2.0, -1.0], dtype=np.float64),
+        A_full=np.zeros((1, 2), dtype=np.float64),
+        b_full=np.ones(1, dtype=np.float64),
+        center=np.array([0.5, 0.5], dtype=np.float64),
+        box_eps=3.0,
+        ball_eps=3.0,
+    )
+
+    assert x_proj is not None
+    assert np.all(x_proj >= -1e-6)
+    assert np.all(x_proj <= 1.0 + 1e-6)
+    assert x_proj == pytest.approx(np.array([1.0, 0.0]), abs=1e-5)
+    assert dist == pytest.approx(np.sqrt(2.0), abs=1e-5)
 
 
 @pytest.mark.skipif(not CVXPY_AVAILABLE, reason="CVXPY is required to exercise directional projection constraints.")
