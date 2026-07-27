@@ -4,6 +4,22 @@ Executable entrypoints for training classifiers and running counterfactual bench
 
 Run scripts from the repository root so relative config, checkpoint, data, and result paths resolve correctly.
 
+The network-complexity grid has a resumable staged runner:
+
+```bash
+python scripts/network_complexity_grid.py all \
+  --config configs/experiments/network_complexity_grid.yaml
+```
+
+It also exposes `prepare`, `train`, `benchmark`, `analyze`, and `status`.
+`--architectures depth_01_width_016 ...` selects endpoint pilots or targeted
+recovery; resume requires matching configuration fingerprints and checkpoint
+hashes.
+
+The `all` stage finishes training and accuracy-gating all 25 classifiers before
+starting any CertCF atlas construction or query benchmark. For separate jobs,
+run `train`, then `benchmark`, then `analyze`.
+
 ## Main Entrypoints
 
 | Script | Purpose | Typical command |

@@ -2,6 +2,10 @@
 
 Paper-facing notebooks for CertCF.
 
+- `NetworkComplexityScaling.ipynb` validates and analyzes the 25-cell ReLU MLP
+  scaling grid, including tables, heatmaps, resource scaling, marginal trends,
+  and explicit failure reporting.
+
 ## Current Layout
 
 - `Results.ipynb`
@@ -10,6 +14,14 @@ Paper-facing notebooks for CertCF.
   Compact appendix notebook. It collects the paper appendix tables and plots for hyperparameters, robustness, computational cost, CertCF ablations, and LiRPA backend diagnostics.
 - `DatasetMetrics.ipynb`
   Per-dataset appendix metrics notebook. It recomputes the non-aggregated tables requested for the appendix, with one row per dataset and method.
+- `MNISTMetrics.ipynb`
+  Dedicated analysis for the MNIST LeNet-5 CertCF run. It reports multiclass
+  task coverage, image-domain quality, empirical robustness, full-training-set
+  plausibility/privacy diagnostics, CertCF timings, and qualitative examples.
+- `NormAblation.ipynb`
+  Reviewer-facing paired analysis of the L1-vs-L2 CertCF query-objective
+  ablation. It reads per-dataset progress safely while the benchmark runs and
+  emits final tables only after all seven matched comparisons are complete.
 - `utils/`
   Shared plotting and dataframe helpers for benchmark analysis notebooks.
 

@@ -1,14 +1,44 @@
 # Benchmark Configuration
 
-This directory intentionally contains a single benchmark YAML:
+This directory contains the final tabular benchmark and a separate MNIST
+reproducibility experiment:
 
 - `final_benchmark.yaml` — the paper benchmark over all seven tabular datasets, with CertCF, Nearest Neighbor, Growing Spheres, DiCE, and FACE.
+- `certcf_query_norm_ablation.yaml` — the reviewer ablation comparing L1 and L2 CertCF query objectives on the same seven datasets and paper-standard sample sizes, without the L1-specific sparsity penalty.
+- `mnist_certcf_lenet5.yaml` — a small CertCF-only MNIST run against a trained LeNet-5 classifier.
 
 Run it with:
 
 ```bash
 python scripts/benchmark.py --config configs/benchmarks/final_benchmark.yaml
 ```
+
+The MNIST smoke benchmark can be run after training its classifier:
+
+```bash
+python scripts/benchmark.py \
+  --config configs/benchmarks/mnist_certcf_lenet5.yaml \
+  --force
+```
+
+It writes `results/mnist_certcf_lenet5.parquet` and leaves the final tabular
+benchmark configuration unchanged.
+
+The CertCF query-norm ablation uses the same seed, query cap of 1,000 per
+dataset, 10,000 training points per class, checkpoints, atlas geometry, and
+solver settings as the final paper benchmark. As in the paper runner, datasets
+with smaller test splits use all available test points (617 COMPAS, 100 German
+Credit, and 56 Wisconsin Breast Cancer):
+
+```bash
+python scripts/benchmark.py \
+  --config configs/benchmarks/certcf_query_norm_ablation.yaml \
+  --force
+```
+
+It writes `results/certcf_query_norm_ablation.parquet` plus one per-dataset
+parquet. Both variants disable reweighted-L1 sparsity so that only
+`distance_norm` differs.
 
 Useful overrides:
 
