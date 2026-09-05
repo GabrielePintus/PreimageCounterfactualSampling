@@ -8,7 +8,6 @@ Core implementation of CertCF: certified preimage construction, certified-polyto
 - `eps_strategies.py`: support-radius policies, including nearest-opposite-class clearance.
 - `certification/`: auto_LiRPA/CROWN bound computation and preimage approximation helpers.
 - `geometry/`: halfspace, Lp-ball, polygon, and projection utilities.
-- `indexing/`: BVH spatial index implementation retained for exhaustive/search variants.
 - `sampling/`: lower-level projection sampler utilities.
 - `visualization/`: plotting helpers for 2D certification diagnostics.
 

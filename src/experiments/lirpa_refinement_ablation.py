@@ -29,7 +29,6 @@ from sklearn.neighbors import LocalOutlierFactor
 from torch.utils.data import TensorDataset
 
 from certcf import CertCFAtlas, NearestOppositeClassClearanceStrategy
-from certcf.indexing.bvh import BVHIndex
 from counterfactuals.benchmarks.registry import create_default_registries
 from counterfactuals.methods.certcf import CertCF
 from counterfactuals.models.torch_model import TorchModelWrapper
@@ -1091,7 +1090,6 @@ class LiRPARefinementAblationRunner:
             sparsity_penalty="none",
         )
         atlas.bounds = bounds
-        atlas.bvh_indices = {label: BVHIndex(value["X"], value["eps"]) for label, value in bounds.items()}
         method = self._make_certcf(case, model, geometry, device)
         method.atlas = atlas
         method._is_fitted = True

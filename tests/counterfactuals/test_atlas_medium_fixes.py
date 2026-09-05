@@ -63,32 +63,6 @@ class ConstantPredictionTorchModel:
         self.device = "cpu"
 
 
-class _DummyBVH:
-    def __init__(self, x_cf: np.ndarray):
-        self.n_polytopes = 1
-        self.tree_depth = 1
-        self._x_cf = np.asarray(x_cf, dtype=np.float64)
-
-    def query_sorted_lower_bounds(self, x_query, eps_array, project_fn, distance_norm, stats_out):
-        stats_out["n_candidates_considered"] = 1
-        stats_out["n_candidates_total"] = 1
-        stats_out["n_candidates_pruned_by_bound"] = 0
-        stats_out["best_lower_bound_at_termination"] = 0.0
-        return self._x_cf.copy(), 0.0, 0, 0
-
-    def query_nearest(self, x_query, project_fn, distance_norm, stats_out):
-        stats_out["n_nodes_popped"] = 1
-        stats_out["n_nodes_pruned"] = 0
-        stats_out["n_leaves_visited"] = 1
-        stats_out["max_queue_size"] = 1
-        stats_out["n_candidates_considered"] = 1
-        return self._x_cf.copy(), 0.0, 0, 0
-
-    def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
-        del x_query, distance_norm
-        return [0][:int(k)]
-
-
 def _manual_atlas(
     *,
     centers_by_label: dict[int, np.ndarray] | None = None,
@@ -139,9 +113,6 @@ def _manual_atlas(
             "eps": np.full(n_anchors, eps, dtype=np.float64),
         }
     atlas.bounds = bounds
-    atlas.bvh_indices = {
-        label: _DummyBVH(centers[0]) for label, centers in centers_by_label.items()
-    }
     return atlas
 
 
@@ -873,7 +844,12 @@ def test_find_counterfactual_supports_non_contiguous_target_labels():
 
     assert result.success is True
     assert result.target_class == 5
-    assert np.allclose(result.x_cf, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+    assert result.anchor_idx == 0
+    assert np.allclose(
+        result.x_cf,
+        np.array([0.2, 0.8, 0.0], dtype=np.float64),
+        atol=1.0e-7,
+    )
 
 
 def test_find_counterfactual_nearest_anchor_limits_projection_budget(monkeypatch):
@@ -891,16 +867,6 @@ def test_find_counterfactual_nearest_anchor_limits_projection_budget(monkeypatch
         }
     )
 
-    class FakeCandidateIndex:
-        n_polytopes = 3
-
-        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
-            assert np.allclose(x_query, np.array([0.2, 0.8, 0.0], dtype=np.float32))
-            assert k == 3
-            assert distance_norm == 2
-            return [2, 0, 1]
-
-    atlas.bvh_indices[5] = FakeCandidateIndex()
     calls = []
 
     def fake_make_project_fn(x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
@@ -928,7 +894,7 @@ def test_find_counterfactual_nearest_anchor_limits_projection_budget(monkeypatch
     assert result.anchor_idx == 0
     assert result.n_qp_solved == 2
     assert np.isclose(result.distance, np.linalg.norm(np.array([0.0, 1.0, 0.0]) - np.array([0.2, 0.8, 0.0])))
-    assert [idx for idx, _ in calls] == [2, 0]
+    assert [idx for idx, _ in calls] == [0, 2]
     assert result.profiling["method"] == "nearest_anchor"
     assert result.profiling["query_k_candidates"] == 2.0
     assert result.profiling["n_candidates_total"] == 3.0
@@ -959,15 +925,6 @@ def test_find_counterfactual_nearest_anchor_falls_back_after_topk_failure(monkey
         }
     )
 
-    class FakeCandidateIndex:
-        n_polytopes = 3
-
-        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
-            del x_query, distance_norm
-            assert k == 3
-            return [2, 0, 1]
-
-    atlas.bvh_indices[5] = FakeCandidateIndex()
     calls = []
 
     def fake_make_project_fn(x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
@@ -996,7 +953,7 @@ def test_find_counterfactual_nearest_anchor_falls_back_after_topk_failure(monkey
     assert result.anchor_idx == 0
     assert result.n_qp_solved == 2
     assert np.isclose(result.distance, np.linalg.norm(np.array([0.0, 1.0, 0.0]) - np.array([0.2, 0.8, 0.0])))
-    assert [idx for idx, _ in calls] == [2, 0]
+    assert [idx for idx, _ in calls] == [0, 2]
     assert result.profiling["nearest_anchor_fallback_used"] == 0.0
     assert result.profiling["n_candidates_considered"] == 2.0
     assert result.profiling["n_candidates_pruned_by_top_k"] == 1.0
@@ -1022,15 +979,6 @@ def test_find_counterfactual_parallelizes_topk_candidates_and_preserves_order(mo
         }
     )
 
-    class FakeCandidateIndex:
-        n_polytopes = 4
-
-        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
-            del x_query, distance_norm
-            assert k == 4
-            return [0, 1, 2, 3]
-
-    atlas.bvh_indices[5] = FakeCandidateIndex()
     monkeypatch.setattr(
         atlas,
         "_anchor_bbox_lower_bounds",
@@ -1116,15 +1064,6 @@ def test_find_counterfactual_nearest_anchor_skips_uncertified_anchor(monkeypatch
         eps=0.0,
     )
 
-    class FakeCandidateIndex:
-        n_polytopes = 3
-
-        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
-            del x_query, distance_norm
-            assert k == 3
-            return [2, 0, 1]
-
-    atlas.bvh_indices[5] = FakeCandidateIndex()
     calls = []
 
     def fake_make_project_fn(x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
@@ -1184,15 +1123,6 @@ def test_find_counterfactual_nearest_anchor_does_not_return_uncertified_anchor(m
         eps=0.0,
     )
 
-    class FakeCandidateIndex:
-        n_polytopes = 3
-
-        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
-            del x_query, distance_norm
-            assert k == 3
-            return [2, 0, 1]
-
-    atlas.bvh_indices[5] = FakeCandidateIndex()
     calls = []
 
     def fake_make_project_fn(x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims):
@@ -1220,7 +1150,7 @@ def test_find_counterfactual_nearest_anchor_does_not_return_uncertified_anchor(m
     assert result.success is True
     assert result.anchor_idx == 1
     assert result.n_qp_solved == 3
-    assert [idx for idx, _ in calls] == [2, 0, 1]
+    assert [idx for idx, _ in calls] == [0, 2, 1]
     assert np.isclose(result.distance, 4.0)
     assert result.profiling["n_candidates_considered"] == 3.0
     assert result.profiling["n_candidates_pruned_by_bound"] == 0.0

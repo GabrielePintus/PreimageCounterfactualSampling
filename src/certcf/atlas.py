@@ -4,7 +4,6 @@ CertCFAtlas: High-level API for certified counterfactual generation.
 This module provides a simple, user-friendly interface that combines:
 - LiRPA bound propagation for preimage certification
 - Polytope construction and union operations
-- BVH spatial indexing for efficient queries
 - QP-based counterfactual projection
 
 Example usage:
@@ -43,7 +42,6 @@ from .certification.lirpa import PreimageApproximation
 from .eps_strategies import EpsStrategy, ConstantEpsStrategy
 from .geometry.polytopes import ball_box_constraints
 from .geometry.operations import build_class_union, assert_no_cross_class_overlap
-from .indexing.bvh import BVHIndex
 
 
 _EXACT_ENUM_PRODUCT_THRESHOLD = 4096
@@ -152,8 +150,6 @@ class CertCFAtlas:
     bounds : dict or None
         LiRPA bounds for each class (after calling build()).
         Each entry contains an 'eps' key with per-sample epsilon values.
-    bvh_indices : dict or None
-        BVH spatial indices for each class (after calling build()).
     eps_strategy : EpsStrategy or None
         The strategy used to compute per-sample epsilon (after calling build()).
     norm : int or None
@@ -300,7 +296,7 @@ class CertCFAtlas:
             distance_norm=self.distance_norm,
         )
 
-        allowed_methods = {"sorted", "bvh", "nearest_anchor"}
+        allowed_methods = {"sorted", "nearest_anchor"}
         if default_query_method not in allowed_methods:
             raise ValueError(
                 f"default_query_method must be one of {allowed_methods}, got {default_query_method!r}"
@@ -334,8 +330,6 @@ class CertCFAtlas:
 
         # These are populated by build()
         self.bounds: Optional[Dict] = None
-        self.bvh_indices: Optional[Dict[int, BVHIndex]] = None
-
         # Optional: Shapely polygon unions (only for 2D visualization)
         self._class_unions: Optional[Dict] = None
 
@@ -546,7 +540,7 @@ class CertCFAtlas:
         return lower, upper
 
     def build(self, build_unions: bool = False, verbose: bool = True) -> 'CertCFAtlas':
-        """Compute LiRPA bounds and build BVH spatial indices from the dataset."""
+        """Compute LiRPA bounds and build the certified atlas."""
         # Resolve eps strategy
         eps_strategy = self.eps_strategy
         if eps_strategy is None:
@@ -647,26 +641,9 @@ class CertCFAtlas:
             if len(class_bounds["X"]) == 0:
                 raise RuntimeError(f"No certified atlas anchors remain for class {label}")
 
-        # Step 2: Build BVH spatial index for each class
-        if verbose:
-            print("  Building BVH spatial indices...")
-
-        bvh_started = time.perf_counter()
-        self.bvh_indices = {}
-        for label in self.class_labels:
-            centers = self.bounds[label]['X']
-            eps_class = self.bounds[label]['eps']
-            self.bvh_indices[label] = BVHIndex(centers, eps_class)
-
-            if verbose:
-                bvh = self.bvh_indices[label]
-                print(f"    Class {label}: {bvh.n_polytopes} polytopes, "
-                      f"tree depth {bvh.tree_depth}")
-        bvh_time_s = time.perf_counter() - bvh_started
         self.build_profiling = {
             "epsilon_time_s": float(epsilon_time_s),
             "lirpa_time_s": float(lirpa_time_s),
-            "bvh_time_s": float(bvh_time_s),
             "epsilon_parallelism": int(self.epsilon_parallelism),
             "build_parallelism": int(self.build_parallelism),
             "lirpa_workers_used": int(
@@ -674,7 +651,7 @@ class CertCFAtlas:
             ),
         }
 
-        # Step 3: Optionally build polygon unions (for 2D visualization)
+        # Optionally build polygon unions (for 2D visualization)
         if build_unions:
             first_label = self.class_labels[0]
             if self.bounds[first_label]['X'].shape[1] != 2:
@@ -691,7 +668,7 @@ class CertCFAtlas:
 
         if verbose:
             total_polytopes = sum(
-                self.bvh_indices[l].n_polytopes for l in self.class_labels
+                len(self.bounds[label]["X"]) for label in self.class_labels
             )
             print(f"Done! Total: {total_polytopes} polytopes across {self.n_classes} classes")
 
@@ -731,7 +708,7 @@ class CertCFAtlas:
         return target
 
     def load_bounds(self, directory: Union[str, Path]) -> 'CertCFAtlas':
-        """Load bounds saved by :meth:`save_bounds` and rebuild BVH indices."""
+        """Load numeric atlas bounds saved by :meth:`save_bounds`."""
         root = Path(directory)
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         labels = [int(label) for label in manifest["class_labels"]]
@@ -741,13 +718,9 @@ class CertCFAtlas:
         if expected_shape != tuple(self.model_input_shape):
             raise ValueError("Serialized atlas input shape does not match")
         self.bounds = {}
-        self.bvh_indices = {}
         for label in labels:
             with np.load(root / manifest["files"][str(label)], allow_pickle=False) as data:
                 self.bounds[label] = {key: data[key] for key in data.files}
-            centers = self.bounds[label]["X"]
-            eps = self.bounds[label]["eps"]
-            self.bvh_indices[label] = BVHIndex(centers, eps)
         return self
 
     @staticmethod
@@ -2555,48 +2528,10 @@ class CertCFAtlas:
             nonincreasing_dims,
         )
 
-    def _search_bvh(
-        self,
-        x_query,
-        bd,
-        target_class,
-        delta,
-        robust_norm,
-        solver_maxiter,
-        fixed_dims,
-        nondecreasing_dims=None,
-        nonincreasing_dims=None,
-    ):
-        """Branch-and-bound BVH search. Returns (x_cf, dist, anchor_idx, n_qp, profiling_dict)."""
-        project_fn, projection_time_s, best_decode_profile = self._make_project_fn_for_constraints(
-            x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims,
-            nondecreasing_dims, nonincreasing_dims)
-        bvh_stats: Dict[str, float] = {}
-        bvh = self.bvh_indices[target_class]
-        t0 = time.perf_counter()
-        x_cf, dist, anchor_idx, n_qp = bvh.query_nearest(
-            x_query, project_fn, distance_norm=self.distance_norm, stats_out=bvh_stats
-        )
-        query_loop_time_s = time.perf_counter() - t0
-        profiling = {
-            "query_loop_time_ms": 1e3 * query_loop_time_s,
-            "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_time_s[0]),
-            "projection_time_ms": 1e3 * projection_time_s[0],
-            "distance_norm": float(self.distance_norm) if self.distance_norm == np.inf else int(self.distance_norm),
-            "n_nodes_popped": bvh_stats.get("n_nodes_popped", np.nan),
-            "n_nodes_pruned": bvh_stats.get("n_nodes_pruned", np.nan),
-            "n_leaves_visited": bvh_stats.get("n_leaves_visited", np.nan),
-            "max_queue_size": bvh_stats.get("max_queue_size", np.nan),
-            "n_candidates_considered": bvh_stats.get("n_candidates_considered", np.nan),
-        }
-        profiling.update(best_decode_profile[0])
-        return x_cf, dist, anchor_idx, n_qp, profiling
-
     def _search_sorted(
         self,
         x_query,
         bd,
-        target_class,
         delta,
         robust_norm,
         solver_maxiter,
@@ -2608,24 +2543,44 @@ class CertCFAtlas:
         project_fn, projection_time_s, best_decode_profile = self._make_project_fn_for_constraints(
             x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims,
             nondecreasing_dims, nonincreasing_dims)
-        sorted_stats: Dict[str, float] = {}
-        bvh = self.bvh_indices[target_class]
         t0 = time.perf_counter()
-        x_cf, dist, anchor_idx, n_qp = bvh.query_sorted_lower_bounds(
-            x_query, eps_array=bd['eps'], project_fn=project_fn,
-            distance_norm=self.distance_norm,
-            stats_out=sorted_stats,
+        lower_bounds = self._anchor_bbox_lower_bounds(
+            np.asarray(x_query),
+            np.asarray(bd["X"]),
+            np.asarray(bd["eps"]),
+            self.distance_norm,
         )
+        sorted_indices = np.argsort(lower_bounds)
+        x_cf: Optional[np.ndarray] = None
+        dist = np.inf
+        anchor_idx: Optional[int] = None
+        n_qp = 0
+        best_lower_bound_at_termination = np.inf
+
+        for raw_index in sorted_indices:
+            index = int(raw_index)
+            if lower_bounds[index] >= dist:
+                best_lower_bound_at_termination = float(lower_bounds[index])
+                break
+            point, candidate_distance = project_fn(index, dist)
+            n_qp += 1
+            if candidate_distance < dist:
+                x_cf = point
+                dist = candidate_distance
+                anchor_idx = index
+
+        n_candidates_total = len(sorted_indices)
+        n_pruned_by_bound = n_candidates_total - n_qp
         query_loop_time_s = time.perf_counter() - t0
         profiling = {
             "query_loop_time_ms": 1e3 * query_loop_time_s,
             "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_time_s[0]),
             "projection_time_ms": 1e3 * projection_time_s[0],
             "distance_norm": float(self.distance_norm) if self.distance_norm == np.inf else int(self.distance_norm),
-            "n_candidates_considered": sorted_stats.get("n_candidates_considered", np.nan),
-            "n_candidates_total": sorted_stats.get("n_candidates_total", np.nan),
-            "n_candidates_pruned_by_bound": sorted_stats.get("n_candidates_pruned_by_bound", np.nan),
-            "best_lower_bound_at_termination": sorted_stats.get("best_lower_bound_at_termination", np.nan),
+            "n_candidates_considered": float(n_qp),
+            "n_candidates_total": float(n_candidates_total),
+            "n_candidates_pruned_by_bound": float(n_pruned_by_bound),
+            "best_lower_bound_at_termination": float(best_lower_bound_at_termination),
         }
         profiling.update(best_decode_profile[0])
         return x_cf, dist, anchor_idx, n_qp, profiling
@@ -2655,39 +2610,48 @@ class CertCFAtlas:
         project_fn, projection_time_s, best_decode_profile = self._make_project_fn_for_constraints(
             x_query, bd, delta, robust_norm, solver_maxiter, fixed_dims,
             nondecreasing_dims, nonincreasing_dims)
-        bvh = self.bvh_indices[target_class]
         k = int(query_k_candidates)
         if k <= 0:
             raise ValueError("query_k_candidates must be positive for method='nearest_anchor'.")
 
         t0 = time.perf_counter()
-        sorted_candidate_indices = bvh.query_k_nearest_candidates(
-            x_query,
-            k=bvh.n_polytopes,
-            distance_norm=self.distance_norm,
+        raw_centers = np.asarray(bd["X"])
+        raw_difference = raw_centers - np.asarray(x_query)[None, :]
+        if self.distance_norm == 1:
+            candidate_distances = np.sum(np.abs(raw_difference), axis=1)
+        elif self.distance_norm == np.inf:
+            candidate_distances = np.max(np.abs(raw_difference), axis=1)
+        else:
+            candidate_distances = np.linalg.norm(
+                raw_difference,
+                ord=self.distance_norm,
+                axis=1,
+            )
+        sorted_candidate_indices = np.argsort(candidate_distances)
+
+        centers = np.asarray(raw_centers, dtype=np.float64)
+        n_polytopes = len(centers)
+        anchor_distances = np.linalg.norm(
+            centers - np.asarray(x_query, dtype=np.float64)[None, :],
+            ord=self.distance_norm,
+            axis=1,
         )
         lower_bounds = self._anchor_bbox_lower_bounds(
             np.asarray(x_query, dtype=np.float64),
-            np.asarray(bd["X"], dtype=np.float64),
+            centers,
             np.asarray(bd["eps"], dtype=np.float64),
             self.distance_norm,
         )
         primary_indices = sorted_candidate_indices[:k]
         fallback_indices = sorted_candidate_indices[k:]
 
-        centers = np.asarray(bd["X"], dtype=np.float64)
-        anchor_distances = np.linalg.norm(
-            centers - np.asarray(x_query, dtype=np.float64)[None, :],
-            ord=self.distance_norm,
-            axis=1,
-        )
         nearest_anchor_candidate_idx: Optional[int] = None
         nearest_anchor_candidate_dist = np.inf
         nearest_anchor_candidate_certified = False
         nearest_anchor_idx: Optional[int] = None
         nearest_anchor_dist = np.inf
         membership_robust_norm = self.norm if robust_norm is None else robust_norm
-        for candidate_idx in np.argsort(anchor_distances):
+        for candidate_idx in sorted_candidate_indices:
             candidate_idx = int(candidate_idx)
             if fixed_dims is not None and len(fixed_dims) > 0:
                 if not np.allclose(centers[candidate_idx][fixed_dims], x_query[fixed_dims], atol=1e-6):
@@ -2948,8 +2912,8 @@ class CertCFAtlas:
             "candidate_parent_refinement_used": candidate_parent_refinement_used,
             "nearest_anchor_fallback_used": float(fallback_used),
             "n_candidates_considered": float(n_qp),
-            "n_candidates_total": float(bvh.n_polytopes),
-            "n_candidates_pruned_by_top_k": float(max(0, bvh.n_polytopes - k) if not fallback_used else 0),
+            "n_candidates_total": float(n_polytopes),
+            "n_candidates_pruned_by_top_k": float(max(0, n_polytopes - k) if not fallback_used else 0),
             "n_candidates_pruned_by_bound": float(n_pruned_by_bound),
             "best_lower_bound_at_termination": float(best_lower_bound_at_termination),
             "nearest_anchor_initialization_used": float(nearest_anchor_idx is not None),
@@ -3031,13 +2995,9 @@ class CertCFAtlas:
         }
         t_total_start = time.perf_counter()
 
-        if resolved_method == 'bvh':
-            x_cf, selection_score, anchor_idx, n_qp, search_profiling = self._search_bvh(
-                x_query, bd, target_class, delta, robust_norm, solver_maxiter,
-                fixed_dims, nondecreasing_dims, nonincreasing_dims)
-        elif resolved_method == 'sorted':
+        if resolved_method == 'sorted':
             x_cf, selection_score, anchor_idx, n_qp, search_profiling = self._search_sorted(
-                x_query, bd, target_class, delta, robust_norm, solver_maxiter,
+                x_query, bd, delta, robust_norm, solver_maxiter,
                 fixed_dims, nondecreasing_dims, nonincreasing_dims)
         elif resolved_method == 'nearest_anchor':
             x_cf, selection_score, anchor_idx, n_qp, search_profiling = self._search_nearest_anchor(
@@ -3046,7 +3006,9 @@ class CertCFAtlas:
                 resolved_candidate_parallel_backend, nondecreasing_dims,
                 nonincreasing_dims)
         else:
-            raise ValueError(f"Unknown method: {resolved_method}. Use 'sorted', 'bvh', or 'nearest_anchor'.")
+            raise ValueError(
+                f"Unknown method: {resolved_method}. Use 'sorted' or 'nearest_anchor'."
+            )
 
         profiling.update(search_profiling)
 
@@ -3421,10 +3383,9 @@ class CertCFAtlas:
 
         total_polytopes = 0
         for label in self.class_labels:
-            n = self.bvh_indices[label].n_polytopes
+            n = len(self.bounds[label]["X"])
             total_polytopes += n
-            depth = self.bvh_indices[label].tree_depth
-            lines.append(f"  Class {label}: {n:4d} polytopes (BVH depth {depth})")
+            lines.append(f"  Class {label}: {n:4d} polytopes")
 
         lines.append(f"")
         lines.append(f"Total polytopes: {total_polytopes}")

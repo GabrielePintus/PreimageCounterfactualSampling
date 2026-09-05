@@ -5,7 +5,6 @@ This library provides tools for:
 - Neural network certification using LiRPA
 - Preimage approximation via certified polytopes
 - Counterfactual generation through CertCF
-- Efficient spatial indexing via Bounding Volume Hierarchies (BVH)
 
 Quick Start
 -----------
@@ -35,7 +34,6 @@ from .eps_strategies import (
 # Lower-level components (for advanced users)
 from .certification import WrappedModel, PreimageApproximation
 from .sampling import CounterfactualSampler
-from .indexing import BVHIndex, BVHNode
 
 __all__ = [
     # High-level API
@@ -49,6 +47,4 @@ __all__ = [
     "WrappedModel",
     "PreimageApproximation",
     "CounterfactualSampler",
-    "BVHIndex",
-    "BVHNode",
 ]

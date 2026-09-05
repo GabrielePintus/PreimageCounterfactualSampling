@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 
 from certcf.atlas import CVXPY_AVAILABLE, CertCFAtlas
-from certcf.indexing.bvh import BVHNode
 
 
 def _make_atlas(cert_norm, distance_norm):
@@ -18,18 +17,6 @@ def _make_atlas(cert_norm, distance_norm):
         "SCS": ["optimal", "optimal_inaccurate"],
     }
     return atlas
-
-
-def test_bvh_node_distance_to_point_uses_requested_norm():
-    node = BVHNode(
-        bbox_min=np.array([0.0, 0.0], dtype=np.float64),
-        bbox_max=np.array([1.0, 1.0], dtype=np.float64),
-    )
-    x = np.array([2.0, 3.0], dtype=np.float64)
-
-    assert np.isclose(node.distance_to_point(x, distance_norm=1), 3.0)
-    assert np.isclose(node.distance_to_point(x, distance_norm=2), np.sqrt(5.0))
-    assert np.isclose(node.distance_to_point(x, distance_norm=np.inf), 2.0)
 
 
 @pytest.mark.skipif(not CVXPY_AVAILABLE, reason="CVXPY is required for norm-aware distance objectives.")

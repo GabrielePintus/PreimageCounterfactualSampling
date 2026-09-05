@@ -80,7 +80,7 @@ def test_numeric_atlas_bounds_round_trip_without_pickle(tmp_path):
     restored = CertCFAtlas(model, dataset, "cpu", norm=1).load_bounds(tmp_path)
     for label in (0, 1):
         np.testing.assert_array_equal(restored.bounds[label]["X"], atlas.bounds[label]["X"])
-        assert restored.bvh_indices[label].n_polytopes == 1
+        assert len(restored.bounds[label]["X"]) == 1
 
 
 def test_reused_lirpa_graph_matches_fresh_graph():

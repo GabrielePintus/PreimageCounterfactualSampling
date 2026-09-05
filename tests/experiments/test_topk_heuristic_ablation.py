@@ -17,14 +17,6 @@ from experiments.topk_heuristic_ablation import (
 )
 
 
-class _FakeIndex:
-    n_polytopes = 3
-
-    def query_k_nearest_candidates(self, x, k, distance_norm):
-        del x, k, distance_norm
-        return [0, 1, 2]
-
-
 class _FakeAtlas:
     distance_norm = 1
     norm = 1
@@ -37,8 +29,6 @@ class _FakeAtlas:
                 "eps": np.ones(3),
             }
         }
-        self.bvh_indices = {1: _FakeIndex()}
-
     @staticmethod
     def _anchor_bbox_lower_bounds(x, centers, eps, distance_norm):
         del x, centers, eps, distance_norm

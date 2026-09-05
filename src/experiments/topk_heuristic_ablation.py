@@ -293,37 +293,33 @@ def strict_prefix_search(
     requested = sorted({int(value) for value in k_values})
     if not requested or requested[0] <= 0:
         raise ValueError("k_values must contain positive integers")
-    if atlas.bounds is None or atlas.bvh_indices is None:
-        raise ValueError("Atlas bounds and spatial indices must be loaded")
+    if atlas.bounds is None:
+        raise ValueError("Atlas bounds must be loaded")
 
     x_query = np.asarray(x_query, dtype=np.float64).reshape(-1)
     target_class = int(target_class)
     bounds = atlas.bounds[target_class]
-    index = atlas.bvh_indices[target_class]
+    centers = np.asarray(bounds["X"], dtype=np.float64)
+    n_polytopes = len(centers)
     maximum_k = requested[-1]
-    if maximum_k > index.n_polytopes:
+    if maximum_k > n_polytopes:
         raise ValueError(
             f"Requested k={maximum_k}, but target class {target_class} has only "
-            f"{index.n_polytopes} atlas regions"
+            f"{n_polytopes} atlas regions"
         )
 
     started = time.perf_counter()
-    ordered_indices = index.query_k_nearest_candidates(
-        x_query,
-        k=index.n_polytopes,
-        distance_norm=atlas.distance_norm,
-    )
-    lower_bounds = atlas._anchor_bbox_lower_bounds(
-        x_query,
-        np.asarray(bounds["X"], dtype=np.float64),
-        np.asarray(bounds["eps"], dtype=np.float64),
-        atlas.distance_norm,
-    )
-    centers = np.asarray(bounds["X"], dtype=np.float64)
     center_distances = np.linalg.norm(
         centers - x_query[None, :],
         ord=atlas.distance_norm,
         axis=1,
+    )
+    ordered_indices = np.argsort(center_distances)
+    lower_bounds = atlas._anchor_bbox_lower_bounds(
+        x_query,
+        centers,
+        np.asarray(bounds["eps"], dtype=np.float64),
+        atlas.distance_norm,
     )
 
     # Match CertCF's safe incumbent: use the nearest center that is itself in
@@ -1182,7 +1178,7 @@ class TopKHeuristicAblationRunner:
         x_queries = x_test[query_indices]
         targets = 1 - self._predict(model, x_queries, self.device)
         for target in np.unique(targets):
-            available = int(atlas.bvh_indices[int(target)].n_polytopes)
+            available = int(len(atlas.bounds[int(target)]["X"]))
             if requested_k[-1] > available:
                 raise ValueError(
                     f"Requested k={requested_k[-1]}, but target class {target} has "

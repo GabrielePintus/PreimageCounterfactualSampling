@@ -995,9 +995,9 @@ def _build_certcf_method(
             np.inf if str(_robust_norm_raw).lower() in ("inf", "infinity") else int(_robust_norm_raw)
         )
     query_method = str(params.get("query_method", "sorted")).lower()
-    if query_method not in {"sorted", "bvh", "nearest_anchor"}:
+    if query_method not in {"sorted", "nearest_anchor"}:
         raise ValueError(
-            f"certcf.query_method must be one of {{'sorted', 'bvh', 'nearest_anchor'}}, got {query_method!r}"
+            f"certcf.query_method must be one of {{'sorted', 'nearest_anchor'}}, got {query_method!r}"
         )
     query_k_candidates = int(params.get("query_k_candidates", 1))
     if query_k_candidates <= 0:

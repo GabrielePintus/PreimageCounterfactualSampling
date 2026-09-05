@@ -24,7 +24,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from torchvision.datasets import CIFAR10
 
 from certcf import CertCFAtlas, NearestOppositeClassClearanceStrategy
-from certcf.indexing.bvh import BVHIndex
 from counterfactuals.methods.certcf import CertCF
 from counterfactuals.models.torch_model import TorchModelWrapper
 from experiments.network_complexity import PhaseResourceMonitor
@@ -738,7 +737,6 @@ class CifarResNetScalingRunner:
             "adaptive_shrinks_max": int(np.max(shrinks)),
             "epsilon_time_s": float(atlas.build_profiling["epsilon_time_s"]),
             "lirpa_time_s": float(atlas.build_profiling["lirpa_time_s"]),
-            "bvh_time_s": float(atlas.build_profiling["bvh_time_s"]),
             "epsilon_parallelism": int(atlas.build_profiling["epsilon_parallelism"]),
             "build_parallelism": int(atlas.build_profiling["build_parallelism"]),
             "lirpa_workers_used": int(atlas.build_profiling["lirpa_workers_used"]),
@@ -808,9 +806,6 @@ class CifarResNetScalingRunner:
             classification_margin=float(config["classification_margin"]),
         )
         atlas.bounds = bounds
-        atlas.bvh_indices = {
-            label: BVHIndex(bounds[label]["X"], bounds[label]["eps"]) for label in bounds
-        }
         method = self._method(model)
         method.atlas = atlas
         method._is_fitted = True
