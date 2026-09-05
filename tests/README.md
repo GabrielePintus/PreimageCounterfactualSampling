@@ -5,6 +5,7 @@ Automated tests for the modular counterfactual framework.
 ## Layout
 
 - `counterfactuals/`: unit and smoke tests for methods, metrics, registry, and experiment runner.
+- `verix/`: algorithm-level tests for the paper-faithful VERIX implementation.
 
 ## Run
 

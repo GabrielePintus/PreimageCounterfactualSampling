@@ -9,6 +9,13 @@ This directory contains the importable Python package code. Executable entrypoin
 - `dataset_specs/`: shared tabular dataset metadata, including feature names, OHE slices, and actionability metadata used by benchmarks.
 - `models/`: neural-network architectures used by the classifiers.
 - `training/`: Lightning modules and tabular data modules used to train benchmark classifiers.
+- `verix/`: isolated, paper-faithful VERIX core, traversal strategies, and optional verifier backends.
+
+`CertCFAtlas` exposes two mutually exclusive query concurrency controls:
+`query_parallelism` distributes independent queries, while
+`candidate_parallelism` distributes the top-$k$ projections of one query.
+For the latter, `candidate_parallel_backend="process"` uses a persistent
+fork-based CPU pool and `"thread"` is available for diagnostic comparisons.
 
 ## Entrypoints
 

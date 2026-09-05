@@ -22,6 +22,24 @@ Paper-facing notebooks for CertCF.
   Reviewer-facing paired analysis of the L1-vs-L2 CertCF query-objective
   ablation. It reads per-dataset progress safely while the benchmark runs and
   emits final tables only after all seven matched comparisons are complete.
+- `VeriXCertCFSynthetic32.ipynb`
+  Progress-aware paired comparison of native VERIX witnesses and CertCF
+  counterfactuals on the standardized 32D synthetic dataset. It reports
+  validity, proximity, sparsity, online runtime, offline atlas construction,
+  and per-query CertCF/VERIX distance ratios.
+- `VeriXCertCFSynthetic32Grid.ipynb`
+  Width-by-depth scaling analysis for the 25 paired synthetic-32 runs. It
+  reports VERIX timeouts and witness coverage alongside proximity, sparsity,
+  on-manifoldness, empirical and certified robustness, online time, and CertCF
+  atlas construction time.
+- `CIFARResNetScaling.ipynb`
+  Result-only analysis of independent ResNet20/32/56 runs, covering offline
+  scaling, LiRPA epsilon contraction, image quality, robustness, online time,
+  qualitative examples, and resource-limit reporting.
+- `LiRPARefinementAblation.ipynb`
+  Paired analysis of Anchor-Ball, Anchor-PGD, and CertCF on identical Eq. (1)
+  neighborhoods, including success, proximity, feasibility, manifoldness,
+  empirical/certified robustness, runtime, failure modes, and depth trends.
 - `utils/`
   Shared plotting and dataframe helpers for benchmark analysis notebooks.
 
