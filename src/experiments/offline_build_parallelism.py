@@ -47,6 +47,14 @@ BOUND_KEYS = (
     "uA",
     "ubias",
 )
+ATLAS_DECISION_KEYS = (
+    "X",
+    "eps",
+    "eps_initial",
+    "adaptive_eps_n_shrinks",
+    "adaptive_eps_n_binary_steps",
+    "adaptive_eps_center_certified",
+)
 
 
 def _resolve_path(value: str | Path) -> Path:
@@ -480,6 +488,12 @@ class OfflineBuildParallelismRunner:
                 if payload.get("status") != "complete":
                     continue
                 equivalence = payload.get("equivalence", {})
+                per_array = equivalence.get("per_array", {})
+                decision_arrays = [
+                    comparison
+                    for identity, comparison in per_array.items()
+                    if identity.rsplit(".", maxsplit=1)[-1] in ATLAS_DECISION_KEYS
+                ]
                 rows.append(
                     {
                         "case_id": case_id,
@@ -496,7 +510,12 @@ class OfflineBuildParallelismRunner:
                         "build_cuda_peak_allocated_bytes": int(
                             payload["build_cuda_peak_allocated_bytes"]
                         ),
+                        "build_cuda_peak_reserved_bytes": int(
+                            payload["build_cuda_peak_reserved_bytes"]
+                        ),
                         "atlas_region_count": int(payload["atlas_region_count"]),
+                        "atlas_decisions_exact": bool(decision_arrays)
+                        and all(item["exact"] for item in decision_arrays),
                         "atlas_all_close": bool(equivalence.get("all_close", False)),
                         "atlas_all_exact": bool(equivalence.get("all_exact", False)),
                         "atlas_max_absolute_difference": float(
