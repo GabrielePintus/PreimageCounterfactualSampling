@@ -46,6 +46,17 @@ Raw metadata are stored under `results/offline_build_parallelism/`, and the
 aggregated table is
 `results/offline_build_parallelism/offline_build_summary.parquet`.
 
+Two follow-up experiments were run with the CNN batching implementation at
+commits `6544ea3` and `4831edc`:
+
+- a three-repetition sweep of the number of CPU workers used by Equation (1);
+- sound batching of CNN anchors whose initial radii differ by at most 5%.
+
+The radius-sweep measurements are stored in
+`results/offline_build_parallelism/epsilon_parallelism_sweep.parquet`. The
+CNN-batch build metadata and its 100-query probe are stored under
+`results/offline_build_parallelism/cifar_resnet20/cnn_batch64/`.
+
 ## Results
 
 The following are single-run wall-clock measurements. `RSS delta` is the peak
@@ -67,6 +78,62 @@ is the peak allocated CUDA memory during the same region.
 | CIFAR-10 ResNet-20 | lirpa2 | 333.727 | 77.735 | 255.972 | 1.02x | 3,099.6 | 461.6 |
 | CIFAR-10 ResNet-20 | combined | 275.468 | 27.197 | 248.251 | **1.23x** | 3,176.4 | 461.6 |
 
+### Equation (1) worker sweep
+
+Each configuration computed the initial radii of the same 10,000 CIFAR-10
+anchors three times. Worker order was randomized within each repetition. Every
+run reproduced the serial reference radii exactly, with zero maximum absolute
+difference.
+
+| CPU workers | Mean (s) | Std. (s) | Speedup |
+|---:|---:|---:|---:|
+| 1 | 82.152 | 0.472 | 1.00x |
+| 2 | 46.030 | 0.087 | 1.78x |
+| 4 | 32.662 | 0.107 | 2.51x |
+| 8 | 26.923 | 0.533 | 3.05x |
+| 12 | 26.760 | 0.284 | **3.07x** |
+| 16 | 26.773 | 0.225 | 3.07x |
+
+The computation scales usefully up to approximately eight workers and then
+plateaus. The operational default remains eight workers because 12 and 16 do
+not provide a meaningful additional reduction.
+
+### Sound CNN radius batching
+
+The legacy CNN path certifies one anchor at a time because auto-LiRPA accepts a
+single scalar radius for convolutional batches. The new opt-in path sorts the
+anchors of each target class by radius and groups at most 64 anchors whose
+largest radius is no more than 5% above the smallest. LiRPA is evaluated once
+at the largest radius in each bucket. This is sound for every original ball
+because the larger ball contains all of them. Each returned polytope is still
+intersected with its anchor's original ball. If the conservative bucket bound
+does not certify an anchor center, that anchor is recomputed at its exact radius
+and then follows the existing adaptive-shrink procedure.
+
+On CIFAR-10 ResNet-20, 10,000 anchors were grouped into 282 buckets, or 35.5
+anchors per LiRPA call on average. No exact-radius fallback or adaptive shrink
+was needed.
+
+| Variant | Build (s) | Radius (s) | LiRPA (s) | Build speedup | LiRPA speedup | CUDA allocated (MiB) |
+|---|---:|---:|---:|---:|---:|---:|
+| Serial reference | 339.028 | 76.150 | 262.853 | 1.00x | 1.00x | 443.1 |
+| Radius workers only | 284.689 | 27.297 | 257.373 | 1.19x | 1.02x | 443.1 |
+| Radius workers + CNN batches | **43.289** | 26.796 | **16.474** | **7.83x** | **15.96x** | 3,768.3 |
+
+The batching optimization therefore exchanges GPU memory for a substantial
+reduction in offline latency. It is disabled by default and controlled
+independently from class-level LiRPA parallelism.
+
+The batched atlas was also evaluated on the same 100 ResNet-20 queries used by
+the original scalability benchmark. It returned a valid target-class
+counterfactual for all 100 queries and selected the same anchor as the serial
+atlas in every case. Mean L1 distance was 356.2740 for both atlases; the maximum
+absolute per-query distance change was `6.10e-5`. The mean post-hoc certified L1
+radius changed from `4.2251e-5` to `4.2195e-5` (-0.13%), with a median
+batch-to-serial ratio of 0.998. Query runtime is not compared here because the
+historical query artifacts used eight projection processes whereas this
+correctness probe intentionally used one.
+
 ## Correctness checks
 
 For HELOC and the synthetic FCNN, every saved numeric atlas array is exactly
@@ -82,6 +149,17 @@ certification decisions remain exactly equal. The CNN result should therefore
 be described as structurally identical with ordinary CUDA floating-point
 variation, not as bitwise-identical affine bounds.
 
+The CNN radius-batched atlas deliberately does not reproduce the serial affine
+coefficients: its affine relaxation is computed over a radius up to 5% larger
+than the individual anchor radius and is therefore potentially more
+conservative. Soundness follows from domain containment, and the exact-radius
+fallback protects center certification. In the measured run, region count,
+anchors, initial/final radii, shrink decisions, and center-certification
+decisions all matched the serial atlas exactly. The full automated suite also
+passed (360 tests passed, one skipped), including a convolutional-network test
+that samples points from every original ball and checks the returned affine
+lower bounds against the true network margin.
+
 ## Interpretation for the paper
 
 - Small tabular builds are too short for worker overhead to be informative.
@@ -90,6 +168,8 @@ variation, not as bitwise-identical affine bounds.
 - On ResNet-20, two concurrent LiRPA shards contend for the same GPU and provide
   little benefit. Parallel radius computation is responsible for most of the
   end-to-end reduction, from 339.0 s to 275.5 s in the combined configuration.
+- Radius-aware CNN batching is much more effective on the same ResNet-20:
+  LiRPA falls from 262.9 s to 16.5 s and the complete build from 339.0 s to
+  43.3 s, at the cost of a roughly 3.8 GiB CUDA-allocation peak.
 - The appendix should report these representative examples rather than imply
   that every atlas build scales uniformly with the number of workers.
-
