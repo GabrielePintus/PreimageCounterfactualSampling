@@ -55,6 +55,8 @@ class CertCF(BaseCounterfactualMethod):
         robust_norm: Optional[Union[int, float, str]] = None,
         eps_strategy: Optional[EpsStrategy] = None,
         batch_size: Optional[int] = None,
+        epsilon_parallelism: int = 1,
+        build_parallelism: int = 1,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         input_bounds: Optional[Sequence[float]] = None,
 
@@ -120,6 +122,12 @@ class CertCF(BaseCounterfactualMethod):
         self.robust_norm = None if robust_norm is None else CertCFAtlas._normalize_lp_norm(robust_norm)
         self.eps_strategy = eps_strategy
         self.batch_size = batch_size
+        self.epsilon_parallelism = int(epsilon_parallelism)
+        if self.epsilon_parallelism <= 0:
+            raise ValueError("epsilon_parallelism must be positive")
+        self.build_parallelism = int(build_parallelism)
+        if self.build_parallelism <= 0:
+            raise ValueError("build_parallelism must be positive")
         self.ohe_slices = ohe_slices
         normalize_input_bounds = getattr(CertCFAtlas, "_normalize_input_bounds", None)
         if normalize_input_bounds is None:
@@ -520,6 +528,8 @@ class CertCF(BaseCounterfactualMethod):
             lirpa_method=self.lirpa_method,
             eps_strategy=self.eps_strategy,
             batch_size=self.batch_size,
+            epsilon_parallelism=self.epsilon_parallelism,
+            build_parallelism=self.build_parallelism,
             ohe_slices=self.ohe_slices,
             input_bounds=self.input_bounds,
             default_query_method=self.default_query_method,

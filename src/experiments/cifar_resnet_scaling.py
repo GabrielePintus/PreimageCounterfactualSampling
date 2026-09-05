@@ -122,6 +122,10 @@ def validate_config(config: dict[str, Any]) -> None:
     if int(config["dataset"]["queries_per_true_class"]) <= 0:
         raise ValueError("queries_per_true_class must be positive")
     certcf = config["certcf"]
+    if int(certcf.get("epsilon_parallelism", 1)) <= 0:
+        raise ValueError("epsilon_parallelism must be positive")
+    if int(certcf.get("build_parallelism", 1)) <= 0:
+        raise ValueError("build_parallelism must be positive")
     if int(certcf["norm"]) != 1 or int(certcf["distance_norm"]) != 1:
         raise ValueError("The official CIFAR scaling protocol uses L1 for certification and projection")
     if int(certcf["query_k_candidates"]) != 3:
@@ -270,6 +274,10 @@ class CifarResNetScalingRunner:
         self.candidate_parallel_warmup = bool(
             certcf_config.get("candidate_parallel_warmup", True)
         )
+        self.epsilon_parallelism = int(certcf_config.get("epsilon_parallelism", 1))
+        self.build_parallelism = int(certcf_config.get("build_parallelism", 1))
+        self.configure_epsilon_parallelism(self.epsilon_parallelism)
+        self.configure_build_parallelism(self.build_parallelism)
         self.configure_candidate_parallelism(
             workers=self.candidate_parallelism,
             backend=self.candidate_parallel_backend,
@@ -300,6 +308,24 @@ class CifarResNetScalingRunner:
             raise ValueError(
                 "query parallelism and candidate parallelism cannot both exceed 1"
             )
+
+    def configure_build_parallelism(self, workers: int | None = None) -> None:
+        """Set execution-only LiRPA class-shard parallelism."""
+        if workers is None:
+            return
+        workers = int(workers)
+        if workers <= 0:
+            raise ValueError("build parallelism must be positive")
+        self.build_parallelism = workers
+
+    def configure_epsilon_parallelism(self, workers: int | None = None) -> None:
+        """Set execution-only parallelism for initial-radius computation."""
+        if workers is None:
+            return
+        workers = int(workers)
+        if workers <= 0:
+            raise ValueError("epsilon parallelism must be positive")
+        self.epsilon_parallelism = workers
 
     @property
     def networks(self) -> list[str]:
@@ -482,6 +508,8 @@ class CifarResNetScalingRunner:
                 chunk_size=int(config["eps_reference_chunk_size"]),
             ),
             batch_size=int(config["lirpa_batch_size"]),
+            epsilon_parallelism=self.epsilon_parallelism,
+            build_parallelism=self.build_parallelism,
             cnn=True,
             cnn_input_shape=(3, 32, 32),
             reuse_lirpa_graph=True,
@@ -624,7 +652,9 @@ class CifarResNetScalingRunner:
         method = self._method(model, anchors_per_class, bounds_checkpoint_dir=partial_dir)
         _log(
             f"[BUILD] {network}: {len(prepared['x_support'])} punti del training set, "
-            f"tutti usati come anchor, device={device}."
+            f"tutti usati come anchor, device={device}, "
+            f"epsilon workers={self.epsilon_parallelism}, "
+            f"LiRPA workers={self.build_parallelism}."
         )
         interval = float(self.config["resources"]["rss_sample_interval_seconds"])
         timeout = float(self.config["resources"]["build_timeout_seconds"])
@@ -709,6 +739,9 @@ class CifarResNetScalingRunner:
             "epsilon_time_s": float(atlas.build_profiling["epsilon_time_s"]),
             "lirpa_time_s": float(atlas.build_profiling["lirpa_time_s"]),
             "bvh_time_s": float(atlas.build_profiling["bvh_time_s"]),
+            "epsilon_parallelism": int(atlas.build_profiling["epsilon_parallelism"]),
+            "build_parallelism": int(atlas.build_profiling["build_parallelism"]),
+            "lirpa_workers_used": int(atlas.build_profiling["lirpa_workers_used"]),
             "serialization_time_s": float(serialization_time_s),
             **monitor.metrics,
         }

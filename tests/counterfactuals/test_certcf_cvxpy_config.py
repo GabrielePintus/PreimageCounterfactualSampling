@@ -80,6 +80,8 @@ def test_certcf_defaults_cvxpy_solver_config():
     assert method.sparsity_eps == 1.0e-3
     assert method.sparsity_group_ohe is True
     assert method.input_bounds is None
+    assert method.epsilon_parallelism == 1
+    assert method.build_parallelism == 1
 
 
 def test_certcf_normalizes_fixed_dims():
@@ -176,6 +178,22 @@ def test_atlas_direct_constructor_defaults_cvxpy_solver_config():
     assert atlas.sparsity_eps == 1.0e-3
     assert atlas.sparsity_group_ohe is True
     assert atlas.input_bounds is None
+    assert atlas.epsilon_parallelism == 1
+    assert atlas.build_parallelism == 1
+
+
+def test_certcf_rejects_invalid_build_parallelism():
+    with pytest.raises(ValueError, match="epsilon_parallelism"):
+        CertCF(model=object(), epsilon_parallelism=0)
+
+    with pytest.raises(ValueError, match="epsilon_parallelism"):
+        CertCFAtlas(_tiny_model(), _tiny_dataset(), device="cpu", epsilon_parallelism=0)
+
+    with pytest.raises(ValueError, match="build_parallelism"):
+        CertCF(model=object(), build_parallelism=0)
+
+    with pytest.raises(ValueError, match="build_parallelism"):
+        CertCFAtlas(_tiny_model(), _tiny_dataset(), device="cpu", build_parallelism=0)
 
 
 def test_certcf_normalizes_and_validates_input_bounds():
@@ -295,6 +313,8 @@ def test_atlas_build_forwards_adaptive_eps_config(monkeypatch):
         _tiny_dataset(),
         device="cpu",
         eps_strategy=ConstantEpsStrategy(0.2),
+        epsilon_parallelism=4,
+        build_parallelism=2,
         classification_margin=0.05,
         adaptive_eps=True,
         adaptive_eps_shrink_factor=0.25,
@@ -337,6 +357,8 @@ def test_atlas_build_forwards_adaptive_eps_config(monkeypatch):
     assert calls[0]["adaptive_eps_min"] == 1.0e-5
     assert calls[0]["adaptive_eps_center_tol"] == 1.0e-4
     assert calls[0]["adaptive_eps_binary_search_steps"] == 2
+    assert calls[0]["build_parallelism"] == 2
+    assert atlas.build_profiling["epsilon_parallelism"] == 4
 
 
 def test_certcf_normalizes_ohe_decode_config():

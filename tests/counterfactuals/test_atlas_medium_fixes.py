@@ -501,6 +501,192 @@ def test_preimage_approximation_forwards_lirpa_method(monkeypatch):
     assert seen_methods == ["alpha-crown", "alpha-crown"]
 
 
+def test_preimage_parallel_build_runs_class_shards_concurrently(monkeypatch):
+    dataset = torch.utils.data.TensorDataset(
+        torch.eye(4, dtype=torch.float32),
+        torch.arange(4, dtype=torch.int64),
+    )
+    barrier = threading.Barrier(4, timeout=2.0)
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+
+    def fake_run_lirpa(model, label, X, n_classes, device, eps, norm, dtype, lirpa_method):
+        del model, label, device, eps, norm, dtype, lirpa_method
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        barrier.wait()
+        with lock:
+            active -= 1
+        n_samples, dim = X.shape
+        zeros = np.zeros((n_samples, n_classes - 1, dim), dtype=np.float32)
+        ones = np.ones((n_samples, n_classes - 1), dtype=np.float32)
+        return zeros, ones, zeros, ones
+
+    monkeypatch.setattr("certcf.certification.lirpa.run_lirpa", fake_run_lirpa)
+    preimage = PreimageApproximation(
+        torch.nn.Linear(4, 4),
+        dataset,
+        torch.device("cpu"),
+    )
+    completed = []
+
+    bounds = preimage.compute_all_bounds(
+        eps=0.1,
+        norm=1,
+        build_parallelism=4,
+        class_completed_callback=lambda label, values: completed.append(
+            (label, len(values["X"]))
+        ),
+        show_progress=False,
+    )
+
+    assert list(bounds) == [0, 1, 2, 3]
+    assert maximum_active == 4
+    assert sorted(completed) == [(0, 1), (1, 1), (2, 1), (3, 1)]
+
+
+@pytest.mark.parametrize("reuse_lirpa_graph", [False, True])
+def test_preimage_parallel_build_matches_real_serial_lirpa(reuse_lirpa_graph):
+    torch.manual_seed(23)
+    model = torch.nn.Sequential(
+        torch.nn.Linear(3, 12),
+        torch.nn.ReLU(),
+        torch.nn.Linear(12, 4),
+    ).eval()
+    dataset = torch.utils.data.TensorDataset(
+        torch.tensor(
+            [
+                [0.1, 0.2, 0.3],
+                [0.2, 0.3, 0.4],
+                [0.5, 0.1, 0.2],
+                [0.6, 0.2, 0.1],
+                [0.1, 0.7, 0.3],
+                [0.2, 0.8, 0.4],
+                [0.3, 0.2, 0.9],
+                [0.4, 0.1, 0.8],
+            ],
+            dtype=torch.float32,
+        ),
+        torch.repeat_interleave(torch.arange(4), 2),
+    )
+    eps_array = np.linspace(0.01, 0.08, len(dataset), dtype=np.float64)
+
+    serial = PreimageApproximation(
+        model,
+        dataset,
+        torch.device("cpu"),
+        reuse_lirpa_graph=reuse_lirpa_graph,
+    ).compute_all_bounds(
+        norm=1,
+        eps_array=eps_array,
+        build_parallelism=1,
+        show_progress=False,
+    )
+    parallel = PreimageApproximation(
+        model,
+        dataset,
+        torch.device("cpu"),
+        reuse_lirpa_graph=reuse_lirpa_graph,
+    ).compute_all_bounds(
+        norm=1,
+        eps_array=eps_array,
+        build_parallelism=4,
+        show_progress=False,
+    )
+
+    for label in range(4):
+        for key in (
+            "lA",
+            "lbias",
+            "uA",
+            "ubias",
+            "X",
+            "eps",
+            "eps_initial",
+            "adaptive_eps_center_slack",
+        ):
+            np.testing.assert_allclose(parallel[label][key], serial[label][key], atol=1e-7)
+        np.testing.assert_array_equal(
+            parallel[label]["adaptive_eps_center_certified"],
+            serial[label]["adaptive_eps_center_certified"],
+        )
+
+
+@pytest.mark.parametrize("reuse_lirpa_graph", [False, True])
+def test_preimage_batched_variable_eps_matches_per_sample_real_lirpa(
+    reuse_lirpa_graph,
+):
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2)).eval()
+    with torch.no_grad():
+        model[0].weight.copy_(
+            torch.tensor([[1.0, -1.0], [-1.0, 1.0]], dtype=torch.float32)
+        )
+        model[0].bias.zero_()
+    X = torch.tensor(
+        [
+            [0.9, 0.1],
+            [0.8, 0.2],
+            [0.7, 0.3],
+            [0.1, 0.9],
+            [0.2, 0.8],
+            [0.3, 0.7],
+        ],
+        dtype=torch.float32,
+    )
+    labels = model(X).argmax(dim=1)
+    dataset = torch.utils.data.TensorDataset(X, labels)
+    eps_array = np.array([0.2, 0.5, 0.9, 0.2, 0.5, 0.9], dtype=np.float64)
+
+    legacy = PreimageApproximation(
+        model,
+        dataset,
+        torch.device("cpu"),
+        reuse_lirpa_graph=reuse_lirpa_graph,
+    ).compute_all_bounds(
+        norm=1,
+        eps_array=eps_array,
+        batch_size=1,
+        adaptive_eps=True,
+        adaptive_eps_max_shrinks=4,
+        show_progress=False,
+    )
+    batched = PreimageApproximation(
+        model,
+        dataset,
+        torch.device("cpu"),
+        reuse_lirpa_graph=reuse_lirpa_graph,
+    ).compute_all_bounds(
+        norm=1,
+        eps_array=eps_array,
+        batch_size=3,
+        adaptive_eps=True,
+        adaptive_eps_max_shrinks=4,
+        show_progress=False,
+    )
+
+    for label in (0, 1):
+        for key in (
+            "lA",
+            "lbias",
+            "uA",
+            "ubias",
+            "X",
+            "eps",
+            "eps_initial",
+            "adaptive_eps_center_slack",
+        ):
+            np.testing.assert_allclose(batched[label][key], legacy[label][key], atol=1e-7)
+        for key in (
+            "adaptive_eps_n_shrinks",
+            "adaptive_eps_n_binary_steps",
+            "adaptive_eps_center_certified",
+        ):
+            np.testing.assert_array_equal(batched[label][key], legacy[label][key])
+
+
 def test_preimage_adaptive_eps_halves_until_center_is_certified(monkeypatch):
     dataset = torch.utils.data.TensorDataset(
         torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float32),
@@ -647,6 +833,8 @@ def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
     method = CertCF(
         model=TinyTorchModel(),
         lirpa_method="alpha-crown",
+        epsilon_parallelism=5,
+        build_parallelism=3,
         classification_margin=0.123,
         adaptive_eps=True,
         adaptive_eps_shrink_factor=0.25,
@@ -663,6 +851,8 @@ def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
 
     assert init_calls
     assert init_calls[0]["lirpa_method"] == "alpha-crown"
+    assert init_calls[0]["epsilon_parallelism"] == 5
+    assert init_calls[0]["build_parallelism"] == 3
     assert init_calls[0]["classification_margin"] == 0.123
     assert init_calls[0]["adaptive_eps"] is True
     assert init_calls[0]["adaptive_eps_shrink_factor"] == 0.25

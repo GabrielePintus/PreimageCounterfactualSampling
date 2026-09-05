@@ -17,6 +17,13 @@ This directory contains the importable Python package code. Executable entrypoin
 For the latter, `candidate_parallel_backend="process"` uses a persistent
 fork-based CPU pool and `"thread"` is available for diagnostic comparisons.
 
+Atlas construction has two independent controls. `epsilon_parallelism`
+parallelizes the distance chunks used for the initial radii, while
+`build_parallelism` distributes LiRPA class shards. Fully connected models
+also batch anchors with different radii according to `batch_size`; the serial
+defaults remain available by setting both parallelism values and the batch
+size to one.
+
 ## Entrypoints
 
 Use these scripts from the repository root:

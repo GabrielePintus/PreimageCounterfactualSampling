@@ -1,10 +1,14 @@
 """LiRPA orchestration and preimage approximation."""
 
+import copy
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+
 import numpy as np
 import torch
 import torch.nn as nn
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
-from collections import defaultdict
 from tqdm import tqdm
 
 from .wrapping import WrappedModel
@@ -42,7 +46,7 @@ def run_lirpa(
     X: torch.Tensor,
     n_classes: int,
     device: torch.device,
-    eps: float = 0.1,
+    eps: float | torch.Tensor = 0.1,
     norm: int = 2,
     dtype: torch.dtype = torch.float32,
     lirpa_method: str = "backward",
@@ -172,12 +176,24 @@ class ReusableLiRPASession:
         initial = BoundedTensor(example, PerturbationLpNorm(norm=2, eps=0.0))
         self.bounded_model = BoundedModule(wrapped, initial)
 
-    def run(self, X: torch.Tensor, *, eps: float, norm: int, lirpa_method: str) -> tuple:
+    def run(
+        self,
+        X: torch.Tensor,
+        *,
+        eps: float | torch.Tensor,
+        norm: int,
+        lirpa_method: str,
+    ) -> tuple:
         X = X.to(device=self.device, dtype=self.dtype)
         # auto-LiRPA computes the L1 dual as 1/(1-1/p), which is correctly
         # infinity for p=1 but emits a NumPy divide-by-zero warning.
         with np.errstate(divide="ignore"):
-            bounded_x = BoundedTensor(X, PerturbationLpNorm(norm=norm, eps=float(eps)))
+            eps_value = (
+                eps.to(device=self.device, dtype=self.dtype)
+                if isinstance(eps, torch.Tensor)
+                else float(eps)
+            )
+            bounded_x = BoundedTensor(X, PerturbationLpNorm(norm=norm, eps=eps_value))
             _ = self.bounded_model(bounded_x)
             needed_A = defaultdict(set)
             output_name = self.bounded_model.output_name[0]
@@ -258,6 +274,7 @@ class PreimageApproximation:
         )
         self.reuse_lirpa_graph = bool(reuse_lirpa_graph)
         self._lirpa_sessions: dict[int, ReusableLiRPASession] = {}
+        self._empty_cuda_cache = True
 
         # Handle different dataset formats
         if hasattr(dataset, 'tensors'):
@@ -302,7 +319,7 @@ class PreimageApproximation:
         label: int,
         X: torch.Tensor,
         *,
-        eps: float,
+        eps: float | torch.Tensor,
         norm: int,
         dtype: torch.dtype,
         lirpa_method: str,
@@ -325,6 +342,100 @@ class PreimageApproximation:
             )
         return self._lirpa_sessions[label].run(
             X, eps=eps, norm=norm, lirpa_method=lirpa_method
+        )
+
+    def _compute_batched_variable_eps_bounds(
+        self,
+        *,
+        label_index: int,
+        X: torch.Tensor,
+        eps_label: np.ndarray,
+        batch_size: int,
+        norm: int,
+        dtype: torch.dtype,
+        lirpa_method: str,
+        classification_margin: float,
+        adaptive_eps: bool,
+        adaptive_eps_shrink_factor: float,
+        adaptive_eps_max_shrinks: int,
+        adaptive_eps_min: float,
+        adaptive_eps_center_tol: float,
+    ) -> tuple:
+        """Certify FC anchors in wavefront batches with per-anchor radii."""
+        sample_count = len(X)
+        eps_current = np.asarray(eps_label, dtype=np.float64).copy()
+        n_shrinks = np.zeros(sample_count, dtype=np.int64)
+        center_slack = np.full(sample_count, np.nan, dtype=np.float64)
+        center_certified = np.zeros(sample_count, dtype=bool)
+        lA_by_sample = [None] * sample_count
+        lbias_by_sample = [None] * sample_count
+        uA_by_sample = [None] * sample_count
+        ubias_by_sample = [None] * sample_count
+        X_by_sample = [None] * sample_count
+
+        for start in range(0, sample_count, batch_size):
+            stop = min(start + batch_size, sample_count)
+            active = np.arange(start, stop, dtype=np.int64)
+            while len(active):
+                X_active = X[active.tolist()].to(device=self.device, dtype=dtype)
+                eps_active = torch.as_tensor(
+                    eps_current[active],
+                    device=self.device,
+                    dtype=dtype,
+                ).reshape(-1, 1)
+                with _lirpa_grad_context(lirpa_method):
+                    lA, lbias, uA, ubias = self._run_bounds(
+                        label_index,
+                        X_active,
+                        eps=eps_active,
+                        norm=norm,
+                        dtype=dtype,
+                        lirpa_method=lirpa_method,
+                    )
+                X_stored = X_active.detach().cpu().numpy()
+                retry = []
+                for local_index, sample_index in enumerate(active):
+                    sample_index = int(sample_index)
+                    slack = _center_certification_slack(
+                        lA[local_index:local_index + 1],
+                        lbias[local_index:local_index + 1],
+                        X_stored[local_index],
+                        classification_margin=classification_margin,
+                    )
+                    certified = slack >= -adaptive_eps_center_tol
+                    should_retry = (
+                        adaptive_eps
+                        and not certified
+                        and n_shrinks[sample_index] < adaptive_eps_max_shrinks
+                        and eps_current[sample_index] * adaptive_eps_shrink_factor
+                        >= adaptive_eps_min
+                    )
+                    if should_retry:
+                        eps_current[sample_index] *= adaptive_eps_shrink_factor
+                        n_shrinks[sample_index] += 1
+                        retry.append(sample_index)
+                        continue
+
+                    lA_by_sample[sample_index] = lA[local_index:local_index + 1]
+                    lbias_by_sample[sample_index] = lbias[local_index:local_index + 1]
+                    uA_by_sample[sample_index] = uA[local_index:local_index + 1]
+                    ubias_by_sample[sample_index] = ubias[local_index:local_index + 1]
+                    X_by_sample[sample_index] = X_stored[local_index:local_index + 1]
+                    center_slack[sample_index] = slack
+                    center_certified[sample_index] = certified
+                active = np.asarray(retry, dtype=np.int64)
+
+        return (
+            np.concatenate(lA_by_sample, axis=0),
+            np.concatenate(lbias_by_sample, axis=0),
+            np.concatenate(uA_by_sample, axis=0),
+            np.concatenate(ubias_by_sample, axis=0),
+            np.concatenate(X_by_sample, axis=0),
+            eps_current,
+            n_shrinks,
+            np.zeros(sample_count, dtype=np.int64),
+            center_slack,
+            center_certified,
         )
 
     def estimate_memory_usage(
@@ -415,6 +526,8 @@ class PreimageApproximation:
         adaptive_eps_binary_search_steps: int = 0,
         precomputed_bounds: dict | None = None,
         class_completed_callback=None,
+        build_parallelism: int = 1,
+        show_progress: bool = True,
     ) -> dict:
         """
         Compute LiRPA bounds for all classes.
@@ -434,21 +547,27 @@ class PreimageApproximation:
         batch_size : int, optional
             Process samples in batches to save GPU memory. If None, process all at once.
             Recommended: 10-20 for MNIST on limited GPU memory.
-            Ignored when ``eps_array`` contains varying values (samples are
-            processed one at a time in that case).
+            Fully connected inputs with varying ``eps_array`` values are
+            processed in vectorized wavefront batches. Convolutional inputs
+            currently fall back to one sample at a time because auto-LiRPA's
+            convolution interval propagation requires a scalar epsilon.
         eps_array : np.ndarray, optional
             Per-sample epsilon values aligned with the full dataset, shape
             ``(N_total,)``.  When provided, each sample is certified with its
             own epsilon.  If all values in a class are equal the existing batch
-            path is used (no performance regression).  Otherwise samples are
-            processed individually.
+            path is used. Otherwise fully connected inputs use variable-radius
+            batches and convolutional inputs are processed individually.
         adaptive_eps : bool, optional
-            If True, process samples individually and shrink each epsilon until
-            the center satisfies the LiRPA lower-bound halfspaces or the retry
-            budget is exhausted.
+            If True, shrink each epsilon until the center satisfies the LiRPA
+            lower-bound halfspaces or the retry budget is exhausted. For fully
+            connected inputs, anchors needing the same retry wave are batched.
         adaptive_eps_binary_search_steps : int, optional
             If positive, refine the bracket between the first certified epsilon
             and the previous failed epsilon using this many bisection steps.
+        build_parallelism : int, optional
+            Number of independent class shards. Each shard owns a copied model
+            and reusable LiRPA sessions. The default of one preserves serial
+            execution.
 
         Returns
         -------
@@ -483,11 +602,103 @@ class PreimageApproximation:
         adaptive_eps_binary_search_steps = int(adaptive_eps_binary_search_steps)
         if adaptive_eps_binary_search_steps < 0:
             raise ValueError("adaptive_eps_binary_search_steps must be non-negative")
+        build_parallelism = int(build_parallelism)
+        if build_parallelism <= 0:
+            raise ValueError("build_parallelism must be positive")
 
         all_bounds = dict(precomputed_bounds or {})
         labels_tensor = self.dataset.tensors[1]
 
-        for label in tqdm(self.class_labels, desc="Computing bounds"):
+        remaining_labels = [
+            int(label) for label in self.class_labels if int(label) not in all_bounds
+        ]
+        if build_parallelism > 1 and len(remaining_labels) > 1:
+            workers = min(build_parallelism, len(remaining_labels))
+            shards = [remaining_labels[index::workers] for index in range(workers)]
+            callback_lock = Lock()
+
+            def shard_completed_callback(label: int, values: dict) -> None:
+                if class_completed_callback is None:
+                    return
+                with callback_lock:
+                    class_completed_callback(label, values)
+
+            worker_inputs = []
+            for shard in shards:
+                worker = PreimageApproximation(
+                    copy.deepcopy(self.model),
+                    self.dataset,
+                    self.device,
+                    cnn=self.cnn,
+                    model_input_shape=self.model_input_shape,
+                    reuse_lirpa_graph=self.reuse_lirpa_graph,
+                )
+                worker.class_labels = list(shard)
+                worker.label_to_index = dict(self.label_to_index)
+                worker.n_classes = int(self.n_classes)
+                # Emptying the global CUDA allocator cache from concurrent
+                # workers serializes otherwise independent LiRPA calls.
+                worker._empty_cuda_cache = False
+                worker_inputs.append(worker)
+
+            child_kwargs = {
+                "eps": eps,
+                "norm": norm,
+                "max_samples_per_class": max_samples_per_class,
+                "batch_size": batch_size,
+                "dtype": dtype,
+                "eps_array": eps_array,
+                "lirpa_method": lirpa_method,
+                "classification_margin": classification_margin,
+                "adaptive_eps": adaptive_eps,
+                "adaptive_eps_shrink_factor": adaptive_eps_shrink_factor,
+                "adaptive_eps_max_shrinks": adaptive_eps_max_shrinks,
+                "adaptive_eps_min": adaptive_eps_min,
+                "adaptive_eps_center_tol": adaptive_eps_center_tol,
+                "adaptive_eps_binary_search_steps": adaptive_eps_binary_search_steps,
+                "precomputed_bounds": None,
+                "class_completed_callback": shard_completed_callback,
+                "build_parallelism": 1,
+                "show_progress": False,
+            }
+
+            def run_worker(worker: "PreimageApproximation") -> dict:
+                if self.device.type != "cuda":
+                    return worker.compute_all_bounds(**child_kwargs)
+                stream = torch.cuda.Stream(device=self.device)
+                with torch.cuda.stream(stream):
+                    result = worker.compute_all_bounds(**child_kwargs)
+                stream.synchronize()
+                return result
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(run_worker, worker) for worker in worker_inputs]
+                iterator = as_completed(futures)
+                if show_progress:
+                    iterator = tqdm(
+                        iterator,
+                        total=len(futures),
+                        desc="Computing bound shards",
+                        unit="shard",
+                    )
+                for future in iterator:
+                    shard_bounds = future.result()
+                    for label, values in shard_bounds.items():
+                        all_bounds[int(label)] = values
+
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            return {
+                int(label): all_bounds[int(label)]
+                for label in self.class_labels
+                if int(label) in all_bounds
+            }
+
+        for label in tqdm(
+            self.class_labels,
+            desc="Computing bounds",
+            disable=not show_progress,
+        ):
             if label in all_bounds:
                 continue
             label_mask = labels_tensor == label
@@ -558,7 +769,7 @@ class PreimageApproximation:
                         X_stored_list.append(X_batch_stored)
 
                         del X_batch
-                        if self.device.type == 'cuda':
+                        if self.device.type == 'cuda' and self._empty_cuda_cache:
                             torch.cuda.empty_cache()
 
                     lA = np.concatenate(lA_list, axis=0)
@@ -592,6 +803,46 @@ class PreimageApproximation:
                         adaptive_center_slack[i] >= -adaptive_eps_center_tol
                     )
 
+            elif (
+                not self.cnn
+                and batch_size is not None
+                and int(batch_size) > 1
+                and adaptive_eps_binary_search_steps == 0
+            ):
+                # ----------------------------------------------------------------
+                # Batched variable-radius path for fully connected networks.
+                # auto-LiRPA supports a (batch, 1) epsilon tensor for affine
+                # inputs. Failed anchors advance together through shrink waves.
+                # Convolution bounds currently require a scalar epsilon and
+                # therefore continue to use the per-sample path below.
+                # ----------------------------------------------------------------
+                (
+                    lA,
+                    lbias,
+                    uA,
+                    ubias,
+                    X_stored,
+                    eps_label,
+                    adaptive_n_shrinks,
+                    adaptive_n_binary_steps,
+                    adaptive_center_slack,
+                    adaptive_center_certified,
+                ) = self._compute_batched_variable_eps_bounds(
+                    label_index=self.label_to_index[int(label)],
+                    X=X,
+                    eps_label=eps_label,
+                    batch_size=int(batch_size),
+                    norm=norm,
+                    dtype=dtype,
+                    lirpa_method=lirpa_method,
+                    classification_margin=classification_margin,
+                    adaptive_eps=adaptive_eps,
+                    adaptive_eps_shrink_factor=adaptive_eps_shrink_factor,
+                    adaptive_eps_max_shrinks=adaptive_eps_max_shrinks,
+                    adaptive_eps_min=adaptive_eps_min,
+                    adaptive_eps_center_tol=adaptive_eps_center_tol,
+                )
+
             else:
                 # ----------------------------------------------------------------
                 # Per-sample path: loop one sample at a time. Adaptive epsilon
@@ -608,6 +859,7 @@ class PreimageApproximation:
                     desc=f"Class {int(label)} anchors",
                     unit="anchor",
                     leave=False,
+                    disable=not show_progress,
                 ):
                     def _run_single_at_eps(eps_value: float):
                         X_single_local = X[i:i+1].to(dtype).to(self.device)
@@ -634,7 +886,7 @@ class PreimageApproximation:
                         certified_local = slack_local >= -adaptive_eps_center_tol
 
                         del X_single_local
-                        if self.device.type == 'cuda':
+                        if self.device.type == 'cuda' and self._empty_cuda_cache:
                             torch.cuda.empty_cache()
 
                         return (

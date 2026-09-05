@@ -1003,6 +1003,12 @@ def _build_certcf_method(
     if query_k_candidates <= 0:
         raise ValueError("certcf.query_k_candidates must be positive")
     batch_size = int(params.get("batch_size", 256))
+    epsilon_parallelism = int(params.get("epsilon_parallelism", 1))
+    if epsilon_parallelism <= 0:
+        raise ValueError("certcf.epsilon_parallelism must be positive")
+    build_parallelism = int(params.get("build_parallelism", 1))
+    if build_parallelism <= 0:
+        raise ValueError("certcf.build_parallelism must be positive")
     atlas_subsample_method = str(
         params.get("atlas_subsample_method", params.get("subsample_method", "kmedoids"))
     ).lower()
@@ -1127,6 +1133,8 @@ def _build_certcf_method(
         robust_norm=robust_norm,
         eps_strategy=eps_strategy,
         batch_size=batch_size,
+        epsilon_parallelism=epsilon_parallelism,
+        build_parallelism=build_parallelism,
         ohe_slices=cat_slices,
         cnn=cnn,
         default_query_method=query_method,
@@ -1391,6 +1399,20 @@ def _apply_cli_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[
                 params["candidate_parallelism"] = int(candidate_parallelism)
             if candidate_parallel_backend is not None:
                 params["candidate_parallel_backend"] = str(candidate_parallel_backend)
+    build_parallelism = getattr(args, "build_parallelism", None)
+    if build_parallelism is not None:
+        for method in cfg.get("methods", []):
+            if method.get("name") == "certcf":
+                method.setdefault("params", {})["build_parallelism"] = int(
+                    build_parallelism
+                )
+    epsilon_parallelism = getattr(args, "epsilon_parallelism", None)
+    if epsilon_parallelism is not None:
+        for method in cfg.get("methods", []):
+            if method.get("name") == "certcf":
+                method.setdefault("params", {})["epsilon_parallelism"] = int(
+                    epsilon_parallelism
+                )
     if getattr(args, "force", False):
         cfg["force_redo"] = True
     return cfg
@@ -2150,6 +2172,18 @@ def main() -> None:
         choices=["thread", "process"],
         default=None,
         help="Override the CertCF candidate-projection backend.",
+    )
+    parser.add_argument(
+        "--build-parallelism",
+        type=int,
+        default=None,
+        help="Override the number of concurrent CertCF atlas-build workers.",
+    )
+    parser.add_argument(
+        "--epsilon-parallelism",
+        type=int,
+        default=None,
+        help="Override the workers used to compute the initial atlas radii.",
     )
     args = parser.parse_args()
     cfg = _apply_cli_overrides(read_yaml(args.config), args)

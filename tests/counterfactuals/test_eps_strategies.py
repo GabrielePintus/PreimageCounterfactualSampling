@@ -76,3 +76,15 @@ def test_nearest_opposite_class_clearance_strategy_uses_l2_norm():
         dtype=np.float64,
     )
     assert np.allclose(eps, expected)
+
+
+def test_parallel_clearance_matches_serial_chunk_order():
+    rng = np.random.default_rng(17)
+    X = rng.normal(size=(48, 7)).astype(np.float32)
+    y = np.repeat(np.arange(4), 12)
+    strategy = NearestOppositeClassClearanceStrategy(alpha=0.2, chunk_size=3)
+
+    serial = strategy.compute_eps(X, y, norm=1, parallelism=1)
+    parallel = strategy.compute_eps(X, y, norm=1, parallelism=4)
+
+    np.testing.assert_array_equal(parallel, serial)

@@ -16,6 +16,12 @@ It also exposes `prepare`, `train`, `benchmark`, `analyze`, and `status`.
 recovery; resume requires matching configuration fingerprints and checkpoint
 hashes.
 
+Atlas-build execution can be tuned independently from query execution. For
+example, `--epsilon-parallelism 8 --build-parallelism 2` evaluates initial
+radius chunks with eight workers and LiRPA class shards with two workers. The
+configured `lirpa_batch_size` controls vectorized variable-radius batches for
+fully connected networks. Use `--force` when collecting new timing artifacts.
+
 The `all` stage finishes training and accuracy-gating all 25 classifiers before
 starting any CertCF atlas construction or query benchmark. For separate jobs,
 run `train`, then `benchmark`, then `analyze`.
@@ -104,6 +110,9 @@ python scripts/cifar_resnet_scaling.py analyze --config configs/experiments/cifa
 
 `status` reports resumable progress. The official build requires CUDA and is
 capped at 12 hours per network; each online query is capped at 120 seconds.
+The build and pilot stages also accept `--epsilon-parallelism` and
+`--build-parallelism`; these control initial-radius chunks and LiRPA class
+shards, respectively.
 Both `pilot` and the per-network benchmarks use all 10,000 selected CIFAR-10
 training images as atlas anchors; the pilot only reduces the query count and
 runs ResNet20 alone.

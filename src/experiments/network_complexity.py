@@ -161,6 +161,10 @@ def validate_config(cfg: dict[str, Any]) -> None:
         raise ValueError("lirpa_batch_size must be included in lirpa_batch_size_candidates")
     if any(value <= 0 for value in candidates):
         raise ValueError("LiRPA batch-size candidates must be positive")
+    if int(cfg["certcf"].get("epsilon_parallelism", 1)) <= 0:
+        raise ValueError("epsilon_parallelism must be positive")
+    if int(cfg["certcf"].get("build_parallelism", 1)) <= 0:
+        raise ValueError("build_parallelism must be positive")
 
 
 def config_fingerprint(cfg: dict[str, Any]) -> str:
@@ -382,6 +386,10 @@ class NetworkComplexityRunner:
         self.candidate_parallel_warmup = bool(
             certcf_config.get("candidate_parallel_warmup", True)
         )
+        self.epsilon_parallelism = int(certcf_config.get("epsilon_parallelism", 1))
+        self.build_parallelism = int(certcf_config.get("build_parallelism", 1))
+        self.configure_epsilon_parallelism(self.epsilon_parallelism)
+        self.configure_build_parallelism(self.build_parallelism)
         self.configure_candidate_parallelism(
             workers=self.candidate_parallelism,
             backend=self.candidate_parallel_backend,
@@ -412,6 +420,24 @@ class NetworkComplexityRunner:
             if backend not in {"thread", "process"}:
                 raise ValueError("candidate parallel backend must be 'thread' or 'process'")
             self.candidate_parallel_backend = backend
+
+    def configure_build_parallelism(self, workers: int | None = None) -> None:
+        """Set execution-only LiRPA class-shard parallelism."""
+        if workers is None:
+            return
+        workers = int(workers)
+        if workers <= 0:
+            raise ValueError("build parallelism must be positive")
+        self.build_parallelism = workers
+
+    def configure_epsilon_parallelism(self, workers: int | None = None) -> None:
+        """Set execution-only initial-radius parallelism."""
+        if workers is None:
+            return
+        workers = int(workers)
+        if workers <= 0:
+            raise ValueError("epsilon parallelism must be positive")
+        self.epsilon_parallelism = workers
 
     @property
     def endpoints(self) -> list[tuple[int, int]]:
@@ -775,6 +801,8 @@ class NetworkComplexityRunner:
             lirpa_method=str(cfg["lirpa_method"]),
             eps_strategy=NearestOppositeClassClearanceStrategy(alpha=float(cfg["eps_alpha"])),
             batch_size=int(batch_size),
+            epsilon_parallelism=self.epsilon_parallelism,
+            build_parallelism=self.build_parallelism,
             default_query_method=str(cfg["query_method"]),
             query_k_candidates=int(cfg["query_k_candidates"]),
             solver_maxiter=int(cfg["solver_maxiter"]),
@@ -980,6 +1008,7 @@ class NetworkComplexityRunner:
         query_metrics = query_monitor.metrics
 
         training_metadata = self._read_json(self.paths.train_metadata(depth, width)) or {}
+        atlas_build_profiling = getattr(method.atlas, "build_profiling", {})
         shared_metrics: dict[str, Any] = {
             **build_metrics,
             **query_metrics,
@@ -991,6 +1020,11 @@ class NetworkComplexityRunner:
             "classifier_query_accuracy": float(np.mean(query_predictions == y_queries)),
             "training_time_s": float(training_metadata["training_time_s"]),
             "effective_lirpa_batch_size": int(batch_size),
+            "epsilon_parallelism": int(self.epsilon_parallelism),
+            "build_parallelism": int(self.build_parallelism),
+            "lirpa_workers_used": int(
+                atlas_build_profiling.get("lirpa_workers_used", 1)
+            ),
             "candidate_parallelism": int(self.candidate_parallelism),
             "candidate_parallel_backend": self.candidate_parallel_backend,
             "candidate_parallel_warmup_s": float(warmup_time_s),

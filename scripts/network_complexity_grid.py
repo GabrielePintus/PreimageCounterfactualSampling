@@ -47,6 +47,16 @@ def main() -> None:
         help="Override the intra-query projection backend.",
     )
     parser.add_argument(
+        "--build-parallelism",
+        type=int,
+        help="Override the number of concurrent LiRPA class workers.",
+    )
+    parser.add_argument(
+        "--epsilon-parallelism",
+        type=int,
+        help="Override workers for initial-radius computation.",
+    )
+    parser.add_argument(
         "--allow-partial",
         action="store_true",
         help="Allow analysis of only currently complete architecture artifacts.",
@@ -57,6 +67,8 @@ def main() -> None:
         workers=args.candidate_parallelism,
         backend=args.candidate_parallel_backend,
     )
+    runner.configure_build_parallelism(args.build_parallelism)
+    runner.configure_epsilon_parallelism(args.epsilon_parallelism)
     selected = _parse_architectures(args.architectures, runner)
 
     if args.stage == "prepare":

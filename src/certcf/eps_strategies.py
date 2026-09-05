@@ -10,6 +10,7 @@ The returned array is aligned with the dataset rows (all classes combined).
 """
 
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -23,6 +24,7 @@ class EpsStrategy(ABC):
         X: np.ndarray,
         y: np.ndarray,
         norm: int | float = np.inf,
+        parallelism: int = 1,
     ) -> np.ndarray:
         """
         Compute per-sample epsilon values for the full dataset.
@@ -36,6 +38,8 @@ class EpsStrategy(ABC):
         norm : int or float, optional
             Lp norm used to define the opposite-class clearance. Defaults to
             ``np.inf`` for backward compatibility.
+        parallelism : int, optional
+            Maximum number of independent distance chunks evaluated at once.
 
         Returns
         -------
@@ -66,7 +70,10 @@ class ConstantEpsStrategy(EpsStrategy):
         X: np.ndarray,
         y: np.ndarray,
         norm: int | float = np.inf,
+        parallelism: int = 1,
     ) -> np.ndarray:
+        if int(parallelism) <= 0:
+            raise ValueError("parallelism must be positive")
         return np.full(len(X), self.eps)
 
     def __repr__(self) -> str:
@@ -102,8 +109,9 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
     -----
     ``compute_eps`` runs once offline (before LiRPA), with cost O(N^2)
     pairwise distance computations implemented via
-    ``scipy.spatial.distance.cdist``. For N <= 10 000 and moderate d this is
-    negligible compared with the LiRPA calls that follow.
+    ``scipy.spatial.distance.cdist``. Distance chunks can be evaluated by
+    multiple workers through the ``parallelism`` argument; this is especially
+    useful when both the number of support points and input dimension are high.
     """
 
     def __init__(self, alpha: float = 0.25, *, chunk_size: int = 128):
@@ -147,6 +155,7 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
         X: np.ndarray,
         y: np.ndarray,
         norm: int | float = np.inf,
+        parallelism: int = 1,
     ) -> np.ndarray:
         from scipy.spatial.distance import cdist
 
@@ -155,30 +164,57 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
         N = len(X)
         eps = np.zeros(N)
         metric, metric_kwargs = self._resolve_cdist_metric(norm)
+        parallelism = int(parallelism)
+        if parallelism <= 0:
+            raise ValueError("parallelism must be positive")
 
         reference_X = X if self._reference_X is None else self._reference_X
         reference_y = y if self._reference_y is None else self._reference_y
         if reference_X.shape[1] != X.shape[1]:
             raise ValueError("reference and anchor feature dimensions do not match")
 
-        for c in np.unique(y):
-            mask_c = y == c
-            mask_other = reference_y != c
+        def chunk_minimum(
+            X_chunk: np.ndarray,
+            X_other: np.ndarray,
+        ) -> np.ndarray:
+            distances = cdist(X_chunk, X_other, metric=metric, **metric_kwargs)
+            return distances.min(axis=1)
 
-            if not np.any(mask_other):
-                # Only one class exists — clearance is undefined; leave eps=0.
-                continue
+        executor = (
+            ThreadPoolExecutor(max_workers=parallelism)
+            if parallelism > 1
+            else None
+        )
+        try:
+            for c in np.unique(y):
+                mask_c = y == c
+                mask_other = reference_y != c
 
-            X_c = X[mask_c]
-            X_other = reference_X[mask_other]
-            clearance = np.full(len(X_c), np.inf, dtype=np.float64)
-            for start in range(0, len(X_c), self.chunk_size):
-                stop = min(start + self.chunk_size, len(X_c))
-                dists = cdist(
-                    X_c[start:stop], X_other, metric=metric, **metric_kwargs
-                )
-                clearance[start:stop] = dists.min(axis=1)
-            eps[mask_c] = self.alpha * clearance
+                if not np.any(mask_other):
+                    # Only one class exists — clearance is undefined; leave eps=0.
+                    continue
+
+                X_c = X[mask_c]
+                X_other = reference_X[mask_other]
+                clearance = np.full(len(X_c), np.inf, dtype=np.float64)
+                chunks = []
+                for start in range(0, len(X_c), self.chunk_size):
+                    stop = min(start + self.chunk_size, len(X_c))
+                    if executor is None:
+                        clearance[start:stop] = chunk_minimum(
+                            X_c[start:stop], X_other
+                        )
+                    else:
+                        future = executor.submit(
+                            chunk_minimum, X_c[start:stop], X_other
+                        )
+                        chunks.append((start, stop, future))
+                for start, stop, future in chunks:
+                    clearance[start:stop] = future.result()
+                eps[mask_c] = self.alpha * clearance
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         return eps
 

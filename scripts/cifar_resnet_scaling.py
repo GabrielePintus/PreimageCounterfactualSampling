@@ -45,6 +45,16 @@ def main() -> None:
         choices=["thread", "process"],
         help="Execution-only backend for concurrent candidate projections.",
     )
+    parser.add_argument(
+        "--build-parallelism",
+        type=int,
+        help="Execution-only number of concurrent LiRPA class workers.",
+    )
+    parser.add_argument(
+        "--epsilon-parallelism",
+        type=int,
+        help="Execution-only workers for initial-radius computation.",
+    )
     args = parser.parse_args()
 
     runner = CifarResNetScalingRunner.from_yaml(args.config)
@@ -52,6 +62,8 @@ def main() -> None:
         workers=args.candidate_parallelism,
         backend=args.candidate_parallel_backend,
     )
+    runner.configure_build_parallelism(args.build_parallelism)
+    runner.configure_epsilon_parallelism(args.epsilon_parallelism)
     if args.stage in {"build", "query", "benchmark"} and args.network is None:
         parser.error(f"{args.stage} requires --network")
 

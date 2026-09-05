@@ -175,6 +175,8 @@ class CertCFAtlas:
         lirpa_method: str = "backward",
         eps_strategy: Optional[EpsStrategy] = None,
         batch_size: Optional[int] = None,
+        epsilon_parallelism: int = 1,
+        build_parallelism: int = 1,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         input_bounds: Optional[Sequence[float]] = None,
         # Query configuration
@@ -213,6 +215,12 @@ class CertCFAtlas:
         self.lirpa_method = str(lirpa_method)
         self.eps_strategy = eps_strategy
         self.batch_size = batch_size
+        self.epsilon_parallelism = int(epsilon_parallelism)
+        if self.epsilon_parallelism <= 0:
+            raise ValueError("epsilon_parallelism must be positive")
+        self.build_parallelism = int(build_parallelism)
+        if self.build_parallelism <= 0:
+            raise ValueError("build_parallelism must be positive")
         self.ohe_slices = ohe_slices
         self.input_bounds = self._normalize_input_bounds(input_bounds)
         self.bounds_checkpoint_dir = (
@@ -551,7 +559,12 @@ class CertCFAtlas:
         X_all = self._preimage.dataset.tensors[0].numpy()
         y_all = self._preimage.dataset.tensors[1].numpy()
         epsilon_started = time.perf_counter()
-        eps_array = eps_strategy.compute_eps(X_all, y_all, norm=norm)
+        eps_array = eps_strategy.compute_eps(
+            X_all,
+            y_all,
+            norm=norm,
+            parallelism=self.epsilon_parallelism,
+        )
         epsilon_time_s = time.perf_counter() - epsilon_started
 
         if verbose:
@@ -576,6 +589,9 @@ class CertCFAtlas:
                         precomputed_bounds[int(label)] = {
                             key: data[key] for key in data.files
                         }
+        remaining_bound_class_count = sum(
+            int(label) not in precomputed_bounds for label in self.class_labels
+        )
 
         def checkpoint_class(label: int, values: Dict[str, np.ndarray]) -> None:
             if self.bounds_checkpoint_dir is None:
@@ -603,6 +619,7 @@ class CertCFAtlas:
             adaptive_eps_binary_search_steps=self.adaptive_eps_binary_search_steps,
             precomputed_bounds=precomputed_bounds,
             class_completed_callback=checkpoint_class,
+            build_parallelism=self.build_parallelism,
         )
         lirpa_time_s = time.perf_counter() - lirpa_started
 
@@ -650,6 +667,11 @@ class CertCFAtlas:
             "epsilon_time_s": float(epsilon_time_s),
             "lirpa_time_s": float(lirpa_time_s),
             "bvh_time_s": float(bvh_time_s),
+            "epsilon_parallelism": int(self.epsilon_parallelism),
+            "build_parallelism": int(self.build_parallelism),
+            "lirpa_workers_used": int(
+                min(self.build_parallelism, remaining_bound_class_count)
+            ),
         }
 
         # Step 3: Optionally build polygon unions (for 2D visualization)
