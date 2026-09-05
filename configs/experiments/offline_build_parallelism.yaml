@@ -9,7 +9,6 @@ cases:
   heloc:
     kind: lirpa_ablation
     source_case: heloc
-    reference_atlas: results/lirpa_refinement_ablation/cases/heloc/certcf/atlas
   fcnn_depth05_width256:
     kind: network_complexity
     depth: 5
@@ -17,7 +16,6 @@ cases:
   cifar_resnet20:
     kind: cifar_scaling
     network: resnet20
-    reference_atlas: results/cifar_resnet_scaling/networks/resnet20/atlas
 
 variants:
   serial:
