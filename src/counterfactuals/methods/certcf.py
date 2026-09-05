@@ -57,6 +57,8 @@ class CertCF(BaseCounterfactualMethod):
         batch_size: Optional[int] = None,
         epsilon_parallelism: int = 1,
         build_parallelism: int = 1,
+        cnn_radius_batch_size: int = 1,
+        cnn_radius_batch_max_relative_inflation: float = 0.0,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         input_bounds: Optional[Sequence[float]] = None,
 
@@ -128,6 +130,16 @@ class CertCF(BaseCounterfactualMethod):
         self.build_parallelism = int(build_parallelism)
         if self.build_parallelism <= 0:
             raise ValueError("build_parallelism must be positive")
+        self.cnn_radius_batch_size = int(cnn_radius_batch_size)
+        if self.cnn_radius_batch_size <= 0:
+            raise ValueError("cnn_radius_batch_size must be positive")
+        self.cnn_radius_batch_max_relative_inflation = float(
+            cnn_radius_batch_max_relative_inflation
+        )
+        if self.cnn_radius_batch_max_relative_inflation < 0.0:
+            raise ValueError(
+                "cnn_radius_batch_max_relative_inflation must be non-negative"
+            )
         self.ohe_slices = ohe_slices
         normalize_input_bounds = getattr(CertCFAtlas, "_normalize_input_bounds", None)
         if normalize_input_bounds is None:
@@ -530,6 +542,10 @@ class CertCF(BaseCounterfactualMethod):
             batch_size=self.batch_size,
             epsilon_parallelism=self.epsilon_parallelism,
             build_parallelism=self.build_parallelism,
+            cnn_radius_batch_size=self.cnn_radius_batch_size,
+            cnn_radius_batch_max_relative_inflation=(
+                self.cnn_radius_batch_max_relative_inflation
+            ),
             ohe_slices=self.ohe_slices,
             input_bounds=self.input_bounds,
             default_query_method=self.default_query_method,

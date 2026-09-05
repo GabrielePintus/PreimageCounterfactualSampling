@@ -103,6 +103,78 @@ def test_reused_lirpa_graph_matches_fresh_graph():
         np.testing.assert_allclose(reused[label]["lbias"], fresh[label]["lbias"], atol=1e-7)
 
 
+def test_bucketed_cnn_bounds_are_sound_on_each_original_ball():
+    model = torch.nn.Sequential(
+        torch.nn.Conv2d(1, 1, kernel_size=1, bias=False),
+        torch.nn.ReLU(),
+        torch.nn.Flatten(),
+        torch.nn.Linear(4, 2),
+    ).eval()
+    with torch.no_grad():
+        model[0].weight.fill_(1.0)
+        model[3].weight.copy_(
+            torch.tensor(
+                [[1.0, 1.0, 1.0, 1.0], [-1.0, -1.0, -1.0, -1.0]]
+            )
+        )
+        model[3].bias.copy_(torch.tensor([-2.0, 2.0]))
+
+    X = torch.tensor(
+        [
+            [0.80, 0.70, 0.75, 0.85],
+            [0.75, 0.80, 0.70, 0.90],
+            [0.20, 0.30, 0.25, 0.15],
+            [0.25, 0.20, 0.30, 0.10],
+        ],
+        dtype=torch.float32,
+    )
+    with torch.no_grad():
+        labels = model(X.reshape(-1, 1, 2, 2)).argmax(dim=1)
+    assert labels.tolist() == [0, 0, 1, 1]
+    eps_array = np.array([0.020, 0.021, 0.030, 0.031], dtype=np.float64)
+    dataset = TensorDataset(X, labels)
+
+    bounds = PreimageApproximation(
+        model,
+        dataset,
+        torch.device("cpu"),
+        cnn=True,
+        model_input_shape=(1, 2, 2),
+        reuse_lirpa_graph=True,
+    ).compute_all_bounds(
+        norm=1,
+        eps_array=eps_array,
+        batch_size=2,
+        adaptive_eps=True,
+        cnn_radius_batch_size=2,
+        cnn_radius_batch_max_relative_inflation=0.05,
+        show_progress=False,
+    )
+
+    rng = np.random.default_rng(17)
+    for label in (0, 1):
+        class_bounds = bounds[label]
+        assert int(class_bounds["cnn_radius_bucket_count"]) == 1
+        assert int(class_bounds["cnn_radius_bucket_fallback_count"]) == 0
+        for anchor_index, center in enumerate(class_bounds["X"]):
+            radius = float(class_bounds["eps"][anchor_index])
+            for _ in range(20):
+                direction = rng.normal(size=center.shape)
+                direction /= np.linalg.norm(direction, ord=1)
+                point = center + direction * radius * rng.uniform()
+                with torch.no_grad():
+                    logits = model(
+                        torch.from_numpy(point.astype(np.float32)).reshape(1, 1, 2, 2)
+                    )[0]
+                other = 1 - label
+                actual_margin = float(logits[label] - logits[other])
+                affine_lower = float(
+                    class_bounds["lA"][anchor_index, 0] @ point
+                    + class_bounds["lbias"][anchor_index, 0]
+                )
+                assert affine_lower <= actual_margin + 1.0e-5
+
+
 def test_completed_lirpa_classes_can_be_resumed(monkeypatch):
     model = torch.nn.Sequential(torch.nn.Linear(2, 2)).eval()
     dataset = TensorDataset(

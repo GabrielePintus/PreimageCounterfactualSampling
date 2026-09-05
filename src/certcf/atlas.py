@@ -173,6 +173,8 @@ class CertCFAtlas:
         batch_size: Optional[int] = None,
         epsilon_parallelism: int = 1,
         build_parallelism: int = 1,
+        cnn_radius_batch_size: int = 1,
+        cnn_radius_batch_max_relative_inflation: float = 0.0,
         ohe_slices: Optional[List[Tuple[int, int]]] = None,
         input_bounds: Optional[Sequence[float]] = None,
         # Query configuration
@@ -217,6 +219,16 @@ class CertCFAtlas:
         self.build_parallelism = int(build_parallelism)
         if self.build_parallelism <= 0:
             raise ValueError("build_parallelism must be positive")
+        self.cnn_radius_batch_size = int(cnn_radius_batch_size)
+        if self.cnn_radius_batch_size <= 0:
+            raise ValueError("cnn_radius_batch_size must be positive")
+        self.cnn_radius_batch_max_relative_inflation = float(
+            cnn_radius_batch_max_relative_inflation
+        )
+        if self.cnn_radius_batch_max_relative_inflation < 0.0:
+            raise ValueError(
+                "cnn_radius_batch_max_relative_inflation must be non-negative"
+            )
         self.ohe_slices = ohe_slices
         self.input_bounds = self._normalize_input_bounds(input_bounds)
         self.bounds_checkpoint_dir = (
@@ -614,6 +626,10 @@ class CertCFAtlas:
             precomputed_bounds=precomputed_bounds,
             class_completed_callback=checkpoint_class,
             build_parallelism=self.build_parallelism,
+            cnn_radius_batch_size=self.cnn_radius_batch_size,
+            cnn_radius_batch_max_relative_inflation=(
+                self.cnn_radius_batch_max_relative_inflation
+            ),
         )
         lirpa_time_s = time.perf_counter() - lirpa_started
 
@@ -648,6 +664,22 @@ class CertCFAtlas:
             "build_parallelism": int(self.build_parallelism),
             "lirpa_workers_used": int(
                 min(self.build_parallelism, remaining_bound_class_count)
+            ),
+            "cnn_radius_bucket_count": int(
+                sum(
+                    int(np.asarray(values.get("cnn_radius_bucket_count", 0)))
+                    for values in self.bounds.values()
+                )
+            ),
+            "cnn_radius_bucket_fallback_count": int(
+                sum(
+                    int(
+                        np.asarray(
+                            values.get("cnn_radius_bucket_fallback_count", 0)
+                        )
+                    )
+                    for values in self.bounds.values()
+                )
             ),
         }
 

@@ -30,6 +30,12 @@ variants:
   combined:
     epsilon_parallelism: 8
     build_parallelism: 2
+  cnn_batch64:
+    cases: [cifar_resnet20]
+    epsilon_parallelism: 8
+    build_parallelism: 1
+    cnn_radius_batch_size: 64
+    cnn_radius_batch_max_relative_inflation: 0.05
 
 comparison:
   absolute_tolerance: 1.0e-6

@@ -438,6 +438,225 @@ class PreimageApproximation:
             center_certified,
         )
 
+    @staticmethod
+    def _partition_cnn_radius_buckets(
+        eps_values: np.ndarray,
+        *,
+        maximum_size: int,
+        maximum_relative_inflation: float,
+    ) -> list[np.ndarray]:
+        """Group nearby radii while bounding inflation by the bucket maximum."""
+        eps_values = np.asarray(eps_values, dtype=np.float64).reshape(-1)
+        maximum_size = int(maximum_size)
+        maximum_relative_inflation = float(maximum_relative_inflation)
+        if maximum_size <= 0:
+            raise ValueError("maximum_size must be positive")
+        if maximum_relative_inflation < 0.0:
+            raise ValueError("maximum_relative_inflation must be non-negative")
+        if len(eps_values) == 0:
+            return []
+
+        order = np.argsort(eps_values, kind="stable")
+        buckets: list[np.ndarray] = []
+        start = 0
+        while start < len(order):
+            first_radius = float(eps_values[order[start]])
+            relative_limit = first_radius * (1.0 + maximum_relative_inflation)
+            stop = start + 1
+            while (
+                stop < len(order)
+                and stop - start < maximum_size
+                and float(eps_values[order[stop]]) <= relative_limit
+            ):
+                stop += 1
+            buckets.append(order[start:stop])
+            start = stop
+        return buckets
+
+    def _compute_bucketed_cnn_bounds(
+        self,
+        *,
+        label_index: int,
+        label: int,
+        X: torch.Tensor,
+        eps_label: np.ndarray,
+        bucket_batch_size: int,
+        maximum_relative_inflation: float,
+        norm: int,
+        dtype: torch.dtype,
+        lirpa_method: str,
+        classification_margin: float,
+        adaptive_eps: bool,
+        adaptive_eps_shrink_factor: float,
+        adaptive_eps_max_shrinks: int,
+        adaptive_eps_min: float,
+        adaptive_eps_center_tol: float,
+        show_progress: bool,
+    ) -> tuple:
+        """Certify CNN anchors in sound common-radius buckets.
+
+        Each bucket is evaluated at its largest radius. The resulting affine
+        bounds are therefore valid for every smaller original ball in that
+        bucket. Anchors whose centers do not certify under this conservative
+        relaxation fall back to the exact individual-radius path.
+        """
+        eps_initial = np.asarray(eps_label, dtype=np.float64).copy()
+        eps_final = eps_initial.copy()
+        sample_count = len(X)
+        n_shrinks = np.zeros(sample_count, dtype=np.int64)
+        n_binary_steps = np.zeros(sample_count, dtype=np.int64)
+        center_slack = np.full(sample_count, np.nan, dtype=np.float64)
+        center_certified = np.zeros(sample_count, dtype=bool)
+        lA_by_sample = [None] * sample_count
+        lbias_by_sample = [None] * sample_count
+        uA_by_sample = [None] * sample_count
+        ubias_by_sample = [None] * sample_count
+        X_by_sample = [None] * sample_count
+
+        buckets = self._partition_cnn_radius_buckets(
+            eps_initial,
+            maximum_size=bucket_batch_size,
+            maximum_relative_inflation=maximum_relative_inflation,
+        )
+        fallback_indices: list[int] = []
+        maximum_observed_inflation = 0.0
+
+        iterator = tqdm(
+            buckets,
+            desc=f"Class {int(label)} radius buckets",
+            unit="bucket",
+            leave=False,
+            disable=not show_progress,
+        )
+        for indices in iterator:
+            index_list = indices.tolist()
+            bucket_radii = eps_initial[indices]
+            common_radius = float(np.max(bucket_radii))
+            positive = bucket_radii > 0.0
+            if np.any(positive):
+                maximum_observed_inflation = max(
+                    maximum_observed_inflation,
+                    float(np.max(common_radius / bucket_radii[positive] - 1.0)),
+                )
+
+            X_batch = X[index_list].to(device=self.device, dtype=dtype)
+            X_batch = self._reshape_cnn_batch(X_batch)
+            with _lirpa_grad_context(lirpa_method):
+                lA, lbias, uA, ubias = self._run_bounds(
+                    label_index,
+                    X_batch,
+                    eps=common_radius,
+                    norm=norm,
+                    dtype=dtype,
+                    lirpa_method=lirpa_method,
+                )
+            X_stored = X_batch.detach().cpu().numpy().reshape(len(indices), -1)
+
+            for local_index, sample_index_value in enumerate(indices):
+                sample_index = int(sample_index_value)
+                slack = _center_certification_slack(
+                    lA[local_index:local_index + 1],
+                    lbias[local_index:local_index + 1],
+                    X_stored[local_index],
+                    classification_margin=classification_margin,
+                )
+                certified = slack >= -adaptive_eps_center_tol
+                if not certified:
+                    fallback_indices.append(sample_index)
+                    continue
+                lA_by_sample[sample_index] = lA[local_index:local_index + 1]
+                lbias_by_sample[sample_index] = lbias[local_index:local_index + 1]
+                uA_by_sample[sample_index] = uA[local_index:local_index + 1]
+                ubias_by_sample[sample_index] = ubias[local_index:local_index + 1]
+                X_by_sample[sample_index] = X_stored[local_index:local_index + 1]
+                center_slack[sample_index] = slack
+                center_certified[sample_index] = True
+
+            del X_batch
+            if self.device.type == "cuda" and self._empty_cuda_cache:
+                torch.cuda.empty_cache()
+
+        for sample_index in fallback_indices:
+            eps_i = float(eps_initial[sample_index])
+            shrink_count = 0
+            while True:
+                X_single = X[sample_index:sample_index + 1].to(
+                    device=self.device,
+                    dtype=dtype,
+                )
+                X_single = self._reshape_cnn_batch(X_single)
+                with _lirpa_grad_context(lirpa_method):
+                    lA_i, lbias_i, uA_i, ubias_i = self._run_bounds(
+                        label_index,
+                        X_single,
+                        eps=eps_i,
+                        norm=norm,
+                        dtype=dtype,
+                        lirpa_method=lirpa_method,
+                    )
+                X_single_stored = X_single.detach().cpu().numpy().reshape(1, -1)
+                slack = _center_certification_slack(
+                    lA_i,
+                    lbias_i,
+                    X_single_stored[0],
+                    classification_margin=classification_margin,
+                )
+                certified = slack >= -adaptive_eps_center_tol
+                del X_single
+                if self.device.type == "cuda" and self._empty_cuda_cache:
+                    torch.cuda.empty_cache()
+
+                if certified or not adaptive_eps:
+                    break
+                should_retry = (
+                    shrink_count < adaptive_eps_max_shrinks
+                    and eps_i * adaptive_eps_shrink_factor >= adaptive_eps_min
+                )
+                if not should_retry:
+                    break
+                eps_i *= adaptive_eps_shrink_factor
+                shrink_count += 1
+
+            lA_by_sample[sample_index] = lA_i
+            lbias_by_sample[sample_index] = lbias_i
+            uA_by_sample[sample_index] = uA_i
+            ubias_by_sample[sample_index] = ubias_i
+            X_by_sample[sample_index] = X_single_stored
+            eps_final[sample_index] = eps_i
+            n_shrinks[sample_index] = shrink_count
+            center_slack[sample_index] = slack
+            center_certified[sample_index] = certified
+
+        if any(value is None for value in lA_by_sample):
+            raise RuntimeError("CNN radius batching did not produce every anchor bound")
+
+        diagnostics = {
+            "cnn_radius_bucket_count": int(len(buckets)),
+            "cnn_radius_bucket_fallback_count": int(len(fallback_indices)),
+            "cnn_radius_bucket_max_size": int(
+                max((len(bucket) for bucket in buckets), default=0)
+            ),
+            "cnn_radius_bucket_mean_size": float(
+                sample_count / max(len(buckets), 1)
+            ),
+            "cnn_radius_bucket_max_relative_inflation": float(
+                maximum_observed_inflation
+            ),
+        }
+        return (
+            np.concatenate(lA_by_sample, axis=0),
+            np.concatenate(lbias_by_sample, axis=0),
+            np.concatenate(uA_by_sample, axis=0),
+            np.concatenate(ubias_by_sample, axis=0),
+            np.concatenate(X_by_sample, axis=0),
+            eps_final,
+            n_shrinks,
+            n_binary_steps,
+            center_slack,
+            center_certified,
+            diagnostics,
+        )
+
     def estimate_memory_usage(
         self,
         n_samples_per_class: int,
@@ -527,6 +746,8 @@ class PreimageApproximation:
         precomputed_bounds: dict | None = None,
         class_completed_callback=None,
         build_parallelism: int = 1,
+        cnn_radius_batch_size: int = 1,
+        cnn_radius_batch_max_relative_inflation: float = 0.0,
         show_progress: bool = True,
     ) -> dict:
         """
@@ -568,6 +789,13 @@ class PreimageApproximation:
             Number of independent class shards. Each shard owns a copied model
             and reusable LiRPA sessions. The default of one preserves serial
             execution.
+        cnn_radius_batch_size : int, optional
+            Maximum number of CNN anchors certified together using a common
+            conservative radius. A value of one disables radius bucketing.
+        cnn_radius_batch_max_relative_inflation : float, optional
+            Maximum relative increase from an anchor radius to its bucket's
+            common radius. Bounds computed on the larger ball remain sound on
+            the original ball. Failed centers fall back to individual bounds.
 
         Returns
         -------
@@ -605,6 +833,16 @@ class PreimageApproximation:
         build_parallelism = int(build_parallelism)
         if build_parallelism <= 0:
             raise ValueError("build_parallelism must be positive")
+        cnn_radius_batch_size = int(cnn_radius_batch_size)
+        if cnn_radius_batch_size <= 0:
+            raise ValueError("cnn_radius_batch_size must be positive")
+        cnn_radius_batch_max_relative_inflation = float(
+            cnn_radius_batch_max_relative_inflation
+        )
+        if cnn_radius_batch_max_relative_inflation < 0.0:
+            raise ValueError(
+                "cnn_radius_batch_max_relative_inflation must be non-negative"
+            )
 
         all_bounds = dict(precomputed_bounds or {})
         labels_tensor = self.dataset.tensors[1]
@@ -659,6 +897,10 @@ class PreimageApproximation:
                 "precomputed_bounds": None,
                 "class_completed_callback": shard_completed_callback,
                 "build_parallelism": 1,
+                "cnn_radius_batch_size": cnn_radius_batch_size,
+                "cnn_radius_batch_max_relative_inflation": (
+                    cnn_radius_batch_max_relative_inflation
+                ),
                 "show_progress": False,
             }
 
@@ -731,6 +973,7 @@ class PreimageApproximation:
             adaptive_n_binary_steps = np.zeros(len(X), dtype=np.int64)
             adaptive_center_slack = np.full(len(X), np.nan, dtype=np.float64)
             adaptive_center_certified = np.zeros(len(X), dtype=bool)
+            cnn_batch_diagnostics: dict[str, int | float] = {}
 
             if eps_is_constant and not adaptive_eps:
                 # ----------------------------------------------------------------
@@ -802,6 +1045,54 @@ class PreimageApproximation:
                     adaptive_center_certified[i] = (
                         adaptive_center_slack[i] >= -adaptive_eps_center_tol
                     )
+
+            elif (
+                self.cnn
+                and cnn_radius_batch_size > 1
+                and batch_size is not None
+                and int(batch_size) > 1
+                and adaptive_eps_binary_search_steps == 0
+            ):
+                # ----------------------------------------------------------------
+                # Sound bucketed-radius CNN path. Every batch uses the largest
+                # radius in a narrow bucket, so its bounds remain valid for all
+                # original balls. Conservative failures use the exact path.
+                # ----------------------------------------------------------------
+                (
+                    lA,
+                    lbias,
+                    uA,
+                    ubias,
+                    X_stored,
+                    eps_label,
+                    adaptive_n_shrinks,
+                    adaptive_n_binary_steps,
+                    adaptive_center_slack,
+                    adaptive_center_certified,
+                    cnn_batch_diagnostics,
+                ) = self._compute_bucketed_cnn_bounds(
+                    label_index=self.label_to_index[int(label)],
+                    label=int(label),
+                    X=X,
+                    eps_label=eps_label,
+                    bucket_batch_size=min(
+                        int(batch_size),
+                        cnn_radius_batch_size,
+                    ),
+                    maximum_relative_inflation=(
+                        cnn_radius_batch_max_relative_inflation
+                    ),
+                    norm=norm,
+                    dtype=dtype,
+                    lirpa_method=lirpa_method,
+                    classification_margin=classification_margin,
+                    adaptive_eps=adaptive_eps,
+                    adaptive_eps_shrink_factor=adaptive_eps_shrink_factor,
+                    adaptive_eps_max_shrinks=adaptive_eps_max_shrinks,
+                    adaptive_eps_min=adaptive_eps_min,
+                    adaptive_eps_center_tol=adaptive_eps_center_tol,
+                    show_progress=show_progress,
+                )
 
             elif (
                 not self.cnn
@@ -1015,6 +1306,7 @@ class PreimageApproximation:
                 'adaptive_eps_n_binary_steps': adaptive_n_binary_steps,
                 'adaptive_eps_center_slack': adaptive_center_slack,
                 'adaptive_eps_center_certified': adaptive_center_certified,
+                **cnn_batch_diagnostics,
             }
             if class_completed_callback is not None:
                 class_completed_callback(int(label), all_bounds[label])

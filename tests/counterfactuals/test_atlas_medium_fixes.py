@@ -658,6 +658,82 @@ def test_preimage_batched_variable_eps_matches_per_sample_real_lirpa(
             np.testing.assert_array_equal(batched[label][key], legacy[label][key])
 
 
+def test_cnn_radius_buckets_bound_size_and_relative_inflation():
+    eps = np.array([2.0, 1.0, 1.04, 1.2, 2.05, 2.2], dtype=np.float64)
+
+    buckets = PreimageApproximation._partition_cnn_radius_buckets(
+        eps,
+        maximum_size=3,
+        maximum_relative_inflation=0.05,
+    )
+
+    assert [bucket.tolist() for bucket in buckets] == [[1, 2], [3], [0, 4], [5]]
+    for bucket in buckets:
+        radii = eps[bucket]
+        assert len(bucket) <= 3
+        assert np.max(radii) / np.min(radii) - 1.0 <= 0.05 + 1.0e-12
+
+
+def test_preimage_bucketed_cnn_bounds_batch_and_fallback(monkeypatch):
+    X = torch.tensor(
+        [
+            [0.1, 0.2, 0.3, 0.4],
+            [0.2, 0.3, 0.4, 0.5],
+            [0.3, 0.4, 0.5, 0.6],
+            [0.6, 0.5, 0.4, 0.3],
+            [0.5, 0.4, 0.3, 0.2],
+            [0.4, 0.3, 0.2, 0.1],
+        ],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int64)
+    dataset = torch.utils.data.TensorDataset(X, labels)
+    eps_array = np.array([0.10, 0.102, 0.104, 0.20, 0.204, 0.208])
+    preimage = PreimageApproximation(
+        torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(4, 2)),
+        dataset,
+        torch.device("cpu"),
+        cnn=True,
+        model_input_shape=(1, 2, 2),
+    )
+    calls = []
+
+    def fake_run_bounds(label, batch, *, eps, norm, dtype, lirpa_method):
+        del norm, dtype, lirpa_method
+        count = len(batch)
+        dimension = int(np.prod(batch.shape[1:]))
+        calls.append((int(label), count, float(eps)))
+        coefficients = np.zeros((count, 1, dimension), dtype=np.float32)
+        biases = np.ones((count, 1), dtype=np.float32)
+        if count > 1:
+            biases[0, 0] = -1.0
+        return coefficients, biases, coefficients.copy(), biases.copy()
+
+    monkeypatch.setattr(preimage, "_run_bounds", fake_run_bounds)
+    bounds = preimage.compute_all_bounds(
+        norm=1,
+        eps_array=eps_array,
+        batch_size=3,
+        adaptive_eps=True,
+        cnn_radius_batch_size=3,
+        cnn_radius_batch_max_relative_inflation=0.05,
+        show_progress=False,
+    )
+
+    assert [(label, count) for label, count, _ in calls] == [
+        (0, 3),
+        (0, 1),
+        (1, 3),
+        (1, 1),
+    ]
+    for label, positions in ((0, slice(0, 3)), (1, slice(3, 6))):
+        np.testing.assert_allclose(bounds[label]["eps"], eps_array[positions])
+        assert int(bounds[label]["cnn_radius_bucket_count"]) == 1
+        assert int(bounds[label]["cnn_radius_bucket_fallback_count"]) == 1
+        assert np.all(bounds[label]["adaptive_eps_center_certified"])
+        assert np.all(bounds[label]["adaptive_eps_n_shrinks"] == 0)
+
+
 def test_preimage_adaptive_eps_halves_until_center_is_certified(monkeypatch):
     dataset = torch.utils.data.TensorDataset(
         torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float32),
@@ -806,6 +882,8 @@ def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
         lirpa_method="alpha-crown",
         epsilon_parallelism=5,
         build_parallelism=3,
+        cnn_radius_batch_size=16,
+        cnn_radius_batch_max_relative_inflation=0.05,
         classification_margin=0.123,
         adaptive_eps=True,
         adaptive_eps_shrink_factor=0.25,
@@ -824,6 +902,8 @@ def test_certcf_method_forwards_lirpa_method_to_atlas(monkeypatch):
     assert init_calls[0]["lirpa_method"] == "alpha-crown"
     assert init_calls[0]["epsilon_parallelism"] == 5
     assert init_calls[0]["build_parallelism"] == 3
+    assert init_calls[0]["cnn_radius_batch_size"] == 16
+    assert init_calls[0]["cnn_radius_batch_max_relative_inflation"] == 0.05
     assert init_calls[0]["classification_margin"] == 0.123
     assert init_calls[0]["adaptive_eps"] is True
     assert init_calls[0]["adaptive_eps_shrink_factor"] == 0.25

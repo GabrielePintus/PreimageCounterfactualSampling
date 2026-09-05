@@ -31,6 +31,7 @@ from experiments.network_complexity import (
     _normalize_device,
     architecture_id,
 )
+from certcf.eps_strategies import NearestOppositeClassClearanceStrategy
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -92,6 +93,15 @@ def validate_config(config: Mapping[str, Any]) -> None:
         for key in ("epsilon_parallelism", "build_parallelism"):
             if int(variant.get(key, 0)) <= 0:
                 raise ValueError(f"{variant_id}.{key} must be positive")
+        if int(variant.get("cnn_radius_batch_size", 1)) <= 0:
+            raise ValueError(f"{variant_id}.cnn_radius_batch_size must be positive")
+        if float(variant.get("cnn_radius_batch_max_relative_inflation", 0.0)) < 0.0:
+            raise ValueError(
+                f"{variant_id}.cnn_radius_batch_max_relative_inflation must be non-negative"
+            )
+        unknown_cases = set(variant.get("cases", ())).difference(config["cases"])
+        if unknown_cases:
+            raise ValueError(f"{variant_id}.cases contains unknown cases: {unknown_cases}")
     comparison = config.get("comparison", {})
     if float(comparison.get("absolute_tolerance", -1.0)) < 0.0:
         raise ValueError("comparison.absolute_tolerance must be non-negative")
@@ -134,6 +144,10 @@ class OfflineBuildPaths:
 
     def generated_reference(self, case_id: str) -> Path:
         return self.root / case_id / "serial" / "atlas"
+
+    @property
+    def epsilon_sweep(self) -> Path:
+        return self.root / "epsilon_parallelism_sweep.parquet"
 
     @property
     def summary(self) -> Path:
@@ -297,6 +311,10 @@ class OfflineBuildParallelismRunner:
             and payload.get("implementation_commit") == _git_commit()
         )
 
+    def _variant_applies(self, case_id: str, variant_id: str) -> bool:
+        selected = self.config["variants"][variant_id].get("cases")
+        return selected is None or case_id in selected
+
     @staticmethod
     def _predict_support(model: torch.nn.Module, values: np.ndarray, device: str) -> np.ndarray:
         parts = []
@@ -344,7 +362,14 @@ class OfflineBuildParallelismRunner:
         )
         return method, metrics, device
 
-    def _build_cifar(self, case: Mapping[str, Any], eps_workers: int, build_workers: int):
+    def _build_cifar(
+        self,
+        case: Mapping[str, Any],
+        eps_workers: int,
+        build_workers: int,
+        cnn_radius_batch_size: int,
+        cnn_radius_batch_max_relative_inflation: float,
+    ):
         source = CifarResNetScalingRunner.from_yaml(
             self._source_config("cifar_scaling")
         )
@@ -358,10 +383,127 @@ class OfflineBuildParallelismRunner:
         values = prepared["x_support"].astype(np.float32)
         y_support = source._predict(model, values.reshape(-1, 3, 32, 32), device)
         method = source._method(model, None)
+        method.cnn_radius_batch_size = int(cnn_radius_batch_size)
+        method.cnn_radius_batch_max_relative_inflation = float(
+            cnn_radius_batch_max_relative_inflation
+        )
         interval = float(source.config["resources"]["rss_sample_interval_seconds"])
         with PhaseResourceMonitor("build", device, interval) as monitor:
             method.fit(values, y_support)
         return method, monitor.metrics, device
+
+    @staticmethod
+    def _load_reference_centers(reference_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        manifest = json.loads(
+            (reference_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        centers = []
+        labels = []
+        radii = []
+        for label in manifest["class_labels"]:
+            with np.load(
+                reference_dir / manifest["files"][str(label)],
+                allow_pickle=False,
+            ) as data:
+                centers.append(data["X"].astype(np.float32))
+                labels.append(np.full(len(data["X"]), int(label), dtype=np.int64))
+                radii.append(data["eps_initial"].astype(np.float64))
+        return np.concatenate(centers), np.concatenate(labels), np.concatenate(radii)
+
+    def run_epsilon_sweep(
+        self,
+        *,
+        case_id: str,
+        worker_counts: list[int],
+        repetitions: int,
+        force: bool = False,
+    ) -> pd.DataFrame:
+        """Measure Equation (1) independently of model loading and LiRPA."""
+        if case_id not in self.config["cases"]:
+            raise ValueError(f"unknown case: {case_id}")
+        if repetitions <= 0:
+            raise ValueError("repetitions must be positive")
+        worker_counts = list(dict.fromkeys(int(value) for value in worker_counts))
+        if not worker_counts or any(value <= 0 for value in worker_counts):
+            raise ValueError("worker counts must be positive")
+
+        reference = self._reference_path(case_id, self.config["cases"][case_id])
+        if not (reference / "manifest.json").exists():
+            raise RuntimeError(f"missing serial reference atlas for {case_id}")
+        X, labels, expected_radii = self._load_reference_centers(reference)
+
+        source = CifarResNetScalingRunner.from_yaml(
+            self._source_config("cifar_scaling")
+        )
+        certcf_config = source.config["certcf"]
+        strategy = NearestOppositeClassClearanceStrategy(
+            alpha=float(certcf_config["eps_alpha"]),
+            chunk_size=int(certcf_config["eps_reference_chunk_size"]),
+        )
+
+        columns = [
+            "case_id",
+            "implementation_commit",
+            "repetition",
+            "workers",
+            "epsilon_time_s",
+            "radii_exact",
+            "radii_max_absolute_difference",
+        ]
+        if self.paths.epsilon_sweep.exists() and not force:
+            frame = pd.read_parquet(self.paths.epsilon_sweep)
+        else:
+            frame = pd.DataFrame(columns=columns)
+
+        completed = {
+            (int(row.repetition), int(row.workers))
+            for row in frame.itertuples()
+            if row.case_id == case_id
+        }
+        rng = np.random.default_rng(20260905)
+        for repetition in range(repetitions):
+            ordered_workers = worker_counts.copy()
+            rng.shuffle(ordered_workers)
+            for workers in ordered_workers:
+                if (repetition, workers) in completed:
+                    continue
+                gc.collect()
+                started = time.perf_counter()
+                observed = strategy.compute_eps(
+                    X,
+                    labels,
+                    norm=1,
+                    parallelism=workers,
+                )
+                elapsed = time.perf_counter() - started
+                difference = np.abs(observed - expected_radii)
+                row = pd.DataFrame(
+                    [
+                        {
+                            "case_id": case_id,
+                            "implementation_commit": _git_commit(),
+                            "repetition": repetition,
+                            "workers": workers,
+                            "epsilon_time_s": elapsed,
+                            "radii_exact": bool(
+                                np.array_equal(observed, expected_radii)
+                            ),
+                            "radii_max_absolute_difference": float(
+                                np.max(difference)
+                            ),
+                        }
+                    ]
+                )
+                frame = pd.concat([frame, row], ignore_index=True)
+                self.paths.epsilon_sweep.parent.mkdir(parents=True, exist_ok=True)
+                frame.to_parquet(self.paths.epsilon_sweep, index=False)
+                print(
+                    f"[EPSILON] repetition={repetition + 1}/{repetitions}, "
+                    f"workers={workers}: {elapsed:.3f}s, "
+                    f"exact={bool(np.array_equal(observed, expected_radii))}",
+                    flush=True,
+                )
+        return frame.sort_values(["workers", "repetition"]).reset_index(drop=True)
 
     @staticmethod
     def _diagnostics(method) -> dict[str, Any]:
@@ -395,6 +537,8 @@ class OfflineBuildParallelismRunner:
             raise ValueError(f"unknown case: {case_id}")
         if variant_id not in self.config["variants"]:
             raise ValueError(f"unknown variant: {variant_id}")
+        if not self._variant_applies(case_id, variant_id):
+            raise ValueError(f"variant {variant_id} does not apply to case {case_id}")
         if self._valid_result(case_id, variant_id) and not force:
             return json.loads(
                 self.paths.metadata(case_id, variant_id).read_text(encoding="utf-8")
@@ -404,9 +548,13 @@ class OfflineBuildParallelismRunner:
         variant = self.config["variants"][variant_id]
         eps_workers = int(variant["epsilon_parallelism"])
         build_workers = int(variant["build_parallelism"])
+        cnn_radius_batch_size = int(variant.get("cnn_radius_batch_size", 1))
+        cnn_radius_batch_max_relative_inflation = float(
+            variant.get("cnn_radius_batch_max_relative_inflation", 0.0)
+        )
         print(
             f"[OFFLINE] {case_id}/{variant_id}: epsilon workers={eps_workers}, "
-            f"LiRPA workers={build_workers}",
+            f"LiRPA workers={build_workers}, CNN radius batch={cnn_radius_batch_size}",
             flush=True,
         )
         kind = str(case["kind"])
@@ -420,7 +568,11 @@ class OfflineBuildParallelismRunner:
             )
         else:
             method, resources, device = self._build_cifar(
-                case, eps_workers, build_workers
+                case,
+                eps_workers,
+                build_workers,
+                cnn_radius_batch_size,
+                cnn_radius_batch_max_relative_inflation,
             )
 
         atlas = method.atlas
@@ -456,6 +608,10 @@ class OfflineBuildParallelismRunner:
             "device": str(device),
             "epsilon_parallelism": eps_workers,
             "build_parallelism": build_workers,
+            "cnn_radius_batch_size": cnn_radius_batch_size,
+            "cnn_radius_batch_max_relative_inflation": (
+                cnn_radius_batch_max_relative_inflation
+            ),
             "reference_created": reference_created,
             "reference_serialization_time_s": serialization_time_s,
             **resources,
@@ -481,6 +637,8 @@ class OfflineBuildParallelismRunner:
         rows: list[dict[str, Any]] = []
         for case_id in self.config["cases"]:
             for variant_id in self.config["variants"]:
+                if not self._variant_applies(case_id, variant_id):
+                    continue
                 path = self.paths.metadata(case_id, variant_id)
                 if not path.exists():
                     continue
@@ -500,6 +658,15 @@ class OfflineBuildParallelismRunner:
                         "variant_id": variant_id,
                         "epsilon_parallelism": int(payload["epsilon_parallelism"]),
                         "build_parallelism": int(payload["build_parallelism"]),
+                        "cnn_radius_batch_size": int(
+                            payload.get("cnn_radius_batch_size", 1)
+                        ),
+                        "cnn_radius_batch_max_relative_inflation": float(
+                            payload.get(
+                                "cnn_radius_batch_max_relative_inflation",
+                                0.0,
+                            )
+                        ),
                         "lirpa_workers_used": int(payload["lirpa_workers_used"]),
                         "build_wall_time_s": float(payload["build_wall_time_s"]),
                         "epsilon_time_s": float(payload["epsilon_time_s"]),
@@ -545,6 +712,8 @@ class OfflineBuildParallelismRunner:
         missing = []
         for case_id in self.config["cases"]:
             for variant_id in self.config["variants"]:
+                if not self._variant_applies(case_id, variant_id):
+                    continue
                 pair = f"{case_id}/{variant_id}"
                 if self._valid_result(case_id, variant_id):
                     complete.append(pair)

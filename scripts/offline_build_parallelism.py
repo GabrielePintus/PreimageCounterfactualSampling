@@ -17,7 +17,10 @@ from experiments.offline_build_parallelism import OfflineBuildParallelismRunner
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=["run", "analyze", "status"])
+    parser.add_argument(
+        "stage",
+        choices=["run", "epsilon-sweep", "analyze", "status"],
+    )
     parser.add_argument(
         "--config",
         default="configs/experiments/offline_build_parallelism.yaml",
@@ -25,6 +28,12 @@ def main() -> None:
     parser.add_argument("--case")
     parser.add_argument("--variant")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--workers",
+        default="1,2,4,8,12,16",
+        help="Comma-separated worker counts for epsilon-sweep.",
+    )
+    parser.add_argument("--repetitions", type=int, default=3)
     args = parser.parse_args()
 
     runner = OfflineBuildParallelismRunner.from_yaml(args.config)
@@ -32,6 +41,14 @@ def main() -> None:
         if args.case is None or args.variant is None:
             parser.error("run requires --case and --variant")
         result = runner.run(args.case, args.variant, force=args.force)
+    elif args.stage == "epsilon-sweep":
+        frame = runner.run_epsilon_sweep(
+            case_id=args.case or "cifar_resnet20",
+            worker_counts=[int(value) for value in args.workers.split(",")],
+            repetitions=args.repetitions,
+            force=args.force,
+        )
+        result = {"rows": len(frame), "path": str(runner.paths.epsilon_sweep)}
     elif args.stage == "analyze":
         frame = runner.analyze()
         result = {"rows": len(frame), "path": str(runner.paths.summary)}
