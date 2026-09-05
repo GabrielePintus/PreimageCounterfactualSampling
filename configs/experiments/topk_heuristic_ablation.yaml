@@ -1,0 +1,53 @@
+experiment:
+  seed: 42
+  source_config: configs/experiments/network_complexity_grid.yaml
+  depth: 3
+  width: 128
+  n_queries: 1000
+  k_values: [1, 2, 3, 4, 5, 6, 7]
+  absolute_tolerance: 1.0e-5
+  relative_tolerance: 1.0e-6
+  within_relative_tolerances: [0.01, 0.05]
+  confidence_level: 0.95
+  partial_save_every: 25
+
+support:
+  # The full balanced synthetic training split is the sampling pool.
+  points_per_true_class: 5000
+  # Random sampling matches the existing network-complexity benchmark.
+  anchors_per_predicted_class: 500
+  sampling: random
+
+certcf:
+  device: auto
+  eps_alpha: 0.20
+  norm: 1
+  distance_norm: 1
+  lirpa_method: backward
+  lirpa_batch_size: 128
+  classification_margin: 1.0e-4
+  adaptive_eps: true
+  adaptive_eps_shrink_factor: 0.5
+  adaptive_eps_max_shrinks: 8
+  adaptive_eps_min: 1.0e-6
+  adaptive_eps_center_tol: 1.0e-6
+  adaptive_eps_binary_search_steps: 0
+  # Keep D_k equal to the L1 projection distance defined in the analysis.
+  sparsity_penalty: none
+  sparsity_lambda: 0.0
+  sparsity_reweight_iters: 0
+  sparsity_eps: 1.0e-3
+  solver_maxiter: 500
+  cvxpy_solvers: [CLARABEL]
+  cvxpy_solver_options:
+    CLARABEL:
+      max_iter: 100
+      tol_gap_abs: 1.0e-3
+      tol_gap_rel: 1.0e-5
+      tol_feas: 1.0e-8
+  cvxpy_accept_statuses:
+    CLARABEL: [optimal]
+
+artifacts:
+  output_dir: results/topk_heuristic_ablation
+  notebook: notebooks/TopKHeuristicAblation.ipynb
