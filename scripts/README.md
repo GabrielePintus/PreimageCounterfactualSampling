@@ -22,6 +22,15 @@ radius chunks with eight workers and LiRPA class shards with two workers. The
 configured `lirpa_batch_size` controls vectorized variable-radius batches for
 fully connected networks. Use `--force` when collecting new timing artifacts.
 
+The controlled offline pilot keeps serial and parallel timing artifacts
+separate and verifies every generated bound array against a saved reference:
+
+```bash
+python scripts/offline_build_parallelism.py run --case heloc --variant serial
+python scripts/offline_build_parallelism.py run --case heloc --variant combined
+python scripts/offline_build_parallelism.py analyze
+```
+
 The `all` stage finishes training and accuracy-gating all 25 classifiers before
 starting any CertCF atlas construction or query benchmark. For separate jobs,
 run `train`, then `benchmark`, then `analyze`.

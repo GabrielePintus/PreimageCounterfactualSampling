@@ -1,0 +1,42 @@
+# Controlled pilot for the final CertCF offline implementation.
+# Each case/variant is executed in a fresh process by the dedicated CLI.
+source_configs:
+  lirpa_ablation: configs/experiments/lirpa_refinement_ablation.yaml
+  network_complexity: configs/experiments/network_complexity_grid.yaml
+  cifar_scaling: configs/experiments/cifar_resnet_scaling.yaml
+
+cases:
+  heloc:
+    kind: lirpa_ablation
+    source_case: heloc
+    reference_atlas: results/lirpa_refinement_ablation/cases/heloc/certcf/atlas
+  fcnn_depth05_width256:
+    kind: network_complexity
+    depth: 5
+    width: 256
+  cifar_resnet20:
+    kind: cifar_scaling
+    network: resnet20
+    reference_atlas: results/cifar_resnet_scaling/networks/resnet20/atlas
+
+variants:
+  serial:
+    epsilon_parallelism: 1
+    build_parallelism: 1
+  epsilon8:
+    epsilon_parallelism: 8
+    build_parallelism: 1
+  lirpa2:
+    epsilon_parallelism: 1
+    build_parallelism: 2
+  combined:
+    epsilon_parallelism: 8
+    build_parallelism: 2
+
+comparison:
+  absolute_tolerance: 1.0e-6
+  relative_tolerance: 1.0e-6
+  chunk_elements: 1000000
+
+artifacts:
+  output_dir: results/offline_build_parallelism
