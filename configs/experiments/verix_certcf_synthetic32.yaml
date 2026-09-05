@@ -1,0 +1,40 @@
+experiment:
+  seed: 42
+  source_grid_config: configs/experiments/network_complexity_grid.yaml
+  architectures:
+    - {depth: 1, width: 16}
+    - {depth: 5, width: 256}
+
+queries:
+  count: 10
+  per_true_class: 5
+
+export:
+  opset_version: 13
+  validation_batch_size: 256
+  atol: 1.0e-5
+  rtol: 1.0e-5
+
+verix:
+  # One common radius in standardized feature space. A 0.05 pilot produced no
+  # witnesses; 0.5 produced native witnesses for all 10 queries on the small
+  # endpoint and is kept fixed across architectures.
+  epsilon: 0.5
+  traversal: deletion_sensitivity
+  norm: inf
+  discrepancy: 0.0
+  classification_margin: 1.0e-6
+  num_workers: 16
+  timeout_seconds: 300
+  solve_with_milp: false
+
+certcf:
+  # CertCF settings are inherited from network_complexity_grid.yaml so this
+  # comparison uses the already reported atlas protocol.
+  device: auto
+
+resources:
+  rss_sample_interval_seconds: 0.05
+
+artifacts:
+  output_dir: results/verix_certcf_synthetic32

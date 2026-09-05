@@ -44,9 +44,15 @@ setup(
         "psutil>=5.9.0",
         "PyYAML>=6.0",
         "scikit-learn>=1.3.0",
+        "scikit-image>=0.21.0",
         "lightning>=2.0.0",
     ],
     extras_require={
+        "verix": [
+            "onnx>=1.10.0",
+            "onnxruntime>=1.10.0",
+            "maraboupy>=2.0.0; python_version<'3.12'",
+        ],
         "dev": [
             "jupyter>=1.0.0",
             "notebook>=7.0.0",

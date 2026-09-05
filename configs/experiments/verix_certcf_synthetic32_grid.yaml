@@ -1,0 +1,43 @@
+# Width-depth scaling grid for the paired VERIX/CertCF synthetic-32 study.
+experiment:
+  seed: 42
+  source_grid_config: configs/experiments/network_complexity_grid.yaml
+  architectures: null
+  depths: [1, 2, 3, 4, 5]
+  widths: [16, 32, 64, 128, 256]
+
+queries:
+  # The same five queries per true class are reused by every architecture.
+  count: 10
+  per_true_class: 5
+
+export:
+  opset_version: 13
+  validation_batch_size: 256
+  atol: 1.0e-5
+  rtol: 1.0e-5
+
+verix:
+  epsilon: 0.5
+  traversal: deletion_sensitivity
+  norm: inf
+  discrepancy: 0.0
+  classification_margin: 1.0e-6
+  num_workers: 16
+  # Hard cumulative budget for the complete 32-feature traversal of one
+  # architecture/query pair. Resumed solver time counts against this budget.
+  query_timeout_seconds: 120
+  # Upper bound for any one Marabou call; the runner lowers it to the remaining
+  # query budget before each fresh feature check.
+  timeout_seconds: 120
+  solve_with_milp: false
+
+certcf:
+  # Atlas and query settings are inherited from network_complexity_grid.yaml.
+  device: auto
+
+resources:
+  rss_sample_interval_seconds: 0.05
+
+artifacts:
+  output_dir: results/verix_certcf_synthetic32_grid
