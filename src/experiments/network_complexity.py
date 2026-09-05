@@ -374,6 +374,18 @@ class NetworkComplexityRunner:
         self.training_fingerprint = training_config_fingerprint(self.config)
         self.benchmark_config_fingerprint = benchmark_config_fingerprint(self.config)
         self.paths = ArtifactPaths(Path(self.config["artifacts"]["output_dir"]).resolve())
+        certcf_config = self.config["certcf"]
+        self.candidate_parallelism = int(certcf_config.get("candidate_parallelism", 1))
+        self.candidate_parallel_backend = str(
+            certcf_config.get("candidate_parallel_backend", "process")
+        ).lower()
+        self.candidate_parallel_warmup = bool(
+            certcf_config.get("candidate_parallel_warmup", True)
+        )
+        self.configure_candidate_parallelism(
+            workers=self.candidate_parallelism,
+            backend=self.candidate_parallel_backend,
+        )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "NetworkComplexityRunner":
@@ -382,6 +394,24 @@ class NetworkComplexityRunner:
     @property
     def grid(self) -> list[tuple[int, int]]:
         return architecture_grid(self.config)
+
+    def configure_candidate_parallelism(
+        self,
+        *,
+        workers: int | None = None,
+        backend: str | None = None,
+    ) -> None:
+        """Set execution-only candidate parallelism for query-time reruns."""
+        if workers is not None:
+            workers = int(workers)
+            if workers <= 0:
+                raise ValueError("candidate parallelism must be positive")
+            self.candidate_parallelism = workers
+        if backend is not None:
+            backend = str(backend).lower()
+            if backend not in {"thread", "process"}:
+                raise ValueError("candidate parallel backend must be 'thread' or 'process'")
+            self.candidate_parallel_backend = backend
 
     @property
     def endpoints(self) -> list[tuple[int, int]]:
@@ -749,6 +779,8 @@ class NetworkComplexityRunner:
             query_k_candidates=int(cfg["query_k_candidates"]),
             solver_maxiter=int(cfg["solver_maxiter"]),
             query_parallelism=int(cfg["query_parallelism"]),
+            candidate_parallelism=self.candidate_parallelism,
+            candidate_parallel_backend=self.candidate_parallel_backend,
             cvxpy_solvers=list(cfg["cvxpy_solvers"]),
             cvxpy_solver_options=deepcopy(cfg["cvxpy_solver_options"]),
             cvxpy_accept_statuses=deepcopy(cfg["cvxpy_accept_statuses"]),
@@ -856,6 +888,27 @@ class NetworkComplexityRunner:
         interval = float(self.config["resources"]["rss_sample_interval_s"])
         timeout_s = float(self.config["certcf"]["timeout_s_per_query"])
         n_valid = 0
+        warmup_time_s = 0.0
+        warmup_success = False
+        if (
+            self.candidate_parallelism > 1
+            and self.candidate_parallel_backend == "process"
+            and self.candidate_parallel_warmup
+            and len(x_queries) > 0
+        ):
+            warmup_started = time.perf_counter()
+            warmup = method.generate_batch(
+                x=x_queries[:1],
+                target_class=int(targets[0]),
+                timeout_s_per_query=timeout_s,
+            )[0]
+            warmup_time_s = time.perf_counter() - warmup_started
+            warmup_success = bool(warmup.success)
+            _log(
+                f"[QUERY WARMUP] {architecture_id(depth, width)}: "
+                f"{warmup_time_s:.3f}s, workers={self.candidate_parallelism}, "
+                f"success={warmup_success}"
+            )
         with PhaseResourceMonitor("query", device, interval) as query_monitor:
             query_iterator = tqdm(
                 enumerate(zip(query_indices, x_queries, y_queries, query_predictions, targets)),
@@ -922,6 +975,8 @@ class NetworkComplexityRunner:
                 query_rows.append(row)
                 n_valid += int(valid)
                 query_iterator.set_postfix(valid=n_valid, failed=position + 1 - n_valid)
+        if method.atlas is not None:
+            method.atlas.close_candidate_process_pool()
         query_metrics = query_monitor.metrics
 
         training_metadata = self._read_json(self.paths.train_metadata(depth, width)) or {}
@@ -936,6 +991,10 @@ class NetworkComplexityRunner:
             "classifier_query_accuracy": float(np.mean(query_predictions == y_queries)),
             "training_time_s": float(training_metadata["training_time_s"]),
             "effective_lirpa_batch_size": int(batch_size),
+            "candidate_parallelism": int(self.candidate_parallelism),
+            "candidate_parallel_backend": self.candidate_parallel_backend,
+            "candidate_parallel_warmup_s": float(warmup_time_s),
+            "candidate_parallel_warmup_success": bool(warmup_success),
             "shared_train_pool_size": int(len(x_train)),
             "shared_train_pool_true_class_0": int(np.sum(y_train_true == 0)),
             "shared_train_pool_true_class_1": int(np.sum(y_train_true == 1)),

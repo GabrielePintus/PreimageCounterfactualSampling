@@ -37,12 +37,26 @@ def main() -> None:
     parser.add_argument("--architectures", nargs="+")
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
+        "--candidate-parallelism",
+        type=int,
+        help="Override the number of workers used for independent top-k projections.",
+    )
+    parser.add_argument(
+        "--candidate-parallel-backend",
+        choices=["thread", "process"],
+        help="Override the intra-query projection backend.",
+    )
+    parser.add_argument(
         "--allow-partial",
         action="store_true",
         help="Allow analysis of only currently complete architecture artifacts.",
     )
     args = parser.parse_args()
     runner = NetworkComplexityRunner.from_yaml(args.config)
+    runner.configure_candidate_parallelism(
+        workers=args.candidate_parallelism,
+        backend=args.candidate_parallel_backend,
+    )
     selected = _parse_architectures(args.architectures, runner)
 
     if args.stage == "prepare":
