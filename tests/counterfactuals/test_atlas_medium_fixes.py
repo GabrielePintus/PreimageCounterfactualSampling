@@ -910,6 +910,57 @@ def test_find_counterfactual_nearest_anchor_limits_projection_budget(monkeypatch
     assert np.isnan(result.profiling["best_lower_bound_at_termination"])
 
 
+def test_nearest_anchor_initialization_preserves_float64_distance_order(monkeypatch):
+    farther = np.ones(32, dtype=np.float32)
+    closer = farther.copy()
+    closer[-1] = np.nextafter(np.float32(1.0), np.float32(0.0))
+    centers = np.stack([farther, closer])
+    atlas = _manual_atlas(
+        centers_by_label={
+            2: np.zeros((1, 32), dtype=np.float32),
+            5: centers,
+        }
+    )
+    # Preserve the float32 storage used by built atlases.  In float32 the two
+    # L1 distances tie, while a float64 recomputation identifies index 1 as
+    # the strictly closer certified incumbent.
+    atlas.bounds[5]["X"] = centers
+    atlas.distance_norm = 1
+    monkeypatch.setattr(
+        atlas,
+        "_polytope_membership_for_anchor",
+        lambda *args, **kwargs: (True, True),
+    )
+
+    projected_indices = []
+
+    def fake_make_project_fn(*args, **kwargs):
+        del args, kwargs
+
+        def project_fn(idx, incumbent):
+            projected_indices.append((idx, incumbent))
+            return None, np.inf
+
+        return project_fn, [0.0], [{}]
+
+    monkeypatch.setattr(atlas, "_make_project_fn", fake_make_project_fn)
+
+    result = atlas.find_counterfactual(
+        x_query=np.zeros(32, dtype=np.float32),
+        target_class=5,
+        method="nearest_anchor",
+        query_k_candidates=1,
+    )
+
+    raw_distances = np.sum(np.abs(centers), axis=1)
+    assert raw_distances[0] == raw_distances[1]
+    assert [idx for idx, _ in projected_indices] == [0]
+    assert result.success is True
+    assert result.anchor_idx == 1
+    assert result.profiling["nearest_anchor_initial_idx"] == 1.0
+    assert result.profiling["nearest_anchor_candidate_idx"] == 1.0
+
+
 def test_find_counterfactual_nearest_anchor_falls_back_after_topk_failure(monkeypatch):
     atlas = _manual_atlas(
         centers_by_label={

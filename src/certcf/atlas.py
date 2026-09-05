@@ -2651,7 +2651,7 @@ class CertCFAtlas:
         nearest_anchor_idx: Optional[int] = None
         nearest_anchor_dist = np.inf
         membership_robust_norm = self.norm if robust_norm is None else robust_norm
-        for candidate_idx in sorted_candidate_indices:
+        for candidate_idx in np.argsort(anchor_distances):
             candidate_idx = int(candidate_idx)
             if fixed_dims is not None and len(fixed_dims) > 0:
                 if not np.allclose(centers[candidate_idx][fixed_dims], x_query[fixed_dims], atol=1e-6):
