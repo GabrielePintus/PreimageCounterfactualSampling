@@ -152,6 +152,55 @@ def run_lirpa(
         raise ValueError(f"Unexpected input shape: {X.shape}")
 
 
+class ReusableLiRPASession:
+    """Reuse auto-LiRPA's traced bounded graph for repeated same-class calls."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        label: int,
+        example: torch.Tensor,
+        n_classes: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        self.n_classes = int(n_classes)
+        self.device = device
+        self.dtype = dtype
+        wrapped = WrappedModel(model, label, device, n_labels=n_classes).to(device).to(dtype).eval()
+        example = example.to(device=device, dtype=dtype)
+        initial = BoundedTensor(example, PerturbationLpNorm(norm=2, eps=0.0))
+        self.bounded_model = BoundedModule(wrapped, initial)
+
+    def run(self, X: torch.Tensor, *, eps: float, norm: int, lirpa_method: str) -> tuple:
+        X = X.to(device=self.device, dtype=self.dtype)
+        # auto-LiRPA computes the L1 dual as 1/(1-1/p), which is correctly
+        # infinity for p=1 but emits a NumPy divide-by-zero warning.
+        with np.errstate(divide="ignore"):
+            bounded_x = BoundedTensor(X, PerturbationLpNorm(norm=norm, eps=float(eps)))
+            _ = self.bounded_model(bounded_x)
+            needed_A = defaultdict(set)
+            output_name = self.bounded_model.output_name[0]
+            input_name = self.bounded_model.input_name[0]
+            needed_A[output_name].add(input_name)
+            _, _, A_dict = self.bounded_model.compute_bounds(
+                x=(bounded_x,),
+                method=lirpa_method,
+                return_A=True,
+                needed_A_dict=needed_A,
+            )
+        A = A_dict[output_name][input_name]
+        N = X.shape[0]
+        dimension = int(np.prod(X.shape[1:]))
+        specifications = self.n_classes - 1
+        return (
+            A["lA"].detach().cpu().float().numpy().reshape(N, specifications, dimension),
+            A["lbias"].detach().cpu().float().numpy().reshape(N, specifications),
+            A["uA"].detach().cpu().float().numpy().reshape(N, specifications, dimension),
+            A["ubias"].detach().cpu().float().numpy().reshape(N, specifications),
+        )
+
+
 class PreimageApproximation:
     """
     Orchestrates the preimage approximation process using LiRPA.
@@ -182,7 +231,9 @@ class PreimageApproximation:
         model: nn.Module,
         dataset,
         device: torch.device,
-        cnn: bool = False
+        cnn: bool = False,
+        model_input_shape: tuple[int, ...] | None = None,
+        reuse_lirpa_graph: bool = False,
     ):
         """
         Initialize the PreimageApproximation class.
@@ -202,6 +253,11 @@ class PreimageApproximation:
         self.model = model
         self.device = device
         self.cnn = cnn
+        self.model_input_shape = (
+            None if model_input_shape is None else tuple(int(v) for v in model_input_shape)
+        )
+        self.reuse_lirpa_graph = bool(reuse_lirpa_graph)
+        self._lirpa_sessions: dict[int, ReusableLiRPASession] = {}
 
         # Handle different dataset formats
         if hasattr(dataset, 'tensors'):
@@ -226,6 +282,50 @@ class PreimageApproximation:
         self.class_labels = [int(label) for label in sorted(unique_labels)]
         self.label_to_index = {label: idx for idx, label in enumerate(self.class_labels)}
         self.n_classes = len(self.class_labels)
+
+    def _reshape_cnn_batch(self, batch: torch.Tensor) -> torch.Tensor:
+        """Restore an explicitly configured CNN shape from flattened inputs."""
+        if not self.cnn or batch.ndim != 2:
+            return batch
+        if self.model_input_shape is not None:
+            return batch.view(batch.shape[0], *self.model_input_shape)
+        flat_dim = int(batch.shape[1])
+        side = int(round(np.sqrt(flat_dim)))
+        if side * side != flat_dim:
+            raise ValueError(
+                "Flattened CNN inputs require model_input_shape unless they are square grayscale images"
+            )
+        return batch.view(batch.shape[0], 1, side, side)
+
+    def _run_bounds(
+        self,
+        label: int,
+        X: torch.Tensor,
+        *,
+        eps: float,
+        norm: int,
+        dtype: torch.dtype,
+        lirpa_method: str,
+    ) -> tuple:
+        if not self.reuse_lirpa_graph:
+            return run_lirpa(
+                self.model,
+                label,
+                X,
+                self.n_classes,
+                self.device,
+                eps=eps,
+                norm=norm,
+                dtype=dtype,
+                lirpa_method=lirpa_method,
+            )
+        if label not in self._lirpa_sessions:
+            self._lirpa_sessions[label] = ReusableLiRPASession(
+                self.model, label, X[:1], self.n_classes, self.device, dtype
+            )
+        return self._lirpa_sessions[label].run(
+            X, eps=eps, norm=norm, lirpa_method=lirpa_method
+        )
 
     def estimate_memory_usage(
         self,
@@ -313,6 +413,8 @@ class PreimageApproximation:
         adaptive_eps_min: float = 1.0e-6,
         adaptive_eps_center_tol: float = 1.0e-6,
         adaptive_eps_binary_search_steps: int = 0,
+        precomputed_bounds: dict | None = None,
+        class_completed_callback=None,
     ) -> dict:
         """
         Compute LiRPA bounds for all classes.
@@ -382,10 +484,12 @@ class PreimageApproximation:
         if adaptive_eps_binary_search_steps < 0:
             raise ValueError("adaptive_eps_binary_search_steps must be non-negative")
 
-        all_bounds = {}
+        all_bounds = dict(precomputed_bounds or {})
         labels_tensor = self.dataset.tensors[1]
 
         for label in tqdm(self.class_labels, desc="Computing bounds"):
+            if label in all_bounds:
+                continue
             label_mask = labels_tensor == label
 
             # Extract samples for this class
@@ -435,13 +539,12 @@ class PreimageApproximation:
                         end_idx = min((i + 1) * batch_size, len(X))
                         X_batch = X[start_idx:end_idx].to(dtype).to(self.device)
 
-                        if self.cnn:
-                            X_batch = X_batch.view(-1, 1, 28, 28)
+                        X_batch = self._reshape_cnn_batch(X_batch)
 
                         with _lirpa_grad_context(lirpa_method):
-                            lA, lbias, uA, ubias = run_lirpa(
-                                self.model, self.label_to_index[int(label)], X_batch, self.n_classes,
-                                self.device, eps=eps_scalar, norm=norm, dtype=dtype, lirpa_method=lirpa_method
+                            lA, lbias, uA, ubias = self._run_bounds(
+                                self.label_to_index[int(label)], X_batch, eps=eps_scalar,
+                                norm=norm, dtype=dtype, lirpa_method=lirpa_method
                             )
 
                         lA_list.append(lA)
@@ -466,13 +569,12 @@ class PreimageApproximation:
 
                 else:
                     X_dev = X.to(dtype).to(self.device)
-                    if self.cnn:
-                        X_dev = X_dev.view(-1, 1, 28, 28)
+                    X_dev = self._reshape_cnn_batch(X_dev)
 
                     with _lirpa_grad_context(lirpa_method):
-                        lA, lbias, uA, ubias = run_lirpa(
-                            self.model, self.label_to_index[int(label)], X_dev, self.n_classes,
-                            self.device, eps=eps_scalar, norm=norm, dtype=dtype, lirpa_method=lirpa_method
+                        lA, lbias, uA, ubias = self._run_bounds(
+                            self.label_to_index[int(label)], X_dev, eps=eps_scalar,
+                            norm=norm, dtype=dtype, lirpa_method=lirpa_method
                         )
 
                     X_stored = X_dev.cpu().numpy()
@@ -501,17 +603,22 @@ class PreimageApproximation:
                 X_stored_list = []
                 eps_final_list = []
 
-                for i in range(len(X)):
+                for i in tqdm(
+                    range(len(X)),
+                    desc=f"Class {int(label)} anchors",
+                    unit="anchor",
+                    leave=False,
+                ):
                     def _run_single_at_eps(eps_value: float):
                         X_single_local = X[i:i+1].to(dtype).to(self.device)
 
-                        if self.cnn:
-                            X_single_local = X_single_local.view(-1, 1, 28, 28)
+                        X_single_local = self._reshape_cnn_batch(X_single_local)
 
                         with _lirpa_grad_context(lirpa_method):
-                            lA_local, lbias_local, uA_local, ubias_local = run_lirpa(
-                                self.model, self.label_to_index[int(label)], X_single_local, self.n_classes,
-                                self.device, eps=float(eps_value), norm=norm, dtype=dtype, lirpa_method=lirpa_method
+                            lA_local, lbias_local, uA_local, ubias_local = self._run_bounds(
+                                self.label_to_index[int(label)], X_single_local,
+                                eps=float(eps_value), norm=norm, dtype=dtype,
+                                lirpa_method=lirpa_method
                             )
 
                         X_stored_local = X_single_local.cpu().numpy()
@@ -657,5 +764,7 @@ class PreimageApproximation:
                 'adaptive_eps_center_slack': adaptive_center_slack,
                 'adaptive_eps_center_certified': adaptive_center_certified,
             }
+            if class_completed_callback is not None:
+                class_completed_callback(int(label), all_bounds[label])
 
         return all_bounds

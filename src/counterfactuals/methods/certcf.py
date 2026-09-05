@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any, Dict, Optional, List, Sequence, Tuple, Union
 
 import numpy as np
@@ -59,10 +60,15 @@ class CertCF(BaseCounterfactualMethod):
 
         # Model / atlas configuration
         cnn: bool = False,
+        cnn_input_shape: Optional[Sequence[int]] = None,
+        reuse_lirpa_graph: bool = False,
+        bounds_checkpoint_dir: Optional[Union[str, Path]] = None,
         default_query_method: str = "sorted",
         query_k_candidates: int = 1,
         solver_maxiter: int = 500,
         query_parallelism: int = 1,
+        candidate_parallelism: int = 1,
+        candidate_parallel_backend: str = "thread",
         cvxpy_solvers: Optional[List[str]] = None,
         cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]] = None,
         cvxpy_accept_statuses: Optional[Dict[str, List[str]]] = None,
@@ -97,6 +103,7 @@ class CertCF(BaseCounterfactualMethod):
 
         # Random seed for reproducibility (e.g., in subsampling)
         random_seed: int = 42,
+        eps_reference_scope: str = "atlas",
     ):
         subsample_space = str(subsample_space).lower()
         if subsample_space not in {"input", "latent"}:
@@ -136,6 +143,16 @@ class CertCF(BaseCounterfactualMethod):
         self.nonincreasing_features = tuple(str(name) for name in (nonincreasing_features or ()))
         # Atlas config
         self.cnn = cnn
+        self.cnn_input_shape = (
+            None if cnn_input_shape is None else tuple(int(v) for v in cnn_input_shape)
+        )
+        self.reuse_lirpa_graph = bool(reuse_lirpa_graph)
+        self.bounds_checkpoint_dir = bounds_checkpoint_dir
+        if self.cnn_input_shape is not None and any(v <= 0 for v in self.cnn_input_shape):
+            raise ValueError("cnn_input_shape values must be positive")
+        self.eps_reference_scope = str(eps_reference_scope).lower()
+        if self.eps_reference_scope not in {"atlas", "full_support"}:
+            raise ValueError("eps_reference_scope must be one of {'atlas', 'full_support'}")
         self.default_query_method = default_query_method
         self.query_k_candidates = int(query_k_candidates)
         if self.query_k_candidates <= 0:
@@ -144,6 +161,18 @@ class CertCF(BaseCounterfactualMethod):
         self.query_parallelism = int(query_parallelism)
         if self.query_parallelism <= 0:
             raise ValueError("query_parallelism must be positive")
+        self.candidate_parallelism = int(candidate_parallelism)
+        if self.candidate_parallelism <= 0:
+            raise ValueError("candidate_parallelism must be positive")
+        if self.query_parallelism > 1 and self.candidate_parallelism > 1:
+            raise ValueError(
+                "query_parallelism and candidate_parallelism cannot both exceed 1"
+            )
+        self.candidate_parallel_backend = str(candidate_parallel_backend).lower()
+        if self.candidate_parallel_backend not in {"thread", "process"}:
+            raise ValueError(
+                "candidate_parallel_backend must be one of {'thread', 'process'}"
+            )
         (
             self.cvxpy_solvers,
             self.cvxpy_solver_options,
@@ -418,6 +447,15 @@ class CertCF(BaseCounterfactualMethod):
                 "the provided labels do not define a useful atlas."
             )
 
+        if self.eps_reference_scope == "full_support":
+            set_reference = getattr(self.eps_strategy, "set_reference", None)
+            if not callable(set_reference):
+                raise ValueError(
+                    "eps_reference_scope='full_support' requires an epsilon strategy "
+                    "with set_reference(X, y)"
+                )
+            set_reference(self._x_train, self._y_train_support_full)
+
         if self.k_per_class is not None:
             from counterfactuals.utils.clustering import select_prototype_indices
 
@@ -474,6 +512,9 @@ class CertCF(BaseCounterfactualMethod):
         self.atlas = CertCFAtlas(
             clean_module, dataset, device,
             cnn=self.cnn,
+            model_input_shape=self.cnn_input_shape,
+            reuse_lirpa_graph=self.reuse_lirpa_graph,
+            bounds_checkpoint_dir=self.bounds_checkpoint_dir,
             norm=self.norm,
             distance_norm=self.distance_norm,
             lirpa_method=self.lirpa_method,
@@ -484,6 +525,8 @@ class CertCF(BaseCounterfactualMethod):
             default_query_method=self.default_query_method,
             solver_maxiter=self.solver_maxiter,
             query_parallelism=self.query_parallelism,
+            candidate_parallelism=self.candidate_parallelism,
+            candidate_parallel_backend=self.candidate_parallel_backend,
             cvxpy_solvers=self.cvxpy_solvers,
             cvxpy_solver_options=self.cvxpy_solver_options,
             cvxpy_accept_statuses=self.cvxpy_accept_statuses,
@@ -554,6 +597,8 @@ class CertCF(BaseCounterfactualMethod):
         """Convert atlas-level results into the shared benchmark result type."""
         x_cf = np.asarray(result.x_cf, dtype=np.float32) if result.x_cf is not None else None
         metadata = dict(result.profiling)
+        anchor_idx = getattr(result, "anchor_idx", None)
+        metadata["anchor_idx"] = -1 if anchor_idx is None else int(anchor_idx)
         fixed_dims = getattr(self, "fixed_dims", None)
         immutable_features = getattr(self, "immutable_features", ())
         nondecreasing_dims = getattr(self, "nondecreasing_dims", None)

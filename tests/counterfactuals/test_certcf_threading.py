@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 import numpy as np
+import pytest
 
 from certcf.atlas import CertCFAtlas, CounterfactualResult as AtlasCounterfactualResult
 from counterfactuals.methods.certcf import CertCF
@@ -123,6 +124,11 @@ def test_atlas_find_counterfactual_batch_parallel_matches_serial_outputs():
     assert [int(r.target_class) for r in parallel_results] == [int(r.target_class) for r in serial_results]
     assert [r.success for r in parallel_results] == [r.success for r in serial_results]
     assert [r.x_cf.tolist() for r in parallel_results] == [r.x_cf.tolist() for r in serial_results]
+
+
+def test_certcf_rejects_nested_query_and_candidate_parallelism():
+    with pytest.raises(ValueError, match="cannot both exceed 1"):
+        CertCF(model=object(), query_parallelism=2, candidate_parallelism=2)
 
 
 def test_atlas_find_counterfactual_batch_uses_real_thread_parallelism():

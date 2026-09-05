@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -812,6 +814,100 @@ def test_find_counterfactual_nearest_anchor_falls_back_after_topk_failure(monkey
     assert result.profiling["nearest_anchor_candidate_certified"] == 1.0
     assert result.profiling["nearest_anchor_returned"] == 1.0
     assert np.isnan(result.profiling["best_lower_bound_at_termination"])
+
+
+def test_find_counterfactual_parallelizes_topk_candidates_and_preserves_order(monkeypatch):
+    atlas = _manual_atlas(
+        centers_by_label={
+            2: np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
+            5: np.array(
+                [
+                    [10.0, 0.0, 0.0],
+                    [11.0, 0.0, 0.0],
+                    [12.0, 0.0, 0.0],
+                    [13.0, 0.0, 0.0],
+                ],
+                dtype=np.float64,
+            ),
+        }
+    )
+
+    class FakeCandidateIndex:
+        n_polytopes = 4
+
+        def query_k_nearest_candidates(self, x_query, k, distance_norm=2):
+            del x_query, distance_norm
+            assert k == 4
+            return [0, 1, 2, 3]
+
+    atlas.bvh_indices[5] = FakeCandidateIndex()
+    monkeypatch.setattr(
+        atlas,
+        "_anchor_bbox_lower_bounds",
+        lambda *args, **kwargs: np.zeros(4, dtype=np.float64),
+    )
+    monkeypatch.setattr(
+        atlas,
+        "_polytope_membership_for_anchor",
+        lambda *args, **kwargs: (True, True),
+    )
+
+    def fake_make_project_fn(*args, **kwargs):
+        del args, kwargs
+        return (lambda idx, incumbent: (None, np.inf)), [0.0], [{}]
+
+    monkeypatch.setattr(atlas, "_make_project_fn", fake_make_project_fn)
+
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+    scores = {0: 4.0, 1: 1.0, 2: 1.0, 3: 3.0}
+
+    def fake_project_candidate(**kwargs):
+        nonlocal active, maximum_active
+        idx = int(kwargs["idx"])
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        started = time.perf_counter()
+        time.sleep(0.08)
+        elapsed = time.perf_counter() - started
+        with lock:
+            active -= 1
+        return SimpleNamespace(
+            index=idx,
+            point=np.full(3, float(idx), dtype=np.float64),
+            selection_score=scores[idx],
+            profile={"selected_candidate": idx},
+            elapsed_s=elapsed,
+        )
+
+    monkeypatch.setattr(atlas, "_project_candidate", fake_project_candidate)
+
+    started = time.perf_counter()
+    result = atlas.find_counterfactual(
+        x_query=np.zeros(3, dtype=np.float32),
+        target_class=5,
+        method="nearest_anchor",
+        query_k_candidates=4,
+        candidate_parallelism=4,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert result.success is True
+    assert result.anchor_idx == 1
+    assert result.distance == 1.0
+    assert result.n_qp_solved == 4
+    assert maximum_active == 4
+    assert elapsed < 0.22
+    assert result.profiling["candidate_parallelism"] == 4.0
+    assert result.profiling["candidate_workers_used"] == 4.0
+    assert result.profiling["parallel_candidate_count"] == 4.0
+    assert result.profiling["projection_time_ms"] > 280.0
+    assert result.profiling["projection_wall_time_ms"] < 220.0
+    # Candidates 1 and 2 tie; consuming results in anchor order preserves the
+    # same winner as the serial strict-less-than update.
+    assert result.profiling["selected_candidate"] == 1
 
 
 def test_find_counterfactual_nearest_anchor_skips_uncertified_anchor(monkeypatch):

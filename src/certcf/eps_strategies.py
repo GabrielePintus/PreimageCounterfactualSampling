@@ -106,10 +106,28 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
     negligible compared with the LiRPA calls that follow.
     """
 
-    def __init__(self, alpha: float = 0.25):
+    def __init__(self, alpha: float = 0.25, *, chunk_size: int = 128):
         if not (0 < alpha <= 1.0):
             raise ValueError(f"alpha must be in (0, 1], got {alpha}")
         self.alpha = alpha
+        self.chunk_size = int(chunk_size)
+        if self.chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        self._reference_X: np.ndarray | None = None
+        self._reference_y: np.ndarray | None = None
+
+    def set_reference(self, X: np.ndarray, y: np.ndarray) -> None:
+        """Use a separate observed support pool for Eq. (1) clearances."""
+        X = np.asarray(X)
+        y = np.asarray(y)
+        if X.ndim != 2 or X.shape[0] != y.shape[0]:
+            raise ValueError("reference X must be 2D and aligned with reference y")
+        self._reference_X = X
+        self._reference_y = y
+
+    def clear_reference(self) -> None:
+        self._reference_X = None
+        self._reference_y = None
 
     @staticmethod
     def _resolve_cdist_metric(norm: int | float) -> tuple[str, dict]:
@@ -138,22 +156,28 @@ class NearestOppositeClassClearanceStrategy(EpsStrategy):
         eps = np.zeros(N)
         metric, metric_kwargs = self._resolve_cdist_metric(norm)
 
+        reference_X = X if self._reference_X is None else self._reference_X
+        reference_y = y if self._reference_y is None else self._reference_y
+        if reference_X.shape[1] != X.shape[1]:
+            raise ValueError("reference and anchor feature dimensions do not match")
+
         for c in np.unique(y):
             mask_c = y == c
-            mask_other = ~mask_c
+            mask_other = reference_y != c
 
             if not np.any(mask_other):
                 # Only one class exists — clearance is undefined; leave eps=0.
                 continue
 
-            X_c = X[mask_c]        # (N_c, d)
-            X_other = X[mask_other]  # (N_other, d)
-
-            # Pairwise Lp distances: (N_c, N_other)
-            dists = cdist(X_c, X_other, metric=metric, **metric_kwargs)
-
-            # Per-point clearance = distance to nearest opposite-class neighbor
-            clearance = dists.min(axis=1)  # (N_c,)
+            X_c = X[mask_c]
+            X_other = reference_X[mask_other]
+            clearance = np.full(len(X_c), np.inf, dtype=np.float64)
+            for start in range(0, len(X_c), self.chunk_size):
+                stop = min(start + self.chunk_size, len(X_c))
+                dists = cdist(
+                    X_c[start:stop], X_other, metric=metric, **metric_kwargs
+                )
+                clearance[start:stop] = dists.min(axis=1)
             eps[mask_c] = self.alpha * clearance
 
         return eps

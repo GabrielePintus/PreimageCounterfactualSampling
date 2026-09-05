@@ -16,6 +16,9 @@ Example usage:
 
 import time
 import heapq
+import json
+import multiprocessing as mp
+import os
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from itertools import count, product
 import numpy as np
@@ -28,6 +31,7 @@ import torch.nn as nn
 from scipy.optimize import minimize
 from typing import Any, Optional, Dict, List, Sequence, Tuple, Union
 from dataclasses import dataclass, field
+from pathlib import Path
 
 try:
     import cvxpy as cp
@@ -45,6 +49,39 @@ from .indexing.bvh import BVHIndex
 _EXACT_ENUM_PRODUCT_THRESHOLD = 4096
 _ALLOWED_OHE_DECODE_MODES = {"exact", "beam_then_exact", "beam_only"}
 ProfileValue = Union[float, str, int, bool]
+_CANDIDATE_PARALLEL_BACKENDS = {"thread", "process"}
+_PROCESS_PROJECTION_ATLAS: Optional["CertCFAtlas"] = None
+
+
+def _run_candidate_projection_in_process(task: Tuple[Any, ...]) -> "_CandidateProjection":
+    """Process-pool entry point using a fork-inherited projection-only atlas."""
+    if _PROCESS_PROJECTION_ATLAS is None:
+        raise RuntimeError("Candidate projection worker was not initialized")
+    (
+        x_query,
+        target_class,
+        idx,
+        delta,
+        robust_norm,
+        solver_maxiter,
+        fixed_dims,
+        nondecreasing_dims,
+        nonincreasing_dims,
+        incumbent_upper_bound,
+    ) = task
+    atlas = _PROCESS_PROJECTION_ATLAS
+    return atlas._project_candidate(
+        x_query=x_query,
+        bd=atlas.bounds[int(target_class)],
+        idx=int(idx),
+        delta=float(delta),
+        robust_norm=robust_norm,
+        solver_maxiter=solver_maxiter,
+        fixed_dims=fixed_dims,
+        nondecreasing_dims=nondecreasing_dims,
+        nonincreasing_dims=nonincreasing_dims,
+        incumbent_upper_bound=float(incumbent_upper_bound),
+    )
 
 
 @dataclass
@@ -76,6 +113,17 @@ class CounterfactualResult:
     n_qp_solved: int
     success: bool
     profiling: Dict[str, ProfileValue] = field(default_factory=dict)
+
+
+@dataclass
+class _CandidateProjection:
+    """Internal result of one independently timed candidate projection."""
+
+    index: int
+    point: Optional[np.ndarray]
+    selection_score: float
+    profile: Dict[str, ProfileValue]
+    elapsed_s: float
 
 
 class CertCFAtlas:
@@ -118,6 +166,9 @@ class CertCFAtlas:
         dataset,
         device: Union[torch.device, str],
         cnn: bool = False,
+        model_input_shape: Optional[Sequence[int]] = None,
+        reuse_lirpa_graph: bool = False,
+        bounds_checkpoint_dir: Optional[Union[str, Path]] = None,
         # Build configuration
         norm: int = 2,
         distance_norm: Optional[Union[int, float]] = None,
@@ -130,6 +181,8 @@ class CertCFAtlas:
         default_query_method: str = "sorted",
         solver_maxiter: int = 500,
         query_parallelism: int = 1,
+        candidate_parallelism: int = 1,
+        candidate_parallel_backend: str = "thread",
         cvxpy_solvers: Optional[List[str]] = None,
         cvxpy_solver_options: Optional[Dict[str, Dict[str, Any]]] = None,
         cvxpy_accept_statuses: Optional[Dict[str, List[str]]] = None,
@@ -162,11 +215,29 @@ class CertCFAtlas:
         self.batch_size = batch_size
         self.ohe_slices = ohe_slices
         self.input_bounds = self._normalize_input_bounds(input_bounds)
+        self.bounds_checkpoint_dir = (
+            None if bounds_checkpoint_dir is None else Path(bounds_checkpoint_dir)
+        )
 
         self.solver_maxiter = solver_maxiter
         self.query_parallelism = int(query_parallelism)
         if self.query_parallelism <= 0:
             raise ValueError("query_parallelism must be positive")
+        self.candidate_parallelism = int(candidate_parallelism)
+        if self.candidate_parallelism <= 0:
+            raise ValueError("candidate_parallelism must be positive")
+        if self.query_parallelism > 1 and self.candidate_parallelism > 1:
+            raise ValueError(
+                "query_parallelism and candidate_parallelism cannot both exceed 1; "
+                "choose inter-query or intra-query parallelism to avoid nested worker pools"
+            )
+        self.candidate_parallel_backend = str(candidate_parallel_backend).lower()
+        if self.candidate_parallel_backend not in _CANDIDATE_PARALLEL_BACKENDS:
+            raise ValueError(
+                "candidate_parallel_backend must be one of {'thread', 'process'}"
+            )
+        self._candidate_process_pool = None
+        self._candidate_process_pool_workers = 0
         (
             self.cvxpy_solvers,
             self.cvxpy_solver_options,
@@ -230,12 +301,23 @@ class CertCFAtlas:
 
 
         # Initialize preimage approximation handler
-        self._preimage = PreimageApproximation(model, dataset, self.device, cnn=cnn)
+        self._preimage = PreimageApproximation(
+            model,
+            dataset,
+            self.device,
+            cnn=cnn,
+            model_input_shape=model_input_shape,
+            reuse_lirpa_graph=reuse_lirpa_graph,
+        )
         self.n_classes = self._preimage.n_classes
         self.class_labels = list(self._preimage.class_labels)
         self.label_to_index = dict(self._preimage.label_to_index)
         sample_shape = tuple(self._preimage.dataset.tensors[0][0].shape)
-        if self.cnn and len(sample_shape) == 1:
+        if model_input_shape is not None:
+            self.model_input_shape = tuple(int(v) for v in model_input_shape)
+            if int(np.prod(self.model_input_shape)) != int(np.prod(sample_shape)):
+                raise ValueError("model_input_shape does not match the sample size")
+        elif self.cnn and len(sample_shape) == 1:
             flat_dim = int(np.prod(sample_shape))
             side = int(round(np.sqrt(flat_dim)))
             self.model_input_shape = (1, side, side) if side * side == flat_dim else sample_shape
@@ -468,7 +550,9 @@ class CertCFAtlas:
         # Compute per-sample epsilon for the full dataset
         X_all = self._preimage.dataset.tensors[0].numpy()
         y_all = self._preimage.dataset.tensors[1].numpy()
+        epsilon_started = time.perf_counter()
         eps_array = eps_strategy.compute_eps(X_all, y_all, norm=norm)
+        epsilon_time_s = time.perf_counter() - epsilon_started
 
         if verbose:
             eps_min, eps_max = eps_array.min(), eps_array.max()
@@ -482,6 +566,27 @@ class CertCFAtlas:
         if verbose:
             print("  Computing LiRPA bounds...")
 
+        precomputed_bounds: Dict[int, Dict[str, np.ndarray]] = {}
+        if self.bounds_checkpoint_dir is not None:
+            self.bounds_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            for label in self.class_labels:
+                checkpoint = self.bounds_checkpoint_dir / f"class_{int(label)}.npz"
+                if checkpoint.exists():
+                    with np.load(checkpoint, allow_pickle=False) as data:
+                        precomputed_bounds[int(label)] = {
+                            key: data[key] for key in data.files
+                        }
+
+        def checkpoint_class(label: int, values: Dict[str, np.ndarray]) -> None:
+            if self.bounds_checkpoint_dir is None:
+                return
+            target = self.bounds_checkpoint_dir / f"class_{int(label)}.npz"
+            temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+            with temporary.open("wb") as handle:
+                np.savez(handle, **values)
+            os.replace(temporary, target)
+
+        lirpa_started = time.perf_counter()
         self.bounds = self._preimage.compute_all_bounds(
             eps=0.1,            # fallback scalar (unused when eps_array is provided)
             norm=norm,
@@ -496,12 +601,40 @@ class CertCFAtlas:
             adaptive_eps_min=self.adaptive_eps_min,
             adaptive_eps_center_tol=self.adaptive_eps_center_tol,
             adaptive_eps_binary_search_steps=self.adaptive_eps_binary_search_steps,
+            precomputed_bounds=precomputed_bounds,
+            class_completed_callback=checkpoint_class,
         )
+        lirpa_time_s = time.perf_counter() - lirpa_started
+
+        # Only center-certified regions may enter the atlas.
+        for label in self.class_labels:
+            class_bounds = self.bounds[label]
+            certified = np.asarray(
+                class_bounds.get(
+                    "adaptive_eps_center_certified",
+                    np.ones(len(class_bounds["X"]), dtype=bool),
+                ),
+                dtype=bool,
+            )
+            original_count = int(len(certified))
+            class_bounds["attempted_anchor_count"] = original_count
+            class_bounds["uncertified_anchor_count"] = int(np.count_nonzero(~certified))
+            if not np.all(certified):
+                for key, value in list(class_bounds.items()):
+                    if (
+                        isinstance(value, np.ndarray)
+                        and value.ndim > 0
+                        and len(value) == original_count
+                    ):
+                        class_bounds[key] = value[certified]
+            if len(class_bounds["X"]) == 0:
+                raise RuntimeError(f"No certified atlas anchors remain for class {label}")
 
         # Step 2: Build BVH spatial index for each class
         if verbose:
             print("  Building BVH spatial indices...")
 
+        bvh_started = time.perf_counter()
         self.bvh_indices = {}
         for label in self.class_labels:
             centers = self.bounds[label]['X']
@@ -512,6 +645,12 @@ class CertCFAtlas:
                 bvh = self.bvh_indices[label]
                 print(f"    Class {label}: {bvh.n_polytopes} polytopes, "
                       f"tree depth {bvh.tree_depth}")
+        bvh_time_s = time.perf_counter() - bvh_started
+        self.build_profiling = {
+            "epsilon_time_s": float(epsilon_time_s),
+            "lirpa_time_s": float(lirpa_time_s),
+            "bvh_time_s": float(bvh_time_s),
+        }
 
         # Step 3: Optionally build polygon unions (for 2D visualization)
         if build_unions:
@@ -534,6 +673,59 @@ class CertCFAtlas:
             )
             print(f"Done! Total: {total_polytopes} polytopes across {self.n_classes} classes")
 
+        return self
+
+    def save_bounds(self, directory: Union[str, Path]) -> Path:
+        """Persist built numeric atlas bounds without unsafe pickle payloads."""
+        if self.bounds is None:
+            raise RuntimeError("Cannot save an atlas before build()")
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for label in self.class_labels:
+            target = root / f"class_{int(label)}.npz"
+            temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+            arrays = {
+                key: np.asarray(value)
+                for key, value in self.bounds[label].items()
+                if isinstance(value, (np.ndarray, np.number, int, float, bool))
+            }
+            with temporary.open("wb") as handle:
+                np.savez(handle, **arrays)
+            os.replace(temporary, target)
+            files[str(label)] = target.name
+        manifest = {
+            "format_version": 1,
+            "class_labels": [int(label) for label in self.class_labels],
+            "norm": "inf" if self.norm == np.inf else int(self.norm),
+            "distance_norm": "inf" if self.distance_norm == np.inf else int(self.distance_norm),
+            "model_input_shape": list(self.model_input_shape),
+            "files": files,
+        }
+        target = root / "manifest.json"
+        temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+        temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+        return target
+
+    def load_bounds(self, directory: Union[str, Path]) -> 'CertCFAtlas':
+        """Load bounds saved by :meth:`save_bounds` and rebuild BVH indices."""
+        root = Path(directory)
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        labels = [int(label) for label in manifest["class_labels"]]
+        if labels != [int(label) for label in self.class_labels]:
+            raise ValueError("Serialized atlas class labels do not match the attached dataset")
+        expected_shape = tuple(int(v) for v in manifest["model_input_shape"])
+        if expected_shape != tuple(self.model_input_shape):
+            raise ValueError("Serialized atlas input shape does not match")
+        self.bounds = {}
+        self.bvh_indices = {}
+        for label in labels:
+            with np.load(root / manifest["files"][str(label)], allow_pickle=False) as data:
+                self.bounds[label] = {key: data[key] for key in data.files}
+            centers = self.bounds[label]["X"]
+            eps = self.bounds[label]["eps"]
+            self.bvh_indices[label] = BVHIndex(centers, eps)
         return self
 
     @staticmethod
@@ -2152,6 +2344,100 @@ class CertCFAtlas:
         decode_profile["sparsity_solver_calls"] = int(n_projection_solves)
         return best_x, best_dist, decode_profile
 
+    def _project_candidate(
+        self,
+        x_query: np.ndarray,
+        bd: Dict[str, np.ndarray],
+        idx: int,
+        delta: float,
+        robust_norm: Optional[Union[int, float]],
+        solver_maxiter: Optional[int],
+        fixed_dims: Optional[np.ndarray],
+        nondecreasing_dims: Optional[np.ndarray],
+        nonincreasing_dims: Optional[np.ndarray],
+        incumbent_upper_bound: float,
+    ) -> _CandidateProjection:
+        """Project onto one atlas region without mutating shared search state."""
+        started = time.perf_counter()
+        point, distance, profile = self._project_onto_polytope(
+            x_query,
+            bd["lA"][idx],
+            bd["lbias"][idx],
+            bd["X"][idx],
+            eps_i=float(bd["eps"][idx]),
+            delta=delta,
+            robust_norm=robust_norm,
+            maxiter=solver_maxiter,
+            fixed_dims=fixed_dims,
+            nondecreasing_dims=nondecreasing_dims,
+            nonincreasing_dims=nonincreasing_dims,
+            incumbent_upper_bound=incumbent_upper_bound,
+        )
+        return _CandidateProjection(
+            index=int(idx),
+            point=point,
+            selection_score=float(self._score_from_profile(profile, distance)),
+            profile=profile,
+            elapsed_s=float(time.perf_counter() - started),
+        )
+
+    def _projection_worker_clone(self) -> "CertCFAtlas":
+        """Create the minimal CPU-only state needed by projection workers."""
+        worker = CertCFAtlas.__new__(CertCFAtlas)
+        worker.bounds = self.bounds
+        for name in (
+            "norm",
+            "distance_norm",
+            "solver_maxiter",
+            "ohe_slices",
+            "input_bounds",
+            "cvxpy_solvers",
+            "cvxpy_solver_options",
+            "cvxpy_accept_statuses",
+            "ohe_decode_mode",
+            "decode_beam_width",
+            "decode_beam_branch_top_k",
+            "decode_beam_max_solver_calls",
+            "sparsity_penalty",
+            "sparsity_lambda",
+            "sparsity_reweight_iters",
+            "sparsity_eps",
+            "sparsity_group_ohe",
+        ):
+            setattr(worker, name, getattr(self, name))
+        return worker
+
+    def _get_candidate_process_pool(self, workers: int):
+        """Return a persistent fork pool large enough for candidate projection."""
+        workers = int(workers)
+        existing = getattr(self, "_candidate_process_pool", None)
+        existing_workers = int(getattr(self, "_candidate_process_pool_workers", 0))
+        if existing is not None and existing_workers >= workers:
+            return existing
+        self.close_candidate_process_pool()
+        if "fork" not in mp.get_all_start_methods():
+            raise RuntimeError(
+                "candidate_parallel_backend='process' requires a platform with fork support"
+            )
+        global _PROCESS_PROJECTION_ATLAS
+        _PROCESS_PROJECTION_ATLAS = self._projection_worker_clone()
+        context = mp.get_context("fork")
+        pool = context.Pool(processes=workers)
+        self._candidate_process_pool = pool
+        self._candidate_process_pool_workers = workers
+        return pool
+
+    def close_candidate_process_pool(self) -> None:
+        """Close the optional persistent projection process pool."""
+        pool = getattr(self, "_candidate_process_pool", None)
+        if pool is not None:
+            pool.close()
+            pool.join()
+        self._candidate_process_pool = None
+        self._candidate_process_pool_workers = 0
+        global _PROCESS_PROJECTION_ATLAS
+        _PROCESS_PROJECTION_ATLAS = None
+
     def _make_project_fn(
         self,
         x_query,
@@ -2180,18 +2466,21 @@ class CertCFAtlas:
         best_decode_profile = [initial_profile]
 
         def project_fn(idx: int, incumbent_upper_bound: float) -> Tuple[Optional[np.ndarray], float]:
-            t0 = time.perf_counter()
-            x_proj, dist, decode_profile = self._project_onto_polytope(
-                x_query, bd['lA'][idx], bd['lbias'][idx], bd['X'][idx],
-                eps_i=float(bd['eps'][idx]),
-                delta=delta, robust_norm=robust_norm,
-                maxiter=solver_maxiter, fixed_dims=fixed_dims,
+            result = self._project_candidate(
+                x_query=x_query,
+                bd=bd,
+                idx=int(idx),
+                delta=delta,
+                robust_norm=robust_norm,
+                solver_maxiter=solver_maxiter,
+                fixed_dims=fixed_dims,
                 nondecreasing_dims=nondecreasing_dims,
                 nonincreasing_dims=nonincreasing_dims,
                 incumbent_upper_bound=incumbent_upper_bound,
             )
-            projection_time_s[0] += time.perf_counter() - t0
-            selection_score = self._score_from_profile(decode_profile, dist)
+            projection_time_s[0] += result.elapsed_s
+            selection_score = result.selection_score
+            decode_profile = result.profile
             improved_dist = selection_score < best_projection_dist[0]
             if (
                 improved_dist
@@ -2210,7 +2499,7 @@ class CertCFAtlas:
                 profile_recorded[0] = True
             if improved_dist:
                 best_projection_dist[0] = selection_score
-            return x_proj, selection_score
+            return result.point, selection_score
 
         return project_fn, projection_time_s, best_decode_profile
 
@@ -2329,6 +2618,8 @@ class CertCFAtlas:
         solver_maxiter,
         fixed_dims,
         query_k_candidates: int,
+        candidate_parallelism: int,
+        candidate_parallel_backend: str,
         nondecreasing_dims=None,
         nonincreasing_dims=None,
     ):
@@ -2413,27 +2704,183 @@ class CertCFAtlas:
             best_dist = self._sparsity_surrogate_score(best_point, x_query)
             best_idx = nearest_anchor_idx
             best_source = "nearest_anchor"
+        initial_best_point = None if best_point is None else best_point.copy()
+        initial_best_dist = float(best_dist)
+        initial_best_idx = best_idx
+        initial_best_source = best_source
 
         n_qp = 0
         fallback_used = False
         n_pruned_by_bound = 0
         best_lower_bound_at_termination = np.nan
-        for idx in primary_indices:
-            lower_bound = float(lower_bounds[int(idx)])
-            if lower_bound >= best_dist:
-                n_pruned_by_bound += 1
-                if np.isnan(best_lower_bound_at_termination):
-                    best_lower_bound_at_termination = lower_bound
+        candidate_parallelism = int(candidate_parallelism)
+        if candidate_parallelism <= 0:
+            raise ValueError("candidate_parallelism must be positive")
+        candidate_parallel_backend = str(candidate_parallel_backend).lower()
+        if candidate_parallel_backend not in _CANDIDATE_PARALLEL_BACKENDS:
+            raise ValueError(
+                "candidate_parallel_backend must be one of {'thread', 'process'}"
+            )
+        primary_projection_wall_time_s = 0.0
+        parallel_projection_work_time_s = 0.0
+        parallel_candidate_count = 0
+        candidate_workers_used = 1
+        candidate_parent_refinement_used = False
+
+        if candidate_parallelism <= 1:
+            for idx in primary_indices:
+                lower_bound = float(lower_bounds[int(idx)])
+                if lower_bound >= best_dist:
+                    n_pruned_by_bound += 1
+                    if np.isnan(best_lower_bound_at_termination):
+                        best_lower_bound_at_termination = lower_bound
+                    else:
+                        best_lower_bound_at_termination = min(
+                            best_lower_bound_at_termination,
+                            lower_bound,
+                        )
+                    continue
+                point, dist = project_fn(int(idx), best_dist)
+                n_qp += 1
+                if dist < best_dist:
+                    best_point = point
+                    best_dist = dist
+                    best_idx = int(idx)
+                    best_source = "projection"
+        else:
+            # All candidates receive the same safe incumbent. This may do
+            # more work than the serial search because later projections do
+            # not see intermediate improvements, but it makes the k projection
+            # problems independent without changing their feasible regions.
+            initial_incumbent = float(best_dist)
+            eligible_indices: List[int] = []
+            for idx in primary_indices:
+                candidate_idx = int(idx)
+                lower_bound = float(lower_bounds[candidate_idx])
+                if lower_bound >= initial_incumbent:
+                    n_pruned_by_bound += 1
+                    if np.isnan(best_lower_bound_at_termination):
+                        best_lower_bound_at_termination = lower_bound
+                    else:
+                        best_lower_bound_at_termination = min(
+                            best_lower_bound_at_termination,
+                            lower_bound,
+                        )
+                    continue
+                eligible_indices.append(candidate_idx)
+
+            if len(eligible_indices) == 1:
+                candidate_idx = eligible_indices[0]
+                point, dist = project_fn(candidate_idx, initial_incumbent)
+                n_qp += 1
+                if dist < best_dist:
+                    best_point = point
+                    best_dist = dist
+                    best_idx = candidate_idx
+                    best_source = "projection"
+            elif eligible_indices:
+                candidate_workers_used = min(candidate_parallelism, len(eligible_indices))
+                projection_started = time.perf_counter()
+                if candidate_parallel_backend == "thread":
+                    with ThreadPoolExecutor(
+                        max_workers=candidate_workers_used,
+                        thread_name_prefix="certcf-candidate",
+                    ) as executor:
+                        futures = [
+                            executor.submit(
+                                self._project_candidate,
+                                x_query=x_query,
+                                bd=bd,
+                                idx=candidate_idx,
+                                delta=delta,
+                                robust_norm=robust_norm,
+                                solver_maxiter=solver_maxiter,
+                                fixed_dims=fixed_dims,
+                                nondecreasing_dims=nondecreasing_dims,
+                                nonincreasing_dims=nonincreasing_dims,
+                                incumbent_upper_bound=initial_incumbent,
+                            )
+                            for candidate_idx in eligible_indices
+                        ]
+                        # Consume in anchor order so equal-score ties have the
+                        # same deterministic resolution as the serial path.
+                        parallel_results = [future.result() for future in futures]
                 else:
-                    best_lower_bound_at_termination = min(best_lower_bound_at_termination, lower_bound)
-                continue
-            point, dist = project_fn(int(idx), best_dist)
-            n_qp += 1
-            if dist < best_dist:
-                best_point = point
-                best_dist = dist
-                best_idx = int(idx)
-                best_source = "projection"
+                    process_pool = self._get_candidate_process_pool(candidate_parallelism)
+                    tasks = [
+                        (
+                            # Preserve the serial path's input dtype.  Promoting
+                            # float32 queries to float64 here can perturb the
+                            # solver solution and categorical decoding.
+                            np.asarray(x_query).copy(),
+                            int(target_class),
+                            candidate_idx,
+                            float(delta),
+                            robust_norm,
+                            solver_maxiter,
+                            fixed_dims,
+                            nondecreasing_dims,
+                            nonincreasing_dims,
+                            initial_incumbent,
+                        )
+                        for candidate_idx in eligible_indices
+                    ]
+                    parallel_results = []
+                    for start in range(0, len(tasks), candidate_workers_used):
+                        parallel_results.extend(
+                            process_pool.map(
+                                _run_candidate_projection_in_process,
+                                tasks[start:start + candidate_workers_used],
+                            )
+                        )
+                primary_projection_wall_time_s = time.perf_counter() - projection_started
+                parallel_projection_work_time_s = float(
+                    sum(result.elapsed_s for result in parallel_results)
+                )
+                parallel_candidate_count = len(parallel_results)
+                n_qp += parallel_candidate_count
+
+                best_projection_score = np.inf
+                profile_recorded = False
+                for result in parallel_results:
+                    improved_projection = result.selection_score < best_projection_score
+                    if improved_projection or not profile_recorded:
+                        best_decode_profile[0] = result.profile
+                        profile_recorded = True
+                    if improved_projection:
+                        best_projection_score = result.selection_score
+                    if result.selection_score < best_dist:
+                        best_point = result.point
+                        best_dist = result.selection_score
+                        best_idx = result.index
+                        best_source = "projection"
+
+                # Process-local solver state can introduce small numerical
+                # differences for reweighted sparsity or categorical decoding.
+                # Re-solve the winning region in the parent process to reduce
+                # process-local numerical differences in the returned point.
+                # Candidate ranking can still differ in near-tie cases because
+                # the remaining regions are not redundantly re-solved.
+                needs_parent_refinement = bool(
+                    candidate_parallel_backend == "process"
+                    and best_source == "projection"
+                    and (self._sparsity_active() or bool(self.ohe_slices))
+                )
+                if needs_parent_refinement and best_idx is not None:
+                    refined_point, refined_score = project_fn(
+                        int(best_idx), initial_incumbent
+                    )
+                    n_qp += 1
+                    candidate_parent_refinement_used = True
+                    if refined_point is not None and refined_score < initial_best_dist:
+                        best_point = refined_point
+                        best_dist = refined_score
+                        best_source = "projection"
+                    else:
+                        best_point = initial_best_point
+                        best_dist = initial_best_dist
+                        best_idx = initial_best_idx
+                        best_source = initial_best_source
 
         # If no certified incumbent is available after the fixed top-k budget,
         # keep the method useful by scanning remaining anchors in nearest-anchor
@@ -2456,12 +2903,27 @@ class CertCFAtlas:
             best_lower_bound_at_termination = np.nan
 
         query_loop_time_s = time.perf_counter() - t0
+        serial_projection_time_s = float(projection_time_s[0])
+        projection_work_time_s = parallel_projection_work_time_s + serial_projection_time_s
+        projection_wall_time_s = (
+            primary_projection_wall_time_s + serial_projection_time_s
+            if candidate_parallelism > 1
+            else serial_projection_time_s
+        )
         profiling = {
             "query_loop_time_ms": 1e3 * query_loop_time_s,
-            "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_time_s[0]),
-            "projection_time_ms": 1e3 * projection_time_s[0],
+            "search_time_ms": 1e3 * max(0.0, query_loop_time_s - projection_wall_time_s),
+            # Sum of the individual solver durations (computational work).
+            "projection_time_ms": 1e3 * projection_work_time_s,
+            # Wall-clock time spent waiting for projection batches.
+            "projection_wall_time_ms": 1e3 * projection_wall_time_s,
             "distance_norm": float(self.distance_norm) if self.distance_norm == np.inf else int(self.distance_norm),
             "query_k_candidates": float(k),
+            "candidate_parallelism": float(candidate_parallelism),
+            "candidate_parallel_backend": candidate_parallel_backend,
+            "candidate_workers_used": float(candidate_workers_used),
+            "parallel_candidate_count": float(parallel_candidate_count),
+            "candidate_parent_refinement_used": candidate_parent_refinement_used,
             "nearest_anchor_fallback_used": float(fallback_used),
             "n_candidates_considered": float(n_qp),
             "n_candidates_total": float(bvh.n_polytopes),
@@ -2495,6 +2957,8 @@ class CertCFAtlas:
         nondecreasing_dims: Optional[np.ndarray] = None,
         nonincreasing_dims: Optional[np.ndarray] = None,
         query_k_candidates: int = 1,
+        candidate_parallelism: Optional[int] = None,
+        candidate_parallel_backend: Optional[str] = None,
     ) -> CounterfactualResult:
         """Find the closest counterfactual for a query point."""
 
@@ -2511,6 +2975,22 @@ class CertCFAtlas:
             robust_norm = self._normalize_lp_norm(robust_norm)
         bd = self.bounds[target_class]
         resolved_method = method or self.default_query_method
+        resolved_candidate_parallelism = int(
+            getattr(self, "candidate_parallelism", 1)
+            if candidate_parallelism is None
+            else candidate_parallelism
+        )
+        if resolved_candidate_parallelism <= 0:
+            raise ValueError("candidate_parallelism must be positive")
+        resolved_candidate_parallel_backend = str(
+            getattr(self, "candidate_parallel_backend", "thread")
+            if candidate_parallel_backend is None
+            else candidate_parallel_backend
+        ).lower()
+        if resolved_candidate_parallel_backend not in _CANDIDATE_PARALLEL_BACKENDS:
+            raise ValueError(
+                "candidate_parallel_backend must be one of {'thread', 'process'}"
+            )
         profiling: Dict[str, ProfileValue] = {
             "method": resolved_method,
             "delta": float(delta),
@@ -2540,7 +3020,9 @@ class CertCFAtlas:
         elif resolved_method == 'nearest_anchor':
             x_cf, selection_score, anchor_idx, n_qp, search_profiling = self._search_nearest_anchor(
                 x_query, bd, target_class, delta, robust_norm, solver_maxiter,
-                fixed_dims, query_k_candidates, nondecreasing_dims, nonincreasing_dims)
+                fixed_dims, query_k_candidates, resolved_candidate_parallelism,
+                resolved_candidate_parallel_backend, nondecreasing_dims,
+                nonincreasing_dims)
         else:
             raise ValueError(f"Unknown method: {resolved_method}. Use 'sorted', 'bvh', or 'nearest_anchor'.")
 
@@ -2581,6 +3063,8 @@ class CertCFAtlas:
         nondecreasing_dims: Optional[np.ndarray] = None,
         nonincreasing_dims: Optional[np.ndarray] = None,
         query_k_candidates: int = 1,
+        candidate_parallelism: Optional[int] = None,
+        candidate_parallel_backend: Optional[str] = None,
         timeout_s_per_query: Optional[float] = None,
     ) -> List[CounterfactualResult]:
         """Find counterfactuals for a batch of query points."""
@@ -2597,6 +3081,18 @@ class CertCFAtlas:
             X_query=X_query_np,
             target_class=target_class,
         )
+        resolved_candidate_parallelism = int(
+            getattr(self, "candidate_parallelism", 1)
+            if candidate_parallelism is None
+            else candidate_parallelism
+        )
+        if resolved_candidate_parallelism <= 0:
+            raise ValueError("candidate_parallelism must be positive")
+        if self.query_parallelism > 1 and resolved_candidate_parallelism > 1:
+            raise ValueError(
+                "query_parallelism and candidate_parallelism cannot both exceed 1; "
+                "choose inter-query or intra-query parallelism"
+            )
         find_kwargs: Dict[str, Any] = {
             "method": method,
             "delta": delta,
@@ -2605,6 +3101,10 @@ class CertCFAtlas:
             "fixed_dims": fixed_dims,
             "query_k_candidates": query_k_candidates,
         }
+        if candidate_parallelism is not None:
+            find_kwargs["candidate_parallelism"] = candidate_parallelism
+        if candidate_parallel_backend is not None:
+            find_kwargs["candidate_parallel_backend"] = candidate_parallel_backend
         has_directional = (
             (nondecreasing_dims is not None and len(nondecreasing_dims) > 0)
             or (nonincreasing_dims is not None and len(nonincreasing_dims) > 0)

@@ -1024,6 +1024,20 @@ def _build_certcf_method(
     query_parallelism = int(params.get("query_parallelism", 1))
     if query_parallelism <= 0:
         raise ValueError("certcf.query_parallelism must be positive")
+    candidate_parallelism = int(params.get("candidate_parallelism", 1))
+    if candidate_parallelism <= 0:
+        raise ValueError("certcf.candidate_parallelism must be positive")
+    if query_parallelism > 1 and candidate_parallelism > 1:
+        raise ValueError(
+            "certcf.query_parallelism and certcf.candidate_parallelism cannot both exceed 1"
+        )
+    candidate_parallel_backend = str(
+        params.get("candidate_parallel_backend", "thread")
+    ).lower()
+    if candidate_parallel_backend not in {"thread", "process"}:
+        raise ValueError(
+            "certcf.candidate_parallel_backend must be one of {'thread', 'process'}"
+        )
     cvxpy_solvers = deepcopy(params["cvxpy_solvers"]) if "cvxpy_solvers" in params else None
     cvxpy_solver_options = deepcopy(params["cvxpy_solver_options"]) if "cvxpy_solver_options" in params else None
     cvxpy_accept_statuses = deepcopy(params["cvxpy_accept_statuses"]) if "cvxpy_accept_statuses" in params else None
@@ -1119,6 +1133,8 @@ def _build_certcf_method(
         query_k_candidates=query_k_candidates,
         solver_maxiter=solver_maxiter,
         query_parallelism=query_parallelism,
+        candidate_parallelism=candidate_parallelism,
+        candidate_parallel_backend=candidate_parallel_backend,
         k_per_class=k_per_class,
         subsample_method=atlas_subsample_method,
         subsample_space=atlas_subsample_space,
@@ -1364,6 +1380,17 @@ def _apply_cli_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[
             m for m in cfg.get("methods", [])
             if m.get("run_name", m["name"]) in allowed or m["name"] in allowed
         ]
+    candidate_parallelism = getattr(args, "candidate_parallelism", None)
+    candidate_parallel_backend = getattr(args, "candidate_parallel_backend", None)
+    if candidate_parallelism is not None or candidate_parallel_backend is not None:
+        for method in cfg.get("methods", []):
+            if method.get("name") != "certcf":
+                continue
+            params = method.setdefault("params", {})
+            if candidate_parallelism is not None:
+                params["candidate_parallelism"] = int(candidate_parallelism)
+            if candidate_parallel_backend is not None:
+                params["candidate_parallel_backend"] = str(candidate_parallel_backend)
     if getattr(args, "force", False):
         cfg["force_redo"] = True
     return cfg
@@ -1773,6 +1800,35 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             if target_classes_all is not None
             else np.asarray([1 - int(y) for y in active_y_orig], dtype=np.int64)
         )
+        candidate_parallelism = int(method_params.get("candidate_parallelism", 1))
+        candidate_parallel_backend = str(
+            method_params.get("candidate_parallel_backend", "thread")
+        ).lower()
+        candidate_parallel_warmup = bool(
+            method_params.get("candidate_parallel_warmup", True)
+        )
+        if (
+            method_name == "certcf"
+            and candidate_parallelism > 1
+            and candidate_parallel_backend == "process"
+            and candidate_parallel_warmup
+            and len(query_indices) > 0
+        ):
+            warmup_started = time.perf_counter()
+            warmup_result = method.generate(
+                x=active_queries[0],
+                target_class=int(task_targets[0]),
+            )
+            warmup_time_s = time.perf_counter() - warmup_started
+            method_metadata["candidate_parallel_warmup_s"] = float(warmup_time_s)
+            method_metadata["candidate_parallel_warmup_success"] = bool(
+                warmup_result.success
+            )
+            print(
+                "  [candidate pool warm-up] "
+                f"{warmup_time_s:.3f}s, workers={candidate_parallelism}, "
+                f"success={bool(warmup_result.success)}"
+            )
         pbar = tqdm(total=len(query_indices), desc=f"  {run_name}", unit="query")
 
         def _append_query_result(
@@ -1956,6 +2012,16 @@ def run_single_dataset(cfg: Dict[str, Any]) -> BenchmarkResult:
             pbar.update(batch_len)
             pbar.set_postfix(valid=n_ok, failed=n_failed)
 
+        pbar.close()
+        if method_name == "certcf":
+            close_candidate_pool = getattr(
+                getattr(method, "atlas", None),
+                "close_candidate_process_pool",
+                None,
+            )
+            if callable(close_candidate_pool):
+                close_candidate_pool()
+
         resource_monitor.stop()
         method_metadata.update(resource_monitor.summarize())
         benchmark_result.method_results.append(MethodResult(
@@ -2072,6 +2138,18 @@ def main() -> None:
         "--force",
         action="store_true",
         help="Ignore existing result parquet files and recompute all configured runs.",
+    )
+    parser.add_argument(
+        "--candidate-parallelism",
+        type=int,
+        default=None,
+        help="Override the number of concurrent CertCF candidate-projection workers.",
+    )
+    parser.add_argument(
+        "--candidate-parallel-backend",
+        choices=["thread", "process"],
+        default=None,
+        help="Override the CertCF candidate-projection backend.",
     )
     args = parser.parse_args()
     cfg = _apply_cli_overrides(read_yaml(args.config), args)
