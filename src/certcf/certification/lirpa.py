@@ -1049,8 +1049,6 @@ class PreimageApproximation:
             elif (
                 self.cnn
                 and cnn_radius_batch_size > 1
-                and batch_size is not None
-                and int(batch_size) > 1
                 and adaptive_eps_binary_search_steps == 0
             ):
                 # ----------------------------------------------------------------
@@ -1075,10 +1073,7 @@ class PreimageApproximation:
                     label=int(label),
                     X=X,
                     eps_label=eps_label,
-                    bucket_batch_size=min(
-                        int(batch_size),
-                        cnn_radius_batch_size,
-                    ),
+                    bucket_batch_size=cnn_radius_batch_size,
                     maximum_relative_inflation=(
                         cnn_radius_batch_max_relative_inflation
                     ),

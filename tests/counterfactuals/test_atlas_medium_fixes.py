@@ -713,7 +713,9 @@ def test_preimage_bucketed_cnn_bounds_batch_and_fallback(monkeypatch):
     bounds = preimage.compute_all_bounds(
         norm=1,
         eps_array=eps_array,
-        batch_size=3,
+        # The dedicated CNN radius batch size must not depend on the legacy
+        # LiRPA batch size, which is intentionally 1 in the CIFAR benchmark.
+        batch_size=1,
         adaptive_eps=True,
         cnn_radius_batch_size=3,
         cnn_radius_batch_max_relative_inflation=0.05,
