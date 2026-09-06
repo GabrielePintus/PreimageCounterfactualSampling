@@ -93,6 +93,11 @@ def validate_config(config: Mapping[str, Any]) -> None:
         for key in ("epsilon_parallelism", "build_parallelism"):
             if int(variant.get(key, 0)) <= 0:
                 raise ValueError(f"{variant_id}.{key} must be positive")
+        if (
+            variant.get("lirpa_batch_size") is not None
+            and int(variant["lirpa_batch_size"]) <= 0
+        ):
+            raise ValueError(f"{variant_id}.lirpa_batch_size must be positive")
         if int(variant.get("cnn_radius_batch_size", 1)) <= 0:
             raise ValueError(f"{variant_id}.cnn_radius_batch_size must be positive")
         if float(variant.get("cnn_radius_batch_max_relative_inflation", 0.0)) < 0.0:
@@ -148,6 +153,14 @@ class OfflineBuildPaths:
     @property
     def epsilon_sweep(self) -> Path:
         return self.root / "epsilon_parallelism_sweep.parquet"
+
+    @property
+    def batch_size_sweep(self) -> Path:
+        return self.root / "lirpa_batch_size_sweep.parquet"
+
+    @property
+    def batch_size_summary(self) -> Path:
+        return self.root / "lirpa_batch_size_summary.parquet"
 
     @property
     def summary(self) -> Path:
@@ -324,7 +337,13 @@ class OfflineBuildParallelismRunner:
                 parts.append(logits.argmax(dim=1).cpu().numpy())
         return np.concatenate(parts).astype(np.int64, copy=False)
 
-    def _build_heloc(self, case: Mapping[str, Any], eps_workers: int, build_workers: int):
+    def _build_heloc(
+        self,
+        case: Mapping[str, Any],
+        eps_workers: int,
+        build_workers: int,
+        lirpa_batch_size: int | None = None,
+    ):
         source = LiRPARefinementAblationRunner.from_yaml(
             self._source_config("lirpa_ablation")
         )
@@ -336,12 +355,20 @@ class OfflineBuildParallelismRunner:
         method = source._make_certcf(selected, model, geometry, device)
         method.epsilon_parallelism = eps_workers
         method.build_parallelism = build_workers
+        if lirpa_batch_size is not None:
+            method.batch_size = int(lirpa_batch_size)
         interval = float(source.config["runtime"]["rss_sample_interval_seconds"])
         with PhaseResourceMonitor("build", device, interval) as monitor:
             method.fit(geometry["x_anchor"], geometry["y_anchor_pred"])
         return method, monitor.metrics, device
 
-    def _build_fcnn(self, case: Mapping[str, Any], eps_workers: int, build_workers: int):
+    def _build_fcnn(
+        self,
+        case: Mapping[str, Any],
+        eps_workers: int,
+        build_workers: int,
+        lirpa_batch_size: int | None = None,
+    ):
         source = NetworkComplexityRunner.from_yaml(
             self._source_config("network_complexity")
         )
@@ -358,7 +385,11 @@ class OfflineBuildParallelismRunner:
             x_train,
             y_support,
             device=device,
-            batch_size=source._effective_lirpa_batch_size(),
+            batch_size=(
+                source._effective_lirpa_batch_size()
+                if lirpa_batch_size is None
+                else int(lirpa_batch_size)
+            ),
         )
         return method, metrics, device
 
@@ -548,23 +579,27 @@ class OfflineBuildParallelismRunner:
         variant = self.config["variants"][variant_id]
         eps_workers = int(variant["epsilon_parallelism"])
         build_workers = int(variant["build_parallelism"])
+        lirpa_batch_size = variant.get("lirpa_batch_size")
+        if lirpa_batch_size is not None:
+            lirpa_batch_size = int(lirpa_batch_size)
         cnn_radius_batch_size = int(variant.get("cnn_radius_batch_size", 1))
         cnn_radius_batch_max_relative_inflation = float(
             variant.get("cnn_radius_batch_max_relative_inflation", 0.0)
         )
         print(
             f"[OFFLINE] {case_id}/{variant_id}: epsilon workers={eps_workers}, "
-            f"LiRPA workers={build_workers}, CNN radius batch={cnn_radius_batch_size}",
+            f"LiRPA workers={build_workers}, LiRPA batch={lirpa_batch_size or 'source'}, "
+            f"CNN radius batch={cnn_radius_batch_size}",
             flush=True,
         )
         kind = str(case["kind"])
         if kind == "lirpa_ablation":
             method, resources, device = self._build_heloc(
-                case, eps_workers, build_workers
+                case, eps_workers, build_workers, lirpa_batch_size
             )
         elif kind == "network_complexity":
             method, resources, device = self._build_fcnn(
-                case, eps_workers, build_workers
+                case, eps_workers, build_workers, lirpa_batch_size
             )
         else:
             method, resources, device = self._build_cifar(
@@ -608,6 +643,7 @@ class OfflineBuildParallelismRunner:
             "device": str(device),
             "epsilon_parallelism": eps_workers,
             "build_parallelism": build_workers,
+            "lirpa_batch_size": lirpa_batch_size,
             "cnn_radius_batch_size": cnn_radius_batch_size,
             "cnn_radius_batch_max_relative_inflation": (
                 cnn_radius_batch_max_relative_inflation
@@ -632,6 +668,212 @@ class OfflineBuildParallelismRunner:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return payload
+
+    def run_batch_size_sweep(
+        self,
+        *,
+        case_id: str,
+        batch_sizes: list[int],
+        repetitions: int,
+        force: bool = False,
+    ) -> pd.DataFrame:
+        """Sweep FC LiRPA batches or CNN radius buckets with checkpointed rows."""
+        if case_id not in self.config["cases"]:
+            raise ValueError(f"unknown case: {case_id}")
+        if repetitions <= 0:
+            raise ValueError("repetitions must be positive")
+        batch_sizes = list(dict.fromkeys(int(value) for value in batch_sizes))
+        if not batch_sizes or any(value <= 0 for value in batch_sizes):
+            raise ValueError("batch sizes must be positive")
+
+        case = self.config["cases"][case_id]
+        kind = str(case["kind"])
+        reference = self._reference_path(case_id, case)
+        if not (reference / "manifest.json").exists():
+            raise RuntimeError(
+                f"missing reference atlas for {case_id}: run its serial variant first"
+            )
+
+        path = self.paths.batch_size_sweep
+        if path.exists():
+            frame = pd.read_parquet(path)
+        else:
+            frame = pd.DataFrame()
+        if force and not frame.empty:
+            frame = frame[frame["case_id"] != case_id].copy()
+
+        completed = set()
+        if not frame.empty:
+            completed = {
+                (int(row.repetition), int(row.batch_size))
+                for row in frame.itertuples()
+                if row.case_id == case_id and row.status == "complete"
+            }
+
+        rng = np.random.default_rng(20260906)
+        for repetition in range(repetitions):
+            ordered = batch_sizes.copy()
+            rng.shuffle(ordered)
+            for batch_size in ordered:
+                identity = (repetition, batch_size)
+                if identity in completed:
+                    continue
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.reset_peak_memory_stats()
+
+                print(
+                    f"[BATCH SWEEP] {case_id}: repetition={repetition + 1}/"
+                    f"{repetitions}, batch={batch_size}",
+                    flush=True,
+                )
+                method = None
+                try:
+                    if kind == "lirpa_ablation":
+                        method, resources, device = self._build_heloc(
+                            case, 1, 1, batch_size
+                        )
+                        batch_kind = "variable_epsilon"
+                    elif kind == "network_complexity":
+                        method, resources, device = self._build_fcnn(
+                            case, 1, 1, batch_size
+                        )
+                        batch_kind = "variable_epsilon"
+                    elif kind == "cifar_scaling":
+                        method, resources, device = self._build_cifar(
+                            case,
+                            8,
+                            1,
+                            batch_size,
+                            0.05,
+                        )
+                        batch_kind = "cnn_radius_bucket"
+                    else:  # pragma: no cover - guarded by config validation
+                        raise ValueError(f"unsupported case kind: {kind}")
+
+                    diagnostics = self._diagnostics(method)
+                    comparison_cfg = self.config["comparison"]
+                    comparison = compare_bounds_to_saved(
+                        method.atlas.bounds,
+                        reference,
+                        atol=float(comparison_cfg["absolute_tolerance"]),
+                        rtol=float(comparison_cfg["relative_tolerance"]),
+                        chunk_elements=int(comparison_cfg["chunk_elements"]),
+                    )
+                    decision_arrays = [
+                        value
+                        for identity, value in comparison["per_array"].items()
+                        if identity.rsplit(".", maxsplit=1)[-1]
+                        in ATLAS_DECISION_KEYS
+                    ]
+                    row = {
+                        "status": "complete",
+                        "error": None,
+                        "case_id": case_id,
+                        "case_kind": kind,
+                        "batch_kind": batch_kind,
+                        "repetition": repetition,
+                        "batch_size": batch_size,
+                        "device": str(device),
+                        "implementation_commit": _git_commit(),
+                        **resources,
+                        **diagnostics,
+                        "atlas_all_exact": bool(comparison["all_exact"]),
+                        "atlas_all_close": bool(comparison["all_close"]),
+                        "atlas_decisions_exact": bool(decision_arrays)
+                        and all(value["exact"] for value in decision_arrays),
+                        "atlas_decisions_close": bool(decision_arrays)
+                        and all(value["allclose"] for value in decision_arrays),
+                        "atlas_max_absolute_difference": float(
+                            comparison["maximum_absolute_difference"]
+                        ),
+                    }
+                except Exception as exc:
+                    row = {
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "case_id": case_id,
+                        "case_kind": kind,
+                        "batch_kind": (
+                            "cnn_radius_bucket"
+                            if kind == "cifar_scaling"
+                            else "variable_epsilon"
+                        ),
+                        "repetition": repetition,
+                        "batch_size": batch_size,
+                        "implementation_commit": _git_commit(),
+                    }
+                    print(
+                        f"[BATCH SWEEP] {case_id} batch={batch_size} failed: {exc}",
+                        flush=True,
+                    )
+                finally:
+                    if method is not None and method.atlas is not None:
+                        method.atlas.close_candidate_process_pool()
+                    del method
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                frame = pd.concat([frame, pd.DataFrame([row])], ignore_index=True)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_suffix(path.suffix + ".tmp")
+                frame.to_parquet(temporary, index=False)
+                temporary.replace(path)
+                if row["status"] == "complete":
+                    print(
+                        f"[BATCH SWEEP] {case_id} batch={batch_size}: "
+                        f"{row['build_wall_time_s']:.3f}s, "
+                        f"equivalent={row['atlas_all_close']}",
+                        flush=True,
+                    )
+
+        return frame.sort_values(
+            ["case_id", "batch_size", "repetition"]
+        ).reset_index(drop=True)
+
+    def analyze_batch_size_sweep(self) -> pd.DataFrame:
+        """Aggregate successful batch-size measurements across repetitions."""
+        path = self.paths.batch_size_sweep
+        if not path.exists():
+            raise RuntimeError("batch-size sweep has not been run")
+        frame = pd.read_parquet(path)
+        complete = frame[frame["status"] == "complete"].copy()
+        if complete.empty:
+            raise RuntimeError("batch-size sweep contains no successful measurements")
+        summary = (
+            complete.groupby(
+                ["case_id", "case_kind", "batch_kind", "batch_size"],
+                as_index=False,
+            )
+            .agg(
+                repetitions=("build_wall_time_s", "size"),
+                build_mean_s=("build_wall_time_s", "mean"),
+                build_std_s=("build_wall_time_s", "std"),
+                build_median_s=("build_wall_time_s", "median"),
+                lirpa_mean_s=("lirpa_time_s", "mean"),
+                epsilon_mean_s=("epsilon_time_s", "mean"),
+                rss_peak_mean_bytes=("build_rss_peak_delta_bytes", "mean"),
+                cuda_peak_mean_bytes=("build_cuda_peak_allocated_bytes", "mean"),
+                all_equivalent=("atlas_all_close", "all"),
+                all_decisions_exact=("atlas_decisions_exact", "all"),
+                all_decisions_close=("atlas_decisions_close", "all"),
+                maximum_difference=("atlas_max_absolute_difference", "max"),
+                fallback_mean=("cnn_radius_bucket_fallback_count", "mean"),
+            )
+            .sort_values(["case_id", "batch_size"])
+            .reset_index(drop=True)
+        )
+        baselines = summary[summary["batch_size"] == 1].set_index("case_id")[
+            "build_mean_s"
+        ]
+        summary["speedup_vs_batch1"] = (
+            summary["case_id"].map(baselines) / summary["build_mean_s"]
+        )
+        self.paths.batch_size_summary.parent.mkdir(parents=True, exist_ok=True)
+        summary.to_parquet(self.paths.batch_size_summary, index=False)
+        return summary
 
     def analyze(self) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []

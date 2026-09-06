@@ -19,7 +19,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "stage",
-        choices=["run", "epsilon-sweep", "analyze", "status"],
+        choices=[
+            "run",
+            "epsilon-sweep",
+            "batch-sweep",
+            "batch-analyze",
+            "analyze",
+            "status",
+        ],
     )
     parser.add_argument(
         "--config",
@@ -34,6 +41,11 @@ def main() -> None:
         help="Comma-separated worker counts for epsilon-sweep.",
     )
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument(
+        "--batch-sizes",
+        default="1,8,16,32,64,128",
+        help="Comma-separated LiRPA batch or CNN radius-bucket sizes.",
+    )
     args = parser.parse_args()
 
     runner = OfflineBuildParallelismRunner.from_yaml(args.config)
@@ -49,6 +61,19 @@ def main() -> None:
             force=args.force,
         )
         result = {"rows": len(frame), "path": str(runner.paths.epsilon_sweep)}
+    elif args.stage == "batch-sweep":
+        if args.case is None:
+            parser.error("batch-sweep requires --case")
+        frame = runner.run_batch_size_sweep(
+            case_id=args.case,
+            batch_sizes=[int(value) for value in args.batch_sizes.split(",")],
+            repetitions=args.repetitions,
+            force=args.force,
+        )
+        result = {"rows": len(frame), "path": str(runner.paths.batch_size_sweep)}
+    elif args.stage == "batch-analyze":
+        frame = runner.analyze_batch_size_sweep()
+        result = {"rows": len(frame), "path": str(runner.paths.batch_size_summary)}
     elif args.stage == "analyze":
         frame = runner.analyze()
         result = {"rows": len(frame), "path": str(runner.paths.summary)}
