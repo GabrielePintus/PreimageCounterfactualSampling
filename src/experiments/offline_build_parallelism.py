@@ -119,7 +119,17 @@ def validate_config(config: Mapping[str, Any]) -> None:
 def config_fingerprint(config: Mapping[str, Any]) -> str:
     protocol = deepcopy(dict(config))
     protocol.pop("artifacts", None)
+    # The FCNN grid is an independent follow-up protocol and must not
+    # invalidate the earlier per-case serial/parallel artifacts.
+    protocol.pop("fcnn_grid", None)
     encoded = json.dumps(protocol, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _mapping_fingerprint(protocol: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        deepcopy(dict(protocol)), sort_keys=True, separators=(",", ":")
+    ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -163,8 +173,76 @@ class OfflineBuildPaths:
         return self.root / "lirpa_batch_size_summary.parquet"
 
     @property
+    def fcnn_grid_sweep(self) -> Path:
+        return self.root / "fcnn_grid_optimized_builds.parquet"
+
+    @property
+    def fcnn_grid_comparison(self) -> Path:
+        return self.root / "fcnn_grid_serial_optimized.parquet"
+
+    @property
+    def fcnn_grid_models(self) -> Path:
+        return self.root / "fcnn_grid_build_models.json"
+
+    @property
     def summary(self) -> Path:
         return self.root / "offline_build_summary.parquet"
+
+
+def _atlas_decision_fingerprint(method) -> str:
+    """Hash the anchor/radius decisions that batching must preserve."""
+    atlas = method.atlas
+    if atlas is None or atlas.bounds is None:
+        raise RuntimeError("CertCF did not produce an atlas")
+    digest = hashlib.sha256()
+    for label in sorted(atlas.bounds):
+        digest.update(f"class:{int(label)}".encode())
+        values = atlas.bounds[label]
+        for key in ATLAS_DECISION_KEYS:
+            if key not in values:
+                continue
+            array = np.ascontiguousarray(np.asarray(values[key]))
+            digest.update(key.encode())
+            digest.update(str(array.dtype).encode())
+            digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+            digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def _fit_interaction_model(frame: pd.DataFrame, response: str) -> dict[str, Any]:
+    """Fit and leave-one-architecture-out evaluate 1 + D + (D-1)W."""
+    depth = frame["depth"].to_numpy(dtype=np.float64)
+    width = frame["width"].to_numpy(dtype=np.float64)
+    target = frame[response].to_numpy(dtype=np.float64)
+    design = np.column_stack(
+        [np.ones(len(frame), dtype=np.float64), depth, (depth - 1.0) * width]
+    )
+    coefficients = np.linalg.lstsq(design, target, rcond=None)[0]
+    loo_prediction = np.empty(len(frame), dtype=np.float64)
+    for held_out in range(len(frame)):
+        keep = np.arange(len(frame)) != held_out
+        fold_coefficients = np.linalg.lstsq(
+            design[keep], target[keep], rcond=None
+        )[0]
+        loo_prediction[held_out] = float(design[held_out] @ fold_coefficients)
+    residual = target - loo_prediction
+    denominator = float(np.sum((target - np.mean(target)) ** 2))
+    predictive_r2 = (
+        float(1.0 - np.sum(residual**2) / denominator)
+        if denominator > 0.0
+        else float("nan")
+    )
+    return {
+        "coefficients": {
+            "intercept": float(coefficients[0]),
+            "depth": float(coefficients[1]),
+            "depth_minus_one_times_width": float(coefficients[2]),
+        },
+        "loo_prediction": loo_prediction,
+        "loo_mae_s": float(np.mean(np.abs(residual))),
+        "loo_rmse_s": float(np.sqrt(np.mean(residual**2))),
+        "loo_predictive_r2": predictive_r2,
+    }
 
 
 def _compare_arrays(
@@ -853,6 +931,7 @@ class OfflineBuildParallelismRunner:
                 build_std_s=("build_wall_time_s", "std"),
                 build_median_s=("build_wall_time_s", "median"),
                 lirpa_mean_s=("lirpa_time_s", "mean"),
+                lirpa_std_s=("lirpa_time_s", "std"),
                 epsilon_mean_s=("epsilon_time_s", "mean"),
                 rss_peak_mean_bytes=("build_rss_peak_delta_bytes", "mean"),
                 cuda_peak_mean_bytes=("build_cuda_peak_allocated_bytes", "mean"),
@@ -874,6 +953,246 @@ class OfflineBuildParallelismRunner:
         self.paths.batch_size_summary.parent.mkdir(parents=True, exist_ok=True)
         summary.to_parquet(self.paths.batch_size_summary, index=False)
         return summary
+
+    def run_fcnn_grid_builds(
+        self,
+        *,
+        repetitions: int,
+        force: bool = False,
+    ) -> pd.DataFrame:
+        """Benchmark the selected optimized offline build on all FCNN cells."""
+        if repetitions <= 0:
+            raise ValueError("repetitions must be positive")
+        protocol = self.config.get("fcnn_grid")
+        if not protocol:
+            raise ValueError("fcnn_grid configuration is missing")
+        optimized = protocol["optimized"]
+        grid_fingerprint = _mapping_fingerprint(protocol)
+        eps_workers = int(optimized["epsilon_parallelism"])
+        build_workers = int(optimized["build_parallelism"])
+        batch_size = int(optimized["lirpa_batch_size"])
+
+        source = NetworkComplexityRunner.from_yaml(
+            self._source_config("network_complexity")
+        )
+        source.prepare(announce=False)
+        grid = list(source.grid)
+        path = self.paths.fcnn_grid_sweep
+        if path.exists() and not force:
+            frame = pd.read_parquet(path)
+        else:
+            frame = pd.DataFrame()
+        if force:
+            frame = pd.DataFrame()
+        completed = {
+            (int(row.repetition), int(row.depth), int(row.width))
+            for row in frame.itertuples()
+            if row.status == "complete"
+            and row.grid_fingerprint == grid_fingerprint
+        }
+
+        tasks = [
+            (repetition, depth, width)
+            for repetition in range(repetitions)
+            for depth, width in grid
+        ]
+        rng = np.random.default_rng(20260906)
+        rng.shuffle(tasks)
+        for repetition, depth, width in tasks:
+            identity = (repetition, depth, width)
+            if identity in completed:
+                continue
+            method = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+            architecture = architecture_id(depth, width)
+            print(
+                f"[FCNN GRID {repetition + 1}/{repetitions}] {architecture}: "
+                f"epsilon workers={eps_workers}, LiRPA workers={build_workers}, "
+                f"batch={batch_size}",
+                flush=True,
+            )
+            try:
+                method, resources, device = self._build_fcnn(
+                    {"depth": depth, "width": width},
+                    eps_workers,
+                    build_workers,
+                    batch_size,
+                )
+                row = {
+                    "status": "complete",
+                    "error": None,
+                    "grid_fingerprint": grid_fingerprint,
+                    "implementation_commit": _git_commit(),
+                    "repetition": repetition,
+                    "architecture_id": architecture,
+                    "depth": depth,
+                    "width": width,
+                    "epsilon_parallelism": eps_workers,
+                    "build_parallelism": build_workers,
+                    "lirpa_batch_size": batch_size,
+                    "device": str(device),
+                    **resources,
+                    **self._diagnostics(method),
+                    "atlas_decision_fingerprint": _atlas_decision_fingerprint(method),
+                }
+            except Exception as exc:
+                row = {
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "grid_fingerprint": grid_fingerprint,
+                    "implementation_commit": _git_commit(),
+                    "repetition": repetition,
+                    "architecture_id": architecture,
+                    "depth": depth,
+                    "width": width,
+                    "epsilon_parallelism": eps_workers,
+                    "build_parallelism": build_workers,
+                    "lirpa_batch_size": batch_size,
+                }
+                print(f"[FCNN GRID] {architecture} failed: {exc}", flush=True)
+            finally:
+                if method is not None and method.atlas is not None:
+                    method.atlas.close_candidate_process_pool()
+                del method
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            frame = pd.concat([frame, pd.DataFrame([row])], ignore_index=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            frame.to_parquet(temporary, index=False)
+            temporary.replace(path)
+            if row["status"] == "complete":
+                print(
+                    f"[FCNN GRID] {architecture}: "
+                    f"build={row['build_wall_time_s']:.3f}s",
+                    flush=True,
+                )
+
+        return frame.sort_values(
+            ["depth", "width", "repetition"]
+        ).reset_index(drop=True)
+
+    def analyze_fcnn_grid(self) -> pd.DataFrame:
+        """Combine historical serial and optimized FCNN build/query timings."""
+        protocol = self.config.get("fcnn_grid")
+        if not protocol:
+            raise ValueError("fcnn_grid configuration is missing")
+        if not self.paths.fcnn_grid_sweep.exists():
+            raise RuntimeError("optimized FCNN grid builds have not been run")
+        raw = pd.read_parquet(self.paths.fcnn_grid_sweep)
+        grid_fingerprint = _mapping_fingerprint(protocol)
+        complete = raw[
+            (raw["status"] == "complete")
+            & (raw["grid_fingerprint"] == grid_fingerprint)
+        ].copy()
+        optimized = (
+            complete.groupby(
+                ["architecture_id", "depth", "width"], as_index=False
+            )
+            .agg(
+                optimized_repetitions=("build_wall_time_s", "size"),
+                optimized_build_mean_s=("build_wall_time_s", "mean"),
+                optimized_build_std_s=("build_wall_time_s", "std"),
+                optimized_lirpa_mean_s=("lirpa_time_s", "mean"),
+                optimized_epsilon_mean_s=("epsilon_time_s", "mean"),
+                optimized_cuda_peak_mean_bytes=(
+                    "build_cuda_peak_allocated_bytes",
+                    "mean",
+                ),
+                optimized_region_count=("atlas_region_count", "min"),
+                optimized_decision_fingerprints=(
+                    "atlas_decision_fingerprint",
+                    "nunique",
+                ),
+            )
+        )
+
+        serial = pd.read_parquet(_resolve_path(protocol["serial_summary"]))
+        parallel = pd.read_parquet(_resolve_path(protocol["parallel_summary"]))
+        serial = serial[
+            [
+                "architecture_id",
+                "parameter_count",
+                "build_wall_time_s",
+                "query_wall_time_s",
+                "query_time_median_s",
+                "query_time_p95_s",
+                "n_queries",
+            ]
+        ].rename(
+            columns={
+                "build_wall_time_s": "serial_build_s",
+                "query_time_median_s": "serial_query_median_s",
+                "query_time_p95_s": "serial_query_p95_s",
+            }
+        )
+        serial["serial_query_mean_s"] = (
+            serial["query_wall_time_s"] / serial["n_queries"]
+        )
+        serial = serial.drop(columns=["query_wall_time_s", "n_queries"])
+        parallel = parallel[
+            [
+                "architecture_id",
+                "query_wall_time_s",
+                "query_time_median_s",
+                "query_time_p95_s",
+                "n_queries",
+            ]
+        ].rename(
+            columns={
+                "query_time_median_s": "parallel_query_median_s",
+                "query_time_p95_s": "parallel_query_p95_s",
+            }
+        )
+        parallel["parallel_query_mean_s"] = (
+            parallel["query_wall_time_s"] / parallel["n_queries"]
+        )
+        parallel = parallel.drop(columns=["query_wall_time_s", "n_queries"])
+
+        comparison = (
+            optimized.merge(serial, on="architecture_id", validate="one_to_one")
+            .merge(parallel, on="architecture_id", validate="one_to_one")
+            .sort_values(["depth", "width"])
+            .reset_index(drop=True)
+        )
+        expected = len(NetworkComplexityRunner.from_yaml(
+            self._source_config("network_complexity")
+        ).grid)
+        if len(comparison) != expected:
+            raise RuntimeError(
+                f"FCNN grid is incomplete: found {len(comparison)} of {expected} cells"
+            )
+        comparison["build_speedup"] = (
+            comparison["serial_build_s"]
+            / comparison["optimized_build_mean_s"]
+        )
+        comparison["query_median_speedup"] = (
+            comparison["serial_query_median_s"]
+            / comparison["parallel_query_median_s"]
+        )
+
+        models: dict[str, Any] = {}
+        for label, response in (
+            ("serial", "serial_build_s"),
+            ("optimized", "optimized_build_mean_s"),
+        ):
+            fit = _fit_interaction_model(comparison, response)
+            comparison[f"{label}_build_loo_prediction_s"] = fit.pop(
+                "loo_prediction"
+            )
+            models[label] = fit
+        models["formula"] = "intercept + depth + (depth - 1) * width"
+        models["architectures"] = len(comparison)
+
+        self.paths.fcnn_grid_comparison.parent.mkdir(parents=True, exist_ok=True)
+        comparison.to_parquet(self.paths.fcnn_grid_comparison, index=False)
+        _atomic_json(models, self.paths.fcnn_grid_models)
+        return comparison
 
     def analyze(self) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []

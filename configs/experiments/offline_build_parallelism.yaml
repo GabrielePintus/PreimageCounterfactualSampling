@@ -16,6 +16,14 @@ cases:
   cifar_resnet20:
     kind: cifar_scaling
     network: resnet20
+  cifar_resnet32:
+    kind: cifar_scaling
+    network: resnet32
+    reference_atlas: results/cifar_resnet_scaling/networks/resnet32/atlas
+  cifar_resnet56:
+    kind: cifar_scaling
+    network: resnet56
+    reference_atlas: results/cifar_resnet_scaling/networks/resnet56/atlas
 
 variants:
   serial:
@@ -41,6 +49,16 @@ comparison:
   absolute_tolerance: 1.0e-6
   relative_tolerance: 1.0e-6
   chunk_elements: 1000000
+
+# Full optimized offline rerun for the 25-cell synthetic FCNN scaling grid.
+# Historical serial and parallel-query summaries remain immutable inputs.
+fcnn_grid:
+  optimized:
+    epsilon_parallelism: 8
+    build_parallelism: 1
+    lirpa_batch_size: 512
+  serial_summary: results/network_complexity/archive/serial_before_parallel_2026-09-05/network_complexity_summary.parquet
+  parallel_summary: results/network_complexity/network_complexity_summary.parquet
 
 artifacts:
   output_dir: results/offline_build_parallelism

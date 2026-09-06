@@ -134,6 +134,24 @@ batch-to-serial ratio of 0.998. Query runtime is not compared here because the
 historical query artifacts used eight projection processes whereas this
 correctness probe intentionally used one.
 
+### Final optimized CIFAR-10 architecture sweep
+
+The selected CNN configuration uses eight CPU workers for the initial radii,
+radius buckets containing at most 32 anchors, and a maximum relative radius
+inflation of 5%. Three complete builds were measured for every architecture.
+
+| Network | Build (s) | Initial radii (s) | LiRPA (s) | Regions | Fallbacks | Adaptive shrinks |
+|---|---:|---:|---:|---:|---:|---:|
+| ResNet-20 | 41.795 +/- 0.500 | 26.545 | 15.231 | 10,000 | 0 | 0 |
+| ResNet-32 | 49.590 +/- 0.162 | 25.944 | 23.617 | 10,000 | 0 | 0 |
+| ResNet-56 | 65.606 +/- 0.290 | 25.971 | 39.586 | 10,000 | 0 | 0 |
+
+Times are the mean and, for complete build time, sample standard deviation over
+three repetitions. Every run preserved exactly the reference atlas's anchor
+set, initial and final radii, shrink decisions, and center-certification
+decisions. Raw measurements are stored in
+`results/offline_build_parallelism/lirpa_batch_size_sweep.parquet`.
+
 ## Correctness checks
 
 For HELOC and the synthetic FCNN, every saved numeric atlas array is exactly

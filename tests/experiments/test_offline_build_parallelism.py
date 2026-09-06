@@ -107,5 +107,6 @@ def test_analyze_batch_size_sweep_aggregates_repetitions(tmp_path):
 
     assert summary.loc[1, "build_mean_s"] == pytest.approx(11.0)
     assert summary.loc[4, "build_mean_s"] == pytest.approx(4.0)
+    assert summary.loc[4, "lirpa_std_s"] == pytest.approx(np.sqrt(2.0))
     assert summary.loc[4, "speedup_vs_batch1"] == pytest.approx(2.75)
     assert bool(summary.loc[4, "all_decisions_exact"]) is True

@@ -24,6 +24,8 @@ def main() -> None:
             "epsilon-sweep",
             "batch-sweep",
             "batch-analyze",
+            "fcnn-grid",
+            "fcnn-grid-analyze",
             "analyze",
             "status",
         ],
@@ -74,6 +76,19 @@ def main() -> None:
     elif args.stage == "batch-analyze":
         frame = runner.analyze_batch_size_sweep()
         result = {"rows": len(frame), "path": str(runner.paths.batch_size_summary)}
+    elif args.stage == "fcnn-grid":
+        frame = runner.run_fcnn_grid_builds(
+            repetitions=args.repetitions,
+            force=args.force,
+        )
+        result = {"rows": len(frame), "path": str(runner.paths.fcnn_grid_sweep)}
+    elif args.stage == "fcnn-grid-analyze":
+        frame = runner.analyze_fcnn_grid()
+        result = {
+            "rows": len(frame),
+            "path": str(runner.paths.fcnn_grid_comparison),
+            "models": str(runner.paths.fcnn_grid_models),
+        }
     elif args.stage == "analyze":
         frame = runner.analyze()
         result = {"rows": len(frame), "path": str(runner.paths.summary)}
