@@ -44,6 +44,16 @@ from experiments.network_complexity import (
 
 METHODS = ("anchor_ball", "anchor_pgd", "certcf")
 
+_TABULAR_RAW_FILES = {
+    "adult": Path("Adult/raw.parquet"),
+    "compas": Path("Compas/raw.parquet"),
+    "german_credit": Path("GermanCredit/raw.parquet"),
+    "give_me_some_credit": Path("Give Me Some Credit/raw.parquet"),
+    "heloc": Path("Heloc/raw.parquet"),
+    "lending_club": Path("LendingClub/raw.parquet"),
+    "wisconsin_breast_cancer": Path("WisconsinBreastCancer/raw.parquet"),
+}
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "experiment": {
         "seed": 42,
@@ -66,6 +76,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "data": {
         "data_dir": "data",
         "queries_per_case": 500,
+        "tabular_support_total": None,
         "tabular_support_per_true_class": 10000,
         "synthetic_support_total": 10000,
         "anchors_per_predicted_class": 500,
@@ -126,6 +137,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "runtime": {"timeout_seconds_per_query": 120, "rss_sample_interval_seconds": 0.05},
     "analysis": {
         "empirical_sigmas": [0.0, 0.01, 0.03, 0.05, 0.10],
+        "empirical_categorical_flip_probabilities": [0.0],
         "empirical_samples_per_sigma": 10,
         "certified_l1_maximum": 5.0,
         "certified_l1_steps": 14,
@@ -285,6 +297,10 @@ class Paths:
     @property
     def summary(self) -> Path:
         return self.root / "lirpa_refinement_summary.parquet"
+
+    @property
+    def summary_macro(self) -> Path:
+        return self.root / "lirpa_refinement_summary_macro.parquet"
 
     @property
     def empirical(self) -> Path:
@@ -759,8 +775,12 @@ class LiRPARefinementAblationRunner:
     def _dataset_source(self, case: dict[str, Any]) -> Path:
         if case["kind"] == "synthetic32":
             return self.grid_runner.paths.dataset
-        directory = {"adult": "Adult", "heloc": "Heloc"}[str(case["dataset"])]
-        return self.repository_root / self.config["data"]["data_dir"] / directory / "raw.parquet"
+        dataset_name = str(case["dataset"])
+        try:
+            relative_path = _TABULAR_RAW_FILES[dataset_name]
+        except KeyError as exc:
+            raise ValueError(f"unsupported tabular dataset: {dataset_name}") from exc
+        return self.repository_root / self.config["data"]["data_dir"] / relative_path
 
     def _load_case(self, case: dict[str, Any], device: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, torch.nn.Module, Any]:
         if case["kind"] == "synthetic32":
@@ -824,14 +844,19 @@ class LiRPARefinementAblationRunner:
             x_train, y_train, x_test, y_test, model, spec = self._load_case(case, device)
             rng = np.random.default_rng(np.random.SeedSequence([seed, case_position]))
             if case["kind"] == "tabular":
-                cap = int(self.config["data"]["tabular_support_per_true_class"])
-                selected_parts: list[np.ndarray] = []
-                for label in np.unique(y_train):
-                    indices = np.flatnonzero(y_train == label)
-                    take = min(cap, len(indices))
-                    selected_parts.append(rng.choice(indices, size=take, replace=False))
-                support_indices = np.concatenate(selected_parts)
-                rng.shuffle(support_indices)
+                support_total = self.config["data"].get("tabular_support_total")
+                if support_total is not None:
+                    cap = min(int(support_total), len(x_train))
+                    support_indices = rng.choice(len(x_train), size=cap, replace=False)
+                else:
+                    cap = int(self.config["data"]["tabular_support_per_true_class"])
+                    selected_parts: list[np.ndarray] = []
+                    for label in np.unique(y_train):
+                        indices = np.flatnonzero(y_train == label)
+                        take = min(cap, len(indices))
+                        selected_parts.append(rng.choice(indices, size=take, replace=False))
+                    support_indices = np.concatenate(selected_parts)
+                    rng.shuffle(support_indices)
             else:
                 cap = min(int(self.config["data"]["synthetic_support_total"]), len(x_train))
                 support_indices = rng.choice(len(x_train), size=cap, replace=False)
@@ -841,9 +866,12 @@ class LiRPARefinementAblationRunner:
             anchor_parts: list[np.ndarray] = []
             for label in (0, 1):
                 candidates = np.flatnonzero(y_support_pred == label)
-                if len(candidates) < anchors_per_class:
-                    raise RuntimeError(f"{identifier}: only {len(candidates)} predicted-class-{label} support points")
-                anchor_parts.append(rng.choice(candidates, size=anchors_per_class, replace=False))
+                take = min(anchors_per_class, len(candidates))
+                if take == 0:
+                    raise RuntimeError(
+                        f"{identifier}: no predicted-class-{label} support points"
+                    )
+                anchor_parts.append(rng.choice(candidates, size=take, replace=False))
             anchor_support_positions = np.concatenate(anchor_parts)
             rng.shuffle(anchor_support_positions)
             x_anchor = x_support[anchor_support_positions]
@@ -854,9 +882,10 @@ class LiRPARefinementAblationRunner:
             )
             strategy.set_reference(x_support, y_support_pred)
             eps_initial = strategy.compute_eps(x_anchor, y_anchor_pred, norm=1).astype(np.float32)
-            if len(x_test) < query_count:
-                raise RuntimeError(f"{identifier}: test set has only {len(x_test)} rows")
-            query_indices = np.sort(rng.choice(len(x_test), size=query_count, replace=False))
+            case_query_count = min(query_count, len(x_test))
+            query_indices = np.sort(
+                rng.choice(len(x_test), size=case_query_count, replace=False)
+            )
             x_query = np.asarray(x_test[query_indices], dtype=np.float32)
             y_query_true = np.asarray(y_test[query_indices], dtype=np.int64)
             y_query_pred = _prediction(model, x_query, device)
@@ -888,7 +917,16 @@ class LiRPARefinementAblationRunner:
                 "width": case.get("width"),
                 "n_features": int(x_train.shape[1]),
                 "support_rows": int(len(x_support)),
+                "support_sampling": "random_without_replacement",
+                "support_cap_total": (
+                    int(self.config["data"]["tabular_support_total"])
+                    if case["kind"] == "tabular"
+                    and self.config["data"].get("tabular_support_total") is not None
+                    else None
+                ),
                 "anchor_rows": int(len(x_anchor)),
+                "anchor_sampling": "random_without_replacement_within_predicted_class",
+                "anchor_cap_per_predicted_class": anchors_per_class,
                 "query_rows": int(len(x_query)),
                 "anchor_class_counts": {str(label): int(np.sum(y_anchor_pred == label)) for label in (0, 1)},
                 "eps_initial_min": float(eps_initial.min()),
@@ -907,7 +945,10 @@ class LiRPARefinementAblationRunner:
             "methods": list(METHODS),
         }
         _atomic_json(manifest, self.paths.manifest)
-        _log(f"[PREPARE] Completato: {len(self.cases)} casi, {query_count} query/caso.")
+        _log(
+            f"[PREPARE] Completato: {len(self.cases)} casi, "
+            f"fino a {query_count} query/caso."
+        )
         return manifest
 
     def _geometry(self, case_id: str) -> dict[str, np.ndarray]:
@@ -940,6 +981,9 @@ class LiRPARefinementAblationRunner:
             lirpa_method=str(cfg["lirpa_method"]),
             eps_strategy=strategy,
             batch_size=int(cfg["lirpa_batch_size"]),
+            epsilon_parallelism=int(cfg.get("epsilon_parallelism", 1)),
+            build_parallelism=int(cfg.get("build_parallelism", 1)),
+            reuse_lirpa_graph=bool(cfg.get("reuse_lirpa_graph", False)),
             ohe_slices=list(self._ohe_slices(case)) or None,
             bounds_checkpoint_dir=bounds_dir,
             default_query_method="nearest_anchor",
@@ -1075,6 +1119,9 @@ class LiRPARefinementAblationRunner:
         atlas = CertCFAtlas(
             model, dataset, device,
             norm=1, distance_norm=1, lirpa_method=str(cfg["lirpa_method"]),
+            epsilon_parallelism=int(cfg.get("epsilon_parallelism", 1)),
+            build_parallelism=int(cfg.get("build_parallelism", 1)),
+            reuse_lirpa_graph=bool(cfg.get("reuse_lirpa_graph", False)),
             ohe_slices=list(self._ohe_slices(case)) or None,
             default_query_method="nearest_anchor", solver_maxiter=int(cfg["solver_maxiter"]),
             candidate_parallelism=self.candidate_parallelism,
@@ -1402,16 +1449,25 @@ class LiRPARefinementAblationRunner:
         count = int(self.config["pilot"]["queries_per_case"])
         self.prepare(force=force)
         self.build_all(cases, force=force)
-        rows = self.benchmark(cases, query_positions=list(range(count)), force=force)
+        rows: list[dict[str, Any]] = []
+        for case in cases:
+            available = len(self._geometry(str(case["id"]))["x_query"])
+            rows.extend(
+                self.benchmark(
+                    [case],
+                    query_positions=list(range(min(count, available))),
+                    force=force,
+                )
+            )
         return {"cases": len(cases), "queries_per_case": count, "rows": len(rows)}
 
     def aggregate(self, *, allow_partial: bool = False) -> pd.DataFrame:
         self._manifest()
-        expected = int(self.config["data"]["queries_per_case"])
         case_frames: list[pd.DataFrame] = []
         missing: list[str] = []
         for case in self.cases:
             identifier = str(case["id"])
+            expected = len(self._geometry(identifier)["x_query"])
             rows: list[dict[str, Any]] = []
             for method in METHODS:
                 for position in range(expected):
@@ -1482,23 +1538,64 @@ class LiRPARefinementAblationRunner:
             for record in subset.to_dict(orient="records"):
                 point = np.asarray([record[column] for column in columns], dtype=np.float32)
                 for sigma in analysis["empirical_sigmas"]:
-                    rng = np.random.default_rng(
-                        np.random.SeedSequence([base_seed, case_position, int(record["query_position"]), int(round(float(sigma) * 1.0e6))])
-                    )
-                    perturbations = np.repeat(point[None, :], int(analysis["empirical_samples_per_sigma"]), axis=0)
-                    perturbations[:, numerical] += rng.normal(
-                        0.0, float(sigma), size=(len(perturbations), len(numerical))
-                    ).astype(np.float32)
-                    predictions = _prediction(model, perturbations, device)
-                    preserved = predictions == int(record["target_class"])
-                    rows.append({
-                        "case_id": identifier,
-                        "method": record["method"],
-                        "query_position": int(record["query_position"]),
-                        "sigma": float(sigma),
-                        "target_rate": float(np.mean(preserved)),
-                        "all_preserved": bool(np.all(preserved)),
-                    })
+                    for flip_probability in analysis.get(
+                        "empirical_categorical_flip_probabilities", [0.0]
+                    ):
+                        rng = np.random.default_rng(
+                            np.random.SeedSequence(
+                                [
+                                    base_seed,
+                                    case_position,
+                                    int(record["query_position"]),
+                                    int(round(float(sigma) * 1.0e6)),
+                                    int(round(float(flip_probability) * 1.0e6)),
+                                ]
+                            )
+                        )
+                        perturbations = np.repeat(
+                            point[None, :],
+                            int(analysis["empirical_samples_per_sigma"]),
+                            axis=0,
+                        )
+                        perturbations[:, numerical] += rng.normal(
+                            0.0,
+                            float(sigma),
+                            size=(len(perturbations), len(numerical)),
+                        ).astype(np.float32)
+                        if float(flip_probability) > 0.0:
+                            for start, end in spec.categorical_slices:
+                                width = int(end - start)
+                                if width <= 1:
+                                    continue
+                                flips = rng.random(len(perturbations)) < float(
+                                    flip_probability
+                                )
+                                if not flips.any():
+                                    continue
+                                current = np.argmax(
+                                    perturbations[flips, start:end], axis=1
+                                )
+                                alternatives = rng.integers(0, width - 1, size=len(current))
+                                alternatives += alternatives >= current
+                                perturbations[flips, start:end] = 0.0
+                                perturbations[
+                                    np.flatnonzero(flips), start + alternatives
+                                ] = 1.0
+                        predictions = _prediction(model, perturbations, device)
+                        preserved = predictions == int(record["target_class"])
+                        rows.append(
+                            {
+                                "case_id": identifier,
+                                "method": record["method"],
+                                "query_position": int(record["query_position"]),
+                                "sigma": float(sigma),
+                                "categorical_flip_probability": float(
+                                    flip_probability
+                                ),
+                                "target_rate": float(np.mean(preserved)),
+                                "all_preserved": bool(np.all(preserved)),
+                            }
+                        )
         return pd.DataFrame(rows)
 
     def _certified_l1_radii(self, frame: pd.DataFrame) -> pd.Series:
@@ -1599,9 +1696,29 @@ class LiRPARefinementAblationRunner:
         frame["certified_l1_radius"] = np.nan if skip_certification else self._certified_l1_radii(frame)
         empirical = self._empirical_robustness(frame)
         _atomic_parquet(empirical, self.paths.empirical)
+        query_robustness = (
+            empirical.groupby(
+                ["case_id", "method", "query_position"], observed=True
+            )
+            .agg(
+                target_rate=("target_rate", "mean"),
+                all_preserved=("all_preserved", "all"),
+            )
+            .reset_index()
+        )
         robustness_summary = (
-            empirical.groupby(["case_id", "method"], observed=True)
+            query_robustness.groupby(["case_id", "method"], observed=True)
             .agg(empirical_target_rate=("target_rate", "mean"), empirical_all_preserved=("all_preserved", "mean"))
+            .reset_index()
+        )
+        shared_keys = frame.loc[frame["shared_success_all"], keys].drop_duplicates()
+        shared_empirical = query_robustness.merge(shared_keys, on=keys, how="inner")
+        shared_robustness_summary = (
+            shared_empirical.groupby(["case_id", "method"], observed=True)
+            .agg(
+                shared_empirical_target_rate=("target_rate", "mean"),
+                shared_empirical_all_preserved=("all_preserved", "mean"),
+            )
             .reset_index()
         )
         summary = (
@@ -1625,6 +1742,34 @@ class LiRPARefinementAblationRunner:
             .reset_index()
             .merge(robustness_summary, on=["case_id", "method"], how="left")
         )
+        shared_summary = (
+            frame.loc[frame["shared_success_all"]]
+            .groupby(
+                ["case_id", "method"],
+                dropna=False,
+                observed=True,
+            )
+            .agg(
+                shared_success_queries=("query_position", "size"),
+                shared_mean_l1=("l1_distance", "mean"),
+                shared_mean_l2=("l2_distance", "mean"),
+                shared_mean_l0=("l0_changed", "mean"),
+                shared_mean_mad_l1=("mad_l1_distance", "mean"),
+                shared_mean_redundancy=("redundancy", "mean"),
+                shared_mean_log10_lof=("log10_lof", "mean"),
+                shared_mean_isolation_forest_score=("isolation_forest_score", "mean"),
+                shared_mean_certified_l1_radius=("certified_l1_radius", "mean"),
+            )
+            .reset_index()
+        )
+        summary = (
+            summary.merge(shared_summary, on=["case_id", "method"], how="left")
+            .merge(
+                shared_robustness_summary,
+                on=["case_id", "method"],
+                how="left",
+            )
+        )
         # Paired PGD/CertCF L1 ratio, deliberately distinct from the paper's
         # nearest-neighbour relative proximity ratio.
         paired = frame[frame["method"].isin(["anchor_pgd", "certcf"]) & frame["success"].astype(bool)].pivot_table(
@@ -1633,16 +1778,39 @@ class LiRPARefinementAblationRunner:
         if not paired.empty:
             ratios = (paired["certcf"] / paired["anchor_pgd"].replace(0.0, np.nan)).groupby(level=0).mean()
             summary["mean_certcf_to_pgd_l1_ratio"] = summary["case_id"].map(ratios)
+        macro_columns = [
+            column
+            for column in summary.columns
+            if column
+            not in {
+                "case_id",
+                "kind",
+                "dataset",
+                "depth",
+                "width",
+                "method",
+                "queries",
+                "shared_success_queries",
+            }
+            and pd.api.types.is_numeric_dtype(summary[column])
+        ]
+        macro = summary.groupby("method", as_index=False)[macro_columns].mean()
+        macro.insert(1, "n_datasets", summary["dataset"].nunique())
         _atomic_parquet(frame, self.paths.combined)
         _atomic_parquet(summary, self.paths.summary)
+        _atomic_parquet(macro, self.paths.summary_macro)
         _log(f"[ANALYZE] Tabella salvata in {self.paths.summary}.")
         return summary
 
     def status(self) -> dict[str, Any]:
         output: dict[str, Any] = {"prepared": self.paths.manifest.exists(), "cases": {}}
-        expected = int(self.config["data"]["queries_per_case"])
         for case in self.cases:
             identifier = str(case["id"])
+            expected = (
+                len(self._geometry(identifier)["x_query"])
+                if self.paths.manifest.exists()
+                else 0
+            )
             output["cases"][identifier] = {
                 "build_complete": self._valid_build(case) if self.paths.manifest.exists() else False,
                 **{

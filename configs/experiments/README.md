@@ -50,3 +50,15 @@ each fixed $k$ independently with configurable candidate worker counts. The
 process backend keeps a warm projection pool and is the appropriate backend
 for the small CVXPY/CLARABEL problems; the thread backend is retained as a
 diagnostic option.
+
+The Appendix D seven-dataset refresh uses three coordinated configurations:
+
+- `tabular_atlas_ablation.yaml` runs adaptive-shrinkage and LiRPA-backend
+  comparisons;
+- `lirpa_refinement_ablation_tabular.yaml` runs Anchor-Ball, Anchor-PGD, and
+  CertCF on the same tabular geometry;
+- `tabular_topk_ablation.yaml` compares strict prefixes with exhaustive atlas
+  search while respecting immutable and categorical features.
+
+The full protocol and aggregation rules are recorded in
+`APPENDIX_D_TABULAR_EXPERIMENT_PLAN.md`.

@@ -172,6 +172,33 @@ endpoints. `status` reports per-case and per-method completion. Post-hoc L1
 certification is part of `analyze`; `--skip-certification` is intended only for
 smoke checks.
 
+For the Appendix D refresh across all seven tabular datasets, first validate
+the shared geometry and the two new runners:
+
+```bash
+python scripts/tabular_atlas_ablation.py pilot \
+  --config configs/experiments/tabular_atlas_ablation.yaml
+python scripts/tabular_topk_ablation.py pilot \
+  --config configs/experiments/tabular_topk_ablation.yaml
+```
+
+The complete stages are intentionally separate:
+
+```bash
+python scripts/tabular_atlas_ablation.py shrinkage \
+  --config configs/experiments/tabular_atlas_ablation.yaml
+python scripts/tabular_atlas_ablation.py backend \
+  --config configs/experiments/tabular_atlas_ablation.yaml
+python scripts/tabular_topk_ablation.py all \
+  --config configs/experiments/tabular_topk_ablation.yaml
+python scripts/lirpa_refinement_ablation.py all \
+  --config configs/experiments/lirpa_refinement_ablation_tabular.yaml
+```
+
+Each stage accepts dataset filters, and the PGD and exhaustive-search outputs
+are resumable. Aggregate the atlas families with `aggregate-shrinkage` and
+`aggregate-backend` after their complete runs.
+
 The top-$k$ heuristic runner also measures intra-query projection parallelism:
 
 ```bash
