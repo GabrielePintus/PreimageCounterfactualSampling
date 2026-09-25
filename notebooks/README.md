@@ -47,11 +47,20 @@ Paper-facing notebooks for CertCF.
 
 - Run active notebooks top-to-bottom from the repository root or from `notebooks/`.
 - Active notebooks expect benchmark outputs under `results/`.
+- Run `python scripts/prepare_paper_results.py` before the paper-facing result notebooks.
 - Expensive appendix recomputations are disabled by default. Flip the explicit `RECOMPUTE_*` flags only when you want to rerun those diagnostics.
-- Notebook outputs are stripped in git to keep diffs readable. Re-run cells locally to regenerate displays.
+- Notebook outputs and execution counts are stripped in git to keep diffs readable and avoid machine-specific metadata. Re-run cells locally to regenerate displays.
 
 ## Maintenance
 
 - Keep paper-facing notebooks thin and result-file driven.
 - Add reusable plotting or dataframe logic to `notebooks/utils/` instead of duplicating it across notebooks.
 - Avoid committing large generated notebook outputs, figures, or benchmark artifacts.
+
+Before committing notebook changes, strip generated state and run the hygiene
+test:
+
+```bash
+jupyter nbconvert --clear-output --inplace notebooks/*.ipynb
+pytest -q tests/test_notebook_hygiene.py
+```

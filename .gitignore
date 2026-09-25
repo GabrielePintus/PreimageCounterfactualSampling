@@ -209,7 +209,6 @@ __marimo__/
 
 # Project-generated experiment artifacts
 .codex/
-.gitattributes
 data/
 wandb/
 checkpoints/
@@ -224,3 +223,8 @@ logs/
 results/
 archive/
 papers/*.pdf
+
+# Editor and local design scratch files
+*.swp
+.tmp_*/
+generated/

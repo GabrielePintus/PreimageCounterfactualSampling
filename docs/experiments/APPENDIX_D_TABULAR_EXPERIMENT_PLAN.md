@@ -1,4 +1,4 @@
-# Appendix D: seven-dataset ablation plan
+# Appendix D: seven-dataset ablation protocol
 
 ## Goal
 
