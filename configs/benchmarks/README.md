@@ -3,7 +3,7 @@
 This directory contains the final tabular benchmark and a separate MNIST
 reproducibility experiment:
 
-- `final_benchmark.yaml` — the paper benchmark over all seven tabular datasets, with CertCF, Nearest Neighbor, Growing Spheres, DiCE, and FACE.
+- `final_benchmark.yaml` — a single-run reproduction of the selected paper methods over all seven tabular datasets.
 - `certcf_query_norm_ablation.yaml` — the reviewer ablation comparing L1 and L2 CertCF query objectives on the same seven datasets and paper-standard sample sizes, without the L1-specific sparsity penalty.
 - `mnist_certcf_lenet5.yaml` — a small CertCF-only MNIST run against a trained LeNet-5 classifier.
 
@@ -73,6 +73,12 @@ For multi-dataset runs, `scripts/benchmark.py` writes one combined parquet and o
 results/final_benchmark.parquet
 ```
 
+The published tables combine raw jobs with different resource profiles. Their
+exact provenance and checksums are recorded in
+`configs/paper/paper_results.yaml`; run
+`python scripts/prepare_paper_results.py` to create the canonical notebook
+inputs.
+
 ## Final Benchmark Contents
 
 The config uses the same query set size and support cap for every dataset:
@@ -87,7 +93,7 @@ The evaluated methods are:
 
 | Method | Run name | Main settings |
 | --- | --- | --- |
-| CertCF | `certcf_alpha020_lambda1` | L1 distance, CROWN/backward LiRPA, `eps_alpha: 0.20`, adaptive shrinkage, group-aware reweighted-L1 sparsity with `sparsity_lambda: 1.0`, nearest-anchor query with 5 candidate anchors |
+| CertCF | `certcf_backward_shrink_sparsity_eps_alpha=0.2-sparsity_lambda=1.0` | 500 randomly sampled anchors per predicted class, L1 distance, CROWN/backward LiRPA, `eps_alpha: 0.20`, adaptive shrinkage, group-aware reweighted-L1 sparsity with `sparsity_lambda: 1.0`, nearest-anchor query with 5 candidate regions |
 | Nearest Neighbor | `nn` | L1 distance |
 | Growing Spheres | `growing_spheres` | L1 distance, `max_radius: 50.0`, `radius_step: 0.25`, `n_in_layer: 1000` |
 | DiCE | `dice` | single CF, no diversity term, proximity weight 1, batch size 1 |

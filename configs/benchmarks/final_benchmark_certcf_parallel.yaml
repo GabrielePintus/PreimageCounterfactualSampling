@@ -35,7 +35,7 @@ methods:
       sparsity_eps: 1.0e-3
       sparsity_group_ohe: true
       batch_size: 128
-      # Reproduce the author-confirmed anchor protocol of the original benchmark.
+      # Reproduce the anchor protocol used by the paper benchmark.
       k_per_class: 500
       atlas_subsample_method: random
       query_method: nearest_anchor

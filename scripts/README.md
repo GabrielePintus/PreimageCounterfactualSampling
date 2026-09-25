@@ -242,6 +242,7 @@ python scripts/update_verix_certcf_parallel_timings.py
 | --- | --- | --- |
 | `train_classifier.py` | Train or test a Lightning classifier from `configs/training/`. | `python scripts/train_classifier.py fit --config configs/training/adult_classifier.yaml` |
 | `benchmark.py` | Run counterfactual benchmarks from `configs/benchmarks/final_benchmark.yaml`. | `python scripts/benchmark.py --config configs/benchmarks/final_benchmark.yaml` |
+| `prepare_paper_results.py` | Verify raw artifact checksums and consolidate the exact runs used by the paper. | `python scripts/prepare_paper_results.py` |
 
 ## Benchmark Examples
 
