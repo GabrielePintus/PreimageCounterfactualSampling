@@ -46,7 +46,9 @@ CertCF supports:
 | `src/dataset_specs/` | Tabular feature metadata, one-hot slices, and feature groups. |
 | `configs/training/` | Classifier training configs for the seven tabular datasets. |
 | `configs/benchmarks/final_benchmark.yaml` | Final paper benchmark configuration. |
+| `configs/paper/paper_results.yaml` | Authoritative mapping from raw artifacts to the runs reported in the paper. |
 | `scripts/` | Executable training and benchmark entrypoints. |
+| `scripts/prepare_paper_results.py` | Validates and consolidates the raw paper artifacts. |
 | `notebooks/Results.ipynb` | Main paper result tables and plots. |
 | `notebooks/Appendix.ipynb` | Appendix tables, ablations, and diagnostics. |
 | `notebooks/DatasetMetrics.ipynb` | Non-aggregated per-dataset appendix metrics. |
@@ -59,21 +61,22 @@ For more detailed module-level notes, see [src/README.md](src/README.md), [confi
 ```bash
 git clone <repo-url>
 cd PreimageCounterfactualSampling
-uv venv --python 3.11
-source .venv/bin/activate
-uv pip install -e .
+uv sync --locked --extra dev --extra verix
 ```
 
-For notebooks and development tools:
+Activate the locked environment with:
 
 ```bash
-uv pip install -e ".[dev]"
+source .venv/bin/activate
 ```
 
-If `uv` is not available, the same commands can be run with `python -m venv`
-and `pip install -e .[dev]`.
+If `uv` is unavailable, create a Python 3.11 environment and run
+`pip install -e ".[dev]"`. The `uv.lock` path is recommended because it pins
+the complete environment used for validation.
 
-The project depends on PyTorch, auto_LiRPA, CVXPY/CLARABEL, Lightning, scikit-learn, pandas, NumPy, SciPy, and related scientific Python packages declared in [setup.py](setup.py). The required auto_LiRPA version is installed directly from the upstream GitHub repository because the needed release is not available on the standard package index.
+Dependencies are declared in [pyproject.toml](pyproject.toml). The required
+auto_LiRPA revision is pinned to a specific upstream commit because the needed
+release is not available on the standard package index.
 
 Generated data, checkpoints, results, and notebook outputs are intentionally kept out of git. The benchmark configs expect trained classifier checkpoints under `checkpoints/<dataset>_classifier/best.ckpt`.
 
@@ -86,16 +89,15 @@ scratch, train the classifiers first and then run the final benchmark.
 
 ### 1. Environment Setup
 
-Use `uv` to create a local virtual environment and install the package:
+Use the committed lockfile to create the validated Python 3.11 environment:
 
 ```bash
-uv venv --python 3.11
+uv sync --locked --extra dev --extra verix
 source .venv/bin/activate
-uv pip install -e ".[dev]"
 ```
 
-The required auto_LiRPA version is installed from the upstream GitHub
-repository during `uv pip install`; this requires network access.
+The pinned auto_LiRPA revision is installed from its upstream Git repository;
+this requires network access.
 
 Verify the environment with:
 
@@ -103,20 +105,23 @@ Verify the environment with:
 python -c "import certcf, counterfactuals; print('ok')"
 python scripts/benchmark.py --help
 python scripts/train_classifier.py --help
-pytest tests/counterfactuals -q
+pytest -q
 ```
 
 ### 2. Data
 
-Download the processed tabular datasets, trained checkpoints, and selected
-benchmark result files from the Hugging Face artifact repository:
+Download the processed datasets, checkpoints, and raw result artifacts from
+the anonymous artifact repository supplied with the submission:
 
 ```bash
-uv pip install huggingface_hub
-hf download printf261/certcf-reproducibility \
+uv tool run --from huggingface-hub hf download <anonymous-artifact-repository> \
   --repo-type dataset \
   --local-dir .
 ```
+
+Replace `<anonymous-artifact-repository>` with the identifier in the reviewer
+submission. File names and checksums are documented in
+[ARTIFACTS.md](ARTIFACTS.md).
 
 This restores the paths expected by the training configs, benchmark config, and
 paper notebooks. The downloaded files populate ignored local artifact
@@ -136,7 +141,7 @@ directories and are intentionally not versioned in git.
 
 ### 3. Classifier Training
 
-If you downloaded the Hugging Face artifacts, trained checkpoints are already
+If you downloaded the prepared artifacts, trained checkpoints are already
 available and this step can be skipped. To retrain a classifier, run:
 
 ```bash
@@ -152,7 +157,7 @@ checkpoints/<dataset>_classifier/best.ckpt
 
 ### 4. Running The Final Benchmark
 
-If you downloaded the Hugging Face artifacts, selected benchmark outputs are
+If you downloaded the prepared artifacts, selected benchmark outputs are
 already available and this step can be skipped for plot/table reproduction. To
 rerun the full benchmark:
 
@@ -165,8 +170,15 @@ exists. Use `--force` to recompute all configured runs from scratch.
 
 ### 5. Reproducing Paper Results
 
-Run the paper-facing notebooks after downloading artifacts or recomputing the
-benchmark:
+First validate and consolidate the exact runs selected for the paper:
+
+```bash
+python scripts/prepare_paper_results.py
+```
+
+The command verifies artifact checksums, method/run selections, and the number
+of queries in every dataset. It creates `results/paper_results.parquet` and
+`results/paper_query_timing.parquet`. Then run the paper-facing notebooks:
 
 | Notebook | Purpose |
 | --- | --- |
@@ -176,13 +188,14 @@ benchmark:
 
 ### 6. Expected Outputs
 
-The Hugging Face artifacts include the result files used by the paper notebooks:
+The artifact bundle includes the raw files consumed by the paper manifest:
 
 ```text
 results/final_benchmark_face.parquet
 results/final_benchmark_noface.parquet
 results/final_benchmark_noface_certcf_shrink_sparsity.parquet
 results/dice_query_batch1_20queries.parquet
+results/final_benchmark_certcf_parallel.parquet
 ```
 
 When notebook export flags are enabled, generated CSV/LaTeX snippets are written
@@ -202,8 +215,8 @@ LiRPA-certified atlas per dataset, while FACE builds a density-weighted graph
 over the training data. Query time depends strongly on the method: nearest
 neighbor and Growing Spheres are usually fast, CertCF solves a small number of
 convex projections, FACE performs graph search, and DiCE runs a query-time
-optimization. The reported paper timings are available in
-`notebooks/Results.ipynb` and `notebooks/Appendix.ipynb`.
+optimization. Timing provenance is recorded explicitly in
+`configs/paper/paper_results.yaml`.
 
 ## Train Classifiers
 
@@ -284,7 +297,9 @@ The cleaned repository keeps three paper-facing notebooks:
 | `notebooks/Appendix.ipynb` | Collects appendix hyperparameters, robustness heatmaps, computational cost tables, CertCF ablations, and LiRPA backend diagnostics. |
 | `notebooks/DatasetMetrics.ipynb` | Recomputes non-aggregated per-dataset appendix metrics and exports table snippets. |
 
-Run notebooks from either the repository root or the `notebooks/` directory. They expect local benchmark outputs under `results/`; expensive recomputations are disabled by explicit flags.
+Run `python scripts/prepare_paper_results.py` before the notebooks. The
+notebooks can then be run from either the repository root or `notebooks/`;
+expensive recomputations are disabled by explicit flags.
 
 ## Final Benchmark Configuration
 
@@ -292,7 +307,7 @@ The paper benchmark uses:
 
 | Method | Main settings |
 | --- | --- |
-| CertCF | L1 distance, CROWN/backward LiRPA, `eps_alpha=0.20`, adaptive shrinkage, nearest-anchor query with 5 anchors, group-aware reweighted-L1 sparsity with `sparsity_lambda=1.0`. |
+| CertCF | L1 distance, CROWN/backward LiRPA, 500 random anchors per predicted class, `eps_alpha=0.20`, adaptive shrinkage, nearest-anchor query with 5 regions, group-aware reweighted-L1 sparsity with `sparsity_lambda=1.0`. |
 | Nearest Neighbor | L1 distance to target-class training points. |
 | Growing Spheres | L1 distance, `max_radius=50.0`, `radius_step=0.25`, `n_in_layer=1000`. |
 | DiCE | Single counterfactual, no diversity term, proximity weight 1, batch size 1. |
@@ -303,10 +318,13 @@ Each dataset is capped at up to `10000` training points per class and up to `100
 ## Tests
 
 ```bash
-pytest tests/counterfactuals -q
+pytest -q
 ```
 
-The tests cover dataset specs, metrics, method wrappers, CertCF projection/configuration behavior, and benchmark registry wiring.
+The tests cover dataset specifications, metrics, method wrappers, CertCF
+projection/configuration behavior, experiment runners, paper-artifact
+selection, notebook hygiene, and benchmark registry wiring. CUDA-specific
+tests are marked `cuda` and skip when no operational CUDA device is available.
 
 ## Citation
 

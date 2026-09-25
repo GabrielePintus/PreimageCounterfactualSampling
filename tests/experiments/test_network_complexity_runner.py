@@ -17,6 +17,18 @@ from experiments.network_complexity import (
 )
 
 
+def _cuda_is_operational() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        device = torch.device("cuda", torch.cuda.current_device())
+        torch.empty(1, device=device)
+        torch.cuda.synchronize(device)
+    except (RuntimeError, AssertionError):
+        return False
+    return True
+
+
 def tiny_config(tmp_path, *, widths=(4, 8), depths=(1, 2)):
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     cfg["experiment"].update(
@@ -130,8 +142,10 @@ def test_phase_resource_metadata_cpu():
     assert monitor.metrics["build_cuda_peak_reserved_bytes"] == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.cuda
 def test_phase_resource_metadata_cuda():
+    if not _cuda_is_operational():
+        pytest.skip("operational CUDA device unavailable")
     with PhaseResourceMonitor("query", "cuda", interval_s=0.005) as monitor:
         _ = torch.ones(1024, device="cuda")
     assert monitor.metrics["query_cuda_peak_allocated_bytes"] > 0

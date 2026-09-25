@@ -28,3 +28,10 @@ Benchmark config details live in `configs/benchmarks/README.md`.
 
 - `final_benchmark.yaml`
 - `mnist_certcf_lenet5.yaml`
+
+## Paper artifact selection (`configs/paper/`)
+
+`paper_results.yaml` records the raw result files, checksums, selected run
+names, expected query counts, and targeted timing overrides used by the paper.
+Validate it with `python scripts/prepare_paper_results.py` before running the
+paper-facing notebooks.

@@ -12,7 +12,7 @@ sampling:
 
 methods:
   - name: certcf
-    run_name: certcf_alpha020_lambda1
+    run_name: certcf_backward_shrink_sparsity_eps_alpha=0.2-sparsity_lambda=1.0
     params:
       device: auto
       lirpa_method: backward
@@ -32,6 +32,11 @@ methods:
       sparsity_eps: 1.0e-3
       sparsity_group_ohe: true
       batch_size: 128
+      # Paper protocol: sample 500 atlas anchors per predicted class at random.
+      # Keep these values explicit so future runner defaults cannot change the
+      # experiment silently.
+      k_per_class: 500
+      atlas_subsample_method: random
       query_method: nearest_anchor
       query_k_candidates: 5
       cvxpy_solvers: [CLARABEL]

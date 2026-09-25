@@ -1,4 +1,4 @@
-# CertCF offline-build parallelism benchmark
+# CertCF offline-build parallelism protocol
 
 ## Purpose
 

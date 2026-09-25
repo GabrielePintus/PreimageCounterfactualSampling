@@ -65,6 +65,47 @@ def test_strict_prefix_search_reuses_candidates_and_is_monotone():
     assert all(state.success for state in states)
 
 
+def test_strict_prefix_does_not_initialize_from_beyond_fixed_dimension_prefix():
+    class FixedAtlas(_FakeAtlas):
+        def __init__(self):
+            self.bounds = {
+                1: {
+                    "X": np.array([[1.0, 1.0], [2.0, 0.0]]),
+                    "eps": np.ones(2),
+                }
+            }
+
+        @staticmethod
+        def _anchor_bbox_lower_bounds(x, centers, eps, distance_norm):
+            del x, centers, eps, distance_norm
+            return np.zeros(2)
+
+        @staticmethod
+        def _make_project_fn_for_constraints(*args, **kwargs):
+            del args, kwargs
+            elapsed = [0.0]
+
+            def project(index, incumbent):
+                del incumbent
+                if index == 0:
+                    return None, math.inf
+                return np.array([2.0, 0.0]), 2.0
+
+            return project, elapsed, [{}]
+
+    states = strict_prefix_search(
+        FixedAtlas(),
+        np.array([0.0, 0.0]),
+        1,
+        [1, 2],
+        fixed_dims=np.array([1]),
+    )
+
+    assert not states[0].success
+    assert states[1].success
+    assert states[1].anchor_rank == 2
+
+
 def _result_frame() -> pd.DataFrame:
     return pd.DataFrame(
         [

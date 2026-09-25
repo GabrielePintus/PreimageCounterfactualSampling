@@ -1,0 +1,105 @@
+# Appendix D certification-mechanism ablation on all seven tabular datasets.
+experiment:
+  seed: 42
+  # Use CUDA when available, while allowing the preparation stage on CPU-only hosts.
+  require_cuda: false
+  source_grid_config: configs/experiments/network_complexity_grid.yaml
+  cases:
+    - {id: adult, kind: tabular, dataset: adult}
+    - {id: compas, kind: tabular, dataset: compas}
+    - {id: german_credit, kind: tabular, dataset: german_credit}
+    - {id: give_me_some_credit, kind: tabular, dataset: give_me_some_credit}
+    - {id: heloc, kind: tabular, dataset: heloc}
+    - {id: lending_club, kind: tabular, dataset: lending_club}
+    - {id: wisconsin_breast_cancer, kind: tabular, dataset: wisconsin_breast_cancer}
+
+data:
+  data_dir: data
+  # Match the existing HELOC ablation. Smaller test sets are used in full.
+  queries_per_case: 500
+  # One random sample from the complete training set, capped at 10,000 rows.
+  tabular_support_total: 10000
+  anchors_per_predicted_class: 500
+  eps_alpha: 0.20
+  eps_reference_chunk_size: 128
+
+retrieval:
+  tabular_top_k: 5
+
+constraints:
+  immutable_features:
+    adult: [sex]
+    compas: [sex]
+
+anchor_ball:
+  cvxpy_solvers: [CLARABEL]
+  solver_options:
+    CLARABEL: {max_iter: 100, tol_gap_abs: 1.0e-3, tol_gap_rel: 1.0e-5, tol_feas: 1.0e-8}
+  accept_statuses:
+    CLARABEL: [optimal]
+  beam_width: 8
+  beam_branch_top_k: 3
+  beam_max_solver_calls: 32
+
+anchor_pgd:
+  lambda_schedule: [0.1, 1.0, 10.0, 100.0, 1000.0]
+  steps_per_lambda: 200
+  restarts: 3
+  classification_margin: 1.0e-4
+  projection_iterations: 50
+  projection_tolerance: 1.0e-6
+  learning_rate_scale: 0.25
+  learning_rate_min: 1.0e-3
+  learning_rate_final_fraction: 0.01
+
+certcf:
+  device: auto
+  lirpa_method: backward
+  lirpa_batch_size: 128
+  epsilon_parallelism: 8
+  build_parallelism: 2
+  reuse_lirpa_graph: false
+  classification_margin: 1.0e-4
+  adaptive_eps: true
+  adaptive_eps_shrink_factor: 0.5
+  adaptive_eps_max_shrinks: 8
+  adaptive_eps_min: 1.0e-6
+  adaptive_eps_center_tol: 1.0e-6
+  adaptive_eps_binary_search_steps: 0
+  solver_maxiter: 500
+  candidate_parallelism: 8
+  candidate_parallel_backend: process
+  candidate_parallel_warmup: true
+  cvxpy_solvers: [CLARABEL]
+  cvxpy_solver_options:
+    CLARABEL: {max_iter: 100, tol_gap_abs: 1.0e-3, tol_gap_rel: 1.0e-5, tol_feas: 1.0e-8}
+  cvxpy_accept_statuses:
+    CLARABEL: [optimal]
+
+runtime:
+  timeout_seconds_per_query: 120
+  rss_sample_interval_seconds: 0.05
+
+analysis:
+  # Match the main benchmark's numerical-noise x categorical-flip grid.
+  empirical_sigmas: [0.0, 0.01, 0.03, 0.05, 0.10]
+  empirical_categorical_flip_probabilities: [0.0, 0.01, 0.03, 0.05, 0.10]
+  empirical_samples_per_sigma: 10
+  certified_l1_maximum: 5.0
+  certified_l1_steps: 14
+  lof_neighbors: 20
+  isolation_forest_estimators: 200
+
+pilot:
+  queries_per_case: 1
+  cases:
+    - adult
+    - compas
+    - german_credit
+    - give_me_some_credit
+    - heloc
+    - lending_club
+    - wisconsin_breast_cancer
+
+artifacts:
+  output_dir: results/appendix_d_tabular/certification_mechanism

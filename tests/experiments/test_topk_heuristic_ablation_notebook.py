@@ -36,9 +36,5 @@ def test_topk_notebook_contains_required_validation_and_analysis():
 
     code_cells = [cell for cell in notebook["cells"] if cell.get("cell_type") == "code"]
     assert code_cells
-    assert all(cell.get("execution_count") is not None for cell in code_cells)
-    assert not any(
-        output.get("output_type") == "error"
-        for cell in code_cells
-        for output in cell.get("outputs", [])
-    )
+    assert all(cell.get("execution_count") is None for cell in code_cells)
+    assert all(not cell.get("outputs") for cell in code_cells)

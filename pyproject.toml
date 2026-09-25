@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "certcf"
+version = "0.2.0"
+description = "Certified counterfactual explanations for neural networks"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = "MIT"
+authors = [{ name = "Anonymous" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "torch==2.8.0",
+    "torchvision==0.23.0",
+    "numpy==2.4.4",
+    "scipy==1.17.1",
+    "auto-LiRPA @ git+https://github.com/Verified-Intelligence/auto_LiRPA.git@5a098e8f9fb5786a428a024981d833d303921f2d",
+    "shapely==2.1.2",
+    "cvxpy==1.8.2",
+    "matplotlib==3.10.9",
+    "tqdm==4.67.3",
+    "pandas==3.0.2",
+    "pyarrow==24.0.0",
+    "networkx==3.6.1",
+    "psutil==7.2.2",
+    "PyYAML==6.0.3",
+    "scikit-learn==1.8.0",
+    "scikit-image==0.26.0",
+    "lightning==2.6.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter>=1.0.0",
+    "notebook>=7.0.0",
+    "jsonargparse[signatures]>=4.27.7",
+    "seaborn>=0.13.0",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+]
+tracking = ["wandb>=0.17.0"]
+verix = [
+    "onnx>=1.10.0",
+    "onnxruntime>=1.10.0",
+    "maraboupy>=2.0.0; python_version<'3.12'",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+models = ["THIRD_PARTY_CIFAR_RESNET_LICENSE"]
+
+[tool.pytest.ini_options]
+markers = [
+    "cuda: tests that require an operational CUDA device",
+    "integration: tests spanning multiple components or external solvers",
+    "slow: tests unsuitable for the quick validation suite",
+    "verix: tests requiring optional VeriX dependencies",
+]

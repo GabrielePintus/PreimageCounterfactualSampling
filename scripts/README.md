@@ -172,6 +172,33 @@ endpoints. `status` reports per-case and per-method completion. Post-hoc L1
 certification is part of `analyze`; `--skip-certification` is intended only for
 smoke checks.
 
+For the Appendix D refresh across all seven tabular datasets, first validate
+the shared geometry and the two new runners:
+
+```bash
+python scripts/tabular_atlas_ablation.py pilot \
+  --config configs/experiments/tabular_atlas_ablation.yaml
+python scripts/tabular_topk_ablation.py pilot \
+  --config configs/experiments/tabular_topk_ablation.yaml
+```
+
+The complete stages are intentionally separate:
+
+```bash
+python scripts/tabular_atlas_ablation.py shrinkage \
+  --config configs/experiments/tabular_atlas_ablation.yaml
+python scripts/tabular_atlas_ablation.py backend \
+  --config configs/experiments/tabular_atlas_ablation.yaml
+python scripts/tabular_topk_ablation.py all \
+  --config configs/experiments/tabular_topk_ablation.yaml
+python scripts/lirpa_refinement_ablation.py all \
+  --config configs/experiments/lirpa_refinement_ablation_tabular.yaml
+```
+
+Each stage accepts dataset filters, and the PGD and exhaustive-search outputs
+are resumable. Aggregate the atlas families with `aggregate-shrinkage` and
+`aggregate-backend` after their complete runs.
+
 The top-$k$ heuristic runner also measures intra-query projection parallelism:
 
 ```bash
@@ -215,6 +242,7 @@ python scripts/update_verix_certcf_parallel_timings.py
 | --- | --- | --- |
 | `train_classifier.py` | Train or test a Lightning classifier from `configs/training/`. | `python scripts/train_classifier.py fit --config configs/training/adult_classifier.yaml` |
 | `benchmark.py` | Run counterfactual benchmarks from `configs/benchmarks/final_benchmark.yaml`. | `python scripts/benchmark.py --config configs/benchmarks/final_benchmark.yaml` |
+| `prepare_paper_results.py` | Verify raw artifact checksums and consolidate the exact runs used by the paper. | `python scripts/prepare_paper_results.py` |
 
 ## Benchmark Examples
 

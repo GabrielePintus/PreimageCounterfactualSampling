@@ -333,6 +333,10 @@ class ResourceMonitor(AbstractContextManager):
 
     def __enter__(self):
         if self.device.type == "cuda":
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA resource monitoring requested, but CUDA is unavailable")
+            if self.device.index is None:
+                self.device = torch.device("cuda", torch.cuda.current_device())
             torch.cuda.synchronize(self.device)
             torch.cuda.reset_peak_memory_stats(self.device)
         self._sample()
@@ -677,7 +681,7 @@ class VeriXCertCFMNISTRunner:
         }
         _atomic_json(manifest, self.paths.manifest)
         _log(
-            "[PREPARE] Completato: export equivalente, "
+            "[PREPARE] Complete: equivalent export, "
             f"{len(benchmark_indices)} query e {len(train_indices)} punti atlas."
         )
         return manifest
@@ -954,8 +958,8 @@ class VeriXCertCFMNISTRunner:
         }
         _atomic_json(build_metadata, self.paths.certcf_build)
         _log(
-            "[CERTCF BUILD] Completato: "
-            f"{build_metadata['atlas_region_count']} regioni in "
+            "[CERTCF BUILD] Complete: "
+            f"{build_metadata['atlas_region_count']} regions in "
             f"{build_metadata['build_wall_time_seconds']:.1f}s."
         )
         return method, model, build_metadata
@@ -1324,7 +1328,7 @@ class VeriXCertCFMNISTRunner:
             }
         _atomic_json(summary, self.paths.summary)
         _log(
-            f"[ANALYZE] Salvate {len(frame)} righe per "
+            f"[ANALYZE] Saved {len(frame)} rows for "
             f"{summary['query_count']} query."
         )
         return frame

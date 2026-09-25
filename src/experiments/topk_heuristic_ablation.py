@@ -282,6 +282,8 @@ def strict_prefix_search(
     x_query: np.ndarray,
     target_class: int,
     k_values: Iterable[int],
+    *,
+    fixed_dims: np.ndarray | None = None,
 ) -> list[PrefixState]:
     """Evaluate all strict nearest-anchor prefixes with shared projections.
 
@@ -322,29 +324,11 @@ def strict_prefix_search(
         atlas.distance_norm,
     )
 
-    # Match CertCF's safe incumbent: use the nearest center that is itself in
-    # its certified region.  In a valid adaptive atlas this is normally rank 1.
     best_point: np.ndarray | None = None
     best_distance = math.inf
     best_anchor_idx: int | None = None
     best_anchor_rank: int | None = None
     initialization_rank: int | None = None
-    for rank, raw_index in enumerate(ordered_indices, start=1):
-        candidate_index = int(raw_index)
-        _, certified = atlas._polytope_membership_for_anchor(
-            centers[candidate_index],
-            bounds,
-            candidate_index,
-            delta=0.0,
-            robust_norm=atlas.norm,
-        )
-        if certified:
-            best_point = centers[candidate_index].copy()
-            best_distance = float(center_distances[candidate_index])
-            best_anchor_idx = candidate_index
-            best_anchor_rank = rank
-            initialization_rank = rank
-            break
 
     project_fn, projection_time_s, _ = atlas._make_project_fn_for_constraints(
         x_query,
@@ -352,7 +336,7 @@ def strict_prefix_search(
         0.0,
         None,
         atlas.solver_maxiter,
-        None,
+        fixed_dims,
     )
     requested_set = set(requested)
     states: list[PrefixState] = []
@@ -360,6 +344,30 @@ def strict_prefix_search(
     n_pruned = 0
     for rank, raw_index in enumerate(ordered_indices[:maximum_k], start=1):
         candidate_index = int(raw_index)
+        center_compatible = not (
+            fixed_dims is not None
+            and len(fixed_dims)
+            and not np.allclose(
+                centers[candidate_index][fixed_dims],
+                x_query[fixed_dims],
+                atol=1.0e-6,
+            )
+        )
+        if center_compatible:
+            _, center_certified = atlas._polytope_membership_for_anchor(
+                centers[candidate_index],
+                bounds,
+                candidate_index,
+                delta=0.0,
+                robust_norm=atlas.norm,
+            )
+            if center_certified and float(center_distances[candidate_index]) < best_distance:
+                best_point = centers[candidate_index].copy()
+                best_distance = float(center_distances[candidate_index])
+                best_anchor_idx = candidate_index
+                best_anchor_rank = rank
+                if initialization_rank is None:
+                    initialization_rank = rank
         if float(lower_bounds[candidate_index]) >= best_distance:
             n_pruned += 1
         else:
@@ -775,7 +783,7 @@ class TopKHeuristicAblationRunner:
         }
         _atomic_json(metadata, self.paths.build_metadata)
         _log(
-            f"[BUILD] Completato: {metadata['certified_region_count']} regioni "
+            f"[BUILD] Complete: {metadata['certified_region_count']} regions "
             f"in {build_time:.1f}s."
         )
         return metadata
@@ -1047,7 +1055,7 @@ class TopKHeuristicAblationRunner:
         )
         _atomic_json(metadata, self.paths.benchmark_metadata)
         _log(
-            f"[BENCHMARK] Completato: {len(query_indices)} query, "
+            f"[BENCHMARK] Complete: {len(query_indices)} queries, "
             f"{len(completed)} coppie query-k."
         )
         return completed
@@ -1392,7 +1400,7 @@ class TopKHeuristicAblationRunner:
         _atomic_parquet(combined, self.paths.combined_queries)
         _atomic_parquet(ranks, self.paths.minimal_k)
         _log(
-            f"[AGGREGATE] {len(combined)} righe, "
+            f"[AGGREGATE] {len(combined)} rows, "
             f"{len(ranks)} query, k={self.k_values}."
         )
         return combined

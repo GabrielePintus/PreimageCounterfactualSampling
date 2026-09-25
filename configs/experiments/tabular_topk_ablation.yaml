@@ -1,0 +1,26 @@
+# Appendix D top-k ablation on all seven tabular datasets.
+experiment:
+  seed: 42
+  source_config: configs/experiments/lirpa_refinement_ablation_tabular.yaml
+  cases:
+    - adult
+    - compas
+    - german_credit
+    - give_me_some_credit
+    - heloc
+    - lending_club
+    - wisconsin_breast_cancer
+  # Exhaustive search is expensive; use the same cap as the LiRPA-backend study.
+  # German Credit and Wisconsin use their complete smaller test sets.
+  queries_per_case: 200
+  k_values: [1, 2, 3, 4, 5, 6, 7]
+  absolute_tolerance: 1.0e-5
+  relative_tolerance: 1.0e-6
+  confidence_level: 0.95
+
+pilot:
+  queries_per_case: 1
+  cases: [heloc]
+
+artifacts:
+  output_dir: results/appendix_d_tabular/topk

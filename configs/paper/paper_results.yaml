@@ -1,0 +1,69 @@
+schema_version: 1
+
+# This manifest is the authoritative mapping between the raw benchmark
+# artifacts and the runs reported in the paper.  Paths are relative to the
+# repository root.  The preparation script checks the hashes, selections, and
+# expected query counts before producing the consolidated paper artifacts.
+expected_queries:
+  adult: 1000
+  compas: 617
+  german_credit: 100
+  give_me_some_credit: 1000
+  heloc: 1000
+  lending_club: 1000
+  wisconsin_breast_cancer: 56
+
+results_output: results/paper_results.parquet
+timing_output: results/paper_query_timing.parquet
+
+result_sources:
+  - key: baselines_without_face
+    path: results/final_benchmark_noface.parquet
+    sha256: 9a82352cc6663ad24dc26d4e3b09f782d07d14073a2ca139b46f5351a596df88
+    selections:
+      - method: nearest_neighbor
+        run_name: nn_probe
+        paper_label: NN
+      - method: growing_spheres
+        run_name: gs_max_radius=50.0
+        paper_label: GS
+      - method: dice
+        run_name: dice
+        paper_label: DiCE
+
+  - key: selected_certcf
+    path: results/final_benchmark_noface_certcf_shrink_sparsity.parquet
+    sha256: 1b98a976fb9d6da5b2e1f1a2918383d7d1dd9096264c481d8e473c44a341b1cb
+    selections:
+      - method: certcf
+        run_name: certcf_backward_shrink_sparsity_eps_alpha=0.2-sparsity_lambda=1.0
+        paper_label: CertCF
+
+  - key: face
+    path: results/final_benchmark_face.parquet
+    sha256: c0f3d0fa93cf8b55b61e402c3d90c585bec35678bcc208d7527a7540eaf10be5
+    selections:
+      - method: face
+        run_name: face
+        paper_label: FACE
+
+# Query-time measurements use the same result rows above, except for the two
+# explicitly documented targeted timing runs below.  DiCE was measured with
+# batch size one on 20 queries per dataset.  CertCF uses the optimized
+# independent top-k projection implementation.
+timing_overrides:
+  - key: dice_batch_size_one
+    path: results/dice_query_batch1_20queries.parquet
+    sha256: 9bd5e7319003f1b57c75f4108f9ffc97674361d6fdd17c24a84bc3f87de3f0d1
+    method: dice
+    run_name: dice_batch1
+    paper_label: DiCE
+    expected_queries_per_dataset: 20
+
+  - key: certcf_parallel_topk
+    path: results/final_benchmark_certcf_parallel.parquet
+    sha256: a96793b9e6fe5fd89acf17f4b5be83d36e753d6a5d82290ad6e20ff912f0ac1c
+    method: certcf
+    run_name: certcf_alpha020_lambda1_parallel8
+    paper_label: CertCF
+    expected_queries: paper
