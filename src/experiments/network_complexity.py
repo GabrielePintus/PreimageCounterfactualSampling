@@ -289,6 +289,10 @@ class PhaseResourceMonitor(AbstractContextManager):
 
     def __enter__(self):
         if self.device.type == "cuda":
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA resource monitoring requested, but CUDA is unavailable")
+            if self.device.index is None:
+                self.device = torch.device("cuda", torch.cuda.current_device())
             torch.cuda.synchronize(self.device)
             torch.cuda.reset_peak_memory_stats(self.device)
         self._sample()
@@ -1174,7 +1178,7 @@ class NetworkComplexityRunner:
                 )
         _atomic_parquet(combined, self.paths.combined)
         _log(
-            f"[COMBINE] Salvate {len(combined)} righe per "
+            f"[COMBINE] Saved {len(combined)} rows for "
             f"{combined['architecture_id'].nunique()} architetture in {self.paths.combined}"
         )
         return combined

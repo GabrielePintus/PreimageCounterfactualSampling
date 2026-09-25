@@ -783,7 +783,7 @@ class TopKHeuristicAblationRunner:
         }
         _atomic_json(metadata, self.paths.build_metadata)
         _log(
-            f"[BUILD] Completato: {metadata['certified_region_count']} regioni "
+            f"[BUILD] Complete: {metadata['certified_region_count']} regions "
             f"in {build_time:.1f}s."
         )
         return metadata
@@ -1055,7 +1055,7 @@ class TopKHeuristicAblationRunner:
         )
         _atomic_json(metadata, self.paths.benchmark_metadata)
         _log(
-            f"[BENCHMARK] Completato: {len(query_indices)} query, "
+            f"[BENCHMARK] Complete: {len(query_indices)} queries, "
             f"{len(completed)} coppie query-k."
         )
         return completed
@@ -1400,7 +1400,7 @@ class TopKHeuristicAblationRunner:
         _atomic_parquet(combined, self.paths.combined_queries)
         _atomic_parquet(ranks, self.paths.minimal_k)
         _log(
-            f"[AGGREGATE] {len(combined)} righe, "
+            f"[AGGREGATE] {len(combined)} rows, "
             f"{len(ranks)} query, k={self.k_values}."
         )
         return combined

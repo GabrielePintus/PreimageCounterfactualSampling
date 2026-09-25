@@ -460,7 +460,7 @@ class CifarResNetScalingRunner:
         }
         _atomic_json(manifest, self.paths.manifest)
         _log(
-            f"[PREPARE] Completato: {len(x_support)} punti del training set "
+            f"[PREPARE] Complete: {len(x_support)} training-set points "
             f"selezionati come anchor, {len(x_query)} query."
         )
         return manifest
@@ -650,7 +650,7 @@ class CifarResNetScalingRunner:
         )
         method = self._method(model, anchors_per_class, bounds_checkpoint_dir=partial_dir)
         _log(
-            f"[BUILD] {network}: {len(prepared['x_support'])} punti del training set, "
+            f"[BUILD] {network}: {len(prepared['x_support'])} training-set points, "
             f"tutti usati come anchor, device={device}, "
             f"epsilon workers={self.epsilon_parallelism}, "
             f"LiRPA workers={self.build_parallelism}."
@@ -760,7 +760,7 @@ class CifarResNetScalingRunner:
         )
         _atomic_json(metrics, self.paths.build(network, pilot=pilot))
         _log(
-            f"[BUILD] {network}: {metrics['atlas_region_count']}/{attempted} regioni "
+            f"[BUILD] {network}: {metrics['atlas_region_count']}/{attempted} regions "
             f"in {metrics['build_wall_time_s']:.1f}s."
         )
         return metrics

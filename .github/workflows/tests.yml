@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install locked environment
+        run: uv sync --locked --extra dev --extra verix
+      - name: Run CPU test suite
+        run: uv run pytest -q -m "not cuda"
+      - name: Check command-line entry points
+        run: |
+          uv run python scripts/benchmark.py --help
+          uv run python scripts/train_classifier.py --help

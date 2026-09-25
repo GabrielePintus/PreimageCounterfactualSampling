@@ -565,7 +565,7 @@ class Synthetic32Runner:
         }
         _atomic_json(manifest, self.paths.manifest)
         self._log(
-            f"[PREPARE] Completato: {len(selected_queries)} query bilanciate, "
+            f"[PREPARE] Complete: {len(selected_queries)} balanced queries, "
             f"{len(self.architectures)} architetture."
         )
         return manifest
@@ -1274,7 +1274,7 @@ class Synthetic32Runner:
                 )
         _atomic_parquet(summary, self.paths.summary)
         self._log(
-            f"[ANALYZE] Salvate {len(frame)} righe e {len(summary)} riepiloghi."
+            f"[ANALYZE] Saved {len(frame)} rows and {len(summary)} summaries."
         )
         return frame
 

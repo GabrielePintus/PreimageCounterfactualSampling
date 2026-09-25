@@ -946,8 +946,8 @@ class LiRPARefinementAblationRunner:
         }
         _atomic_json(manifest, self.paths.manifest)
         _log(
-            f"[PREPARE] Completato: {len(self.cases)} casi, "
-            f"fino a {query_count} query/caso."
+            f"[PREPARE] Complete: {len(self.cases)} cases, "
+            f"up to {query_count} queries/case."
         )
         return manifest
 
@@ -1093,7 +1093,7 @@ class LiRPARefinementAblationRunner:
             **monitor.metrics,
         }
         _atomic_json(metadata, self.paths.build(identifier))
-        _log(f"[BUILD] {identifier}: {metadata['atlas_region_count']} regioni in {metadata['build_wall_time_s']:.1f}s.")
+        _log(f"[BUILD] {identifier}: {metadata['atlas_region_count']} regions in {metadata['build_wall_time_s']:.1f}s.")
         return metadata
 
     def build_all(self, cases: Iterable[dict[str, Any]] | None = None, *, force: bool = False) -> list[dict[str, Any]]:
@@ -1489,7 +1489,7 @@ class LiRPARefinementAblationRunner:
         combined = pd.concat(case_frames, ignore_index=True, sort=False) if case_frames else pd.DataFrame()
         if not combined.empty:
             _atomic_parquet(combined, self.paths.combined)
-        _log(f"[AGGREGATE] {len(combined)} righe per {combined['case_id'].nunique() if not combined.empty else 0} casi.")
+        _log(f"[AGGREGATE] {len(combined)} rows for {combined['case_id'].nunique() if not combined.empty else 0} cases.")
         return combined
 
     def _attach_manifoldness(self, frame: pd.DataFrame) -> pd.DataFrame:

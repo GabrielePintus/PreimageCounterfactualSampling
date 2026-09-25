@@ -17,11 +17,10 @@ trainer:
     init_args:
       logging_interval: epoch
   logger:
-    class_path: lightning.pytorch.loggers.WandbLogger
+    class_path: lightning.pytorch.loggers.CSVLogger
     init_args:
-      project: "CertifiedCounterfactuals"
-      name: "Adult-Classifier"
-      log_model: true
+      save_dir: lightning_logs
+      name: adult_classifier
 
 model:
   class_path: training.lit_classifier.LitClassifier

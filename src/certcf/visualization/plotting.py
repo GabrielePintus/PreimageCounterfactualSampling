@@ -2,6 +2,7 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import colormaps
 from matplotlib.axes import Axes
 from shapely.geometry import Polygon, MultiPolygon
 
@@ -83,7 +84,7 @@ def plot_polytopes(
     -------
     fig, ax : matplotlib Figure and Axes
     """
-    cmap = plt.cm.get_cmap(cmap_name, n_classes)
+    cmap = colormaps.get_cmap(cmap_name).resampled(n_classes)
     fig, ax = plt.subplots(figsize=figsize)
 
     for label in range(n_classes):

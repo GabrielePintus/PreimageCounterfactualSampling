@@ -39,8 +39,13 @@ All configs train `training.lit_classifier.LitClassifier` around a tabular neura
 - validation-loss checkpointing with `save_top_k: 1`
 - deterministic best-checkpoint path `checkpoints/<dataset>_classifier/best.ckpt`
 - no `last.ckpt` tracking
+- local CSV logging under `lightning_logs/` by default
 
 The final benchmark loads the resulting checkpoints from `checkpoints/<dataset>_classifier/best.ckpt`.
+
+The default configurations are intentionally offline and require no tracking
+account. To use Weights & Biases, install `.[tracking]` and pass a Lightning
+logger override explicitly; this is not required for paper reproduction.
 
 The MNIST config is a separate reproducibility experiment. It trains the
 ReLU LeNet-5-style classifier for 10 epochs without a W&B logger and writes
