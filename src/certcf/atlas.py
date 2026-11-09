@@ -21,7 +21,7 @@ import os
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from itertools import count, product
 import numpy as np
-from copy import deepcopy
+from copy import copy, deepcopy
 
 _SOLVER_TOL = 1e-9  # QP convergence tolerance (fixed)
 _PROJECTION_FEASIBILITY_TOL = 1e-6  # Numerical post-solve feasibility tolerance.
@@ -38,7 +38,8 @@ try:
 except ImportError:
     CVXPY_AVAILABLE = False
 
-from .certification.lirpa import PreimageApproximation
+from .certification.backend import BuildRequest, BuildResult, InputDomain
+from .geometry.regions import NormBall, RegionGeometry, regions_from_legacy
 from .eps_strategies import EpsStrategy, ConstantEpsStrategy
 from .geometry.polytopes import ball_box_constraints
 from .geometry.operations import build_class_union, assert_no_cross_class_overlap
@@ -158,9 +159,9 @@ class CertCFAtlas:
 
     def __init__(
         self,
-        model: nn.Module,
-        dataset,
-        device: Union[torch.device, str],
+        model: Optional[nn.Module] = None,
+        dataset=None,
+        device: Union[torch.device, str] = "cpu",
         cnn: bool = False,
         model_input_shape: Optional[Sequence[int]] = None,
         reuse_lirpa_graph: bool = False,
@@ -202,8 +203,11 @@ class CertCFAtlas:
         sparsity_reweight_iters: int = 0,
         sparsity_eps: float = 1.0e-3,
         sparsity_group_ohe: bool = True,
+        certification_backend=None,
     ):
         self.model = model
+        self.certification_backend = certification_backend
+        self.build_result = None
         self.device = torch.device(device) if isinstance(device, str) else device
         self.cnn = cnn
 
@@ -317,6 +321,18 @@ class CertCFAtlas:
 
 
         # Initialize preimage approximation handler
+        if model is None and dataset is None:
+            self._preimage = None
+            self.n_classes = 0
+            self.class_labels = []
+            self.label_to_index = {}
+            self.model_input_shape = ()
+            self.bounds = None
+            self._class_unions = None
+            return
+        if model is None or dataset is None:
+            raise ValueError("Supply both model and dataset, or load a model-free atlas")
+        from .certification.lirpa import PreimageApproximation
         self._preimage = PreimageApproximation(
             model,
             dataset,
@@ -551,8 +567,19 @@ class CertCFAtlas:
             raise ValueError("input_bounds lower value must not exceed upper value")
         return lower, upper
 
-    def build(self, build_unions: bool = False, verbose: bool = True) -> 'CertCFAtlas':
+    def build(self, build_unions: bool = False, verbose: bool = True, *, request=None) -> 'CertCFAtlas':
         """Compute LiRPA bounds and build the certified atlas."""
+        if self.certification_backend is not None:
+            if request is None:
+                raise ValueError("An explicit BuildRequest with input domains is required")
+            if build_unions:
+                raise NotImplementedError("Generic-region visualization is not implemented")
+            self._attach_regions(self.certification_backend.build(request))
+            return self
+        if request is not None:
+            raise ValueError("Explicit requests require a certification backend")
+        if self._preimage is None:
+            raise ValueError("Building requires a model and reference dataset")
         # Resolve eps strategy
         eps_strategy = self.eps_strategy
         if eps_strategy is None:
@@ -609,14 +636,13 @@ class CertCFAtlas:
             os.replace(temporary, target)
 
         lirpa_started = time.perf_counter()
-        self.bounds = self._preimage.compute_all_bounds(
+        from .certification.local_lirpa import LocalLiRPABackend
+        backend = LocalLiRPABackend(
+            preimage=self._preimage,
             eps=0.1,            # fallback scalar (unused when eps_array is provided)
-            norm=norm,
             batch_size=self.batch_size,
             dtype=torch.float32,
-            eps_array=eps_array,
             lirpa_method=self.lirpa_method,
-            classification_margin=self.classification_margin,
             adaptive_eps=self.adaptive_eps,
             adaptive_eps_shrink_factor=self.adaptive_eps_shrink_factor,
             adaptive_eps_max_shrinks=self.adaptive_eps_max_shrinks,
@@ -631,29 +657,24 @@ class CertCFAtlas:
                 self.cnn_radius_batch_max_relative_inflation
             ),
         )
+        domains = tuple(
+            InputDomain(str(i), int(label), RegionGeometry(
+                np.empty((0, np.asarray(x).size)), np.empty(0),
+                np.asarray(x, dtype=np.float64).reshape(-1) - float(eps),
+                np.asarray(x, dtype=np.float64).reshape(-1) + float(eps),
+                NormBall(np.asarray(x).reshape(-1), float(eps), norm),
+            )) for i, (x, label, eps) in enumerate(zip(X_all, y_all, eps_array))
+        )
+        self.build_result = backend.build(BuildRequest(
+            self.model, domains, tuple(self.class_labels), self.model_input_shape,
+            self.classification_margin,
+        ))
+        self.bounds = backend.legacy_bounds
         lirpa_time_s = time.perf_counter() - lirpa_started
 
-        # Only center-certified regions may enter the atlas.
+        # Preserve the legacy facade's nonempty-class requirement.
         for label in self.class_labels:
             class_bounds = self.bounds[label]
-            certified = np.asarray(
-                class_bounds.get(
-                    "adaptive_eps_center_certified",
-                    np.ones(len(class_bounds["X"]), dtype=bool),
-                ),
-                dtype=bool,
-            )
-            original_count = int(len(certified))
-            class_bounds["attempted_anchor_count"] = original_count
-            class_bounds["uncertified_anchor_count"] = int(np.count_nonzero(~certified))
-            if not np.all(certified):
-                for key, value in list(class_bounds.items()):
-                    if (
-                        isinstance(value, np.ndarray)
-                        and value.ndim > 0
-                        and len(value) == original_count
-                    ):
-                        class_bounds[key] = value[certified]
             if len(class_bounds["X"]) == 0:
                 raise RuntimeError(f"No certified atlas anchors remain for class {label}")
 
@@ -706,10 +727,105 @@ class CertCFAtlas:
 
         return self
 
+    @property
+    def regions(self):
+        """Backend-independent geometry, including converted legacy atlases."""
+        if self.bounds is None:
+            return ()
+        if any("_regions" in bd for bd in self.bounds.values()):
+            return tuple(r for bd in self.bounds.values() for r in bd["_regions"])
+        return regions_from_legacy(self.bounds, self.norm, self.classification_margin)
+
+    def membership_matrix(self, points, label, *, tolerance=1e-6, batch_size=256):
+        """Point-by-region certified membership, independent of retrieval/backend.
+
+        Tests the stored certificate geometry, not actionability, decoding, or
+        model predictions. Columns follow this class's region order. This can
+        be reused to compare nested subsets without rebuilding any certificate.
+        """
+        points = np.asarray(points, dtype=np.float64)
+        if self.bounds is None:
+            raise RuntimeError("Build or load an atlas first")
+        if label not in self.bounds:
+            raise ValueError("Unknown target class")
+        if points.ndim != 2 or points.shape[1] != int(np.prod(self.model_input_shape)) or not np.isfinite(points).all():
+            raise ValueError("Expected finite points with the atlas input dimension")
+        if not isinstance(batch_size, int) or batch_size < 1 or not np.isfinite(tolerance) or tolerance < 0:
+            raise ValueError("Invalid membership batch size or tolerance")
+        regions = tuple(r for r in self.regions if r.target_class == label)
+        membership = np.zeros((len(points), len(regions)), dtype=bool)
+        for j, region in enumerate(regions):
+            for start in range(0, len(points), batch_size):
+                membership[start:start + batch_size, j] = region.geometry.contains(
+                    points[start:start + batch_size], tolerance=tolerance,
+                )
+        return membership
+
+    def _attach_regions(self, result):
+        if result.status == "error":
+            raise RuntimeError(f"Certification backend failed: {result.diagnostics}")
+        self.close_candidate_process_pool()
+        self.build_result = result
+        self.class_labels = list(result.class_labels)
+        self.n_classes = len(self.class_labels)
+        self.label_to_index = dict(zip(self.class_labels, range(self.n_classes)))
+        self.model_input_shape = result.input_shape
+        self.bounds = {}
+        d = int(np.prod(result.input_shape))
+        for label in self.class_labels:
+            regions = tuple(r for r in result.regions if r.target_class == label)
+            reps = np.array([r.representative for r in regions]).reshape(-1, d)
+            # Conservative retrieval bounds, distinct from certification geometry.
+            eps = np.array([max(np.max(np.abs(r.geometry.lower - r.representative)),
+                                np.max(np.abs(r.geometry.upper - r.representative))) for r in regions])
+            self.bounds[label] = {"X": reps, "eps": eps, "_regions": regions}
+        self._class_unions = None
+
+    @classmethod
+    def from_regions(cls, result: BuildResult, **query_options):
+        atlas = cls(**query_options)
+        atlas._attach_regions(result)
+        return atlas
+
+    @classmethod
+    def from_directory(cls, directory, **query_overrides):
+        """Load trusted numeric atlas data without a classifier or reference data."""
+        root = Path(directory)
+        manifest = json.loads((root / "manifest.json").read_text())
+        if manifest.get("format_version") == 2:
+            from .certification.artifacts import load_regions
+            result, settings = load_regions(root)
+            return cls.from_regions(result, **(settings | query_overrides))
+        if manifest.get("format_version") != 1:
+            raise ValueError("Unsupported atlas format")
+        settings = {"norm": manifest["norm"], "distance_norm": manifest["distance_norm"]}
+        settings.update(manifest.get("query_settings", {}))
+        atlas = cls(**(settings | query_overrides))
+        atlas.class_labels = manifest["class_labels"]
+        atlas.n_classes = len(atlas.class_labels)
+        atlas.label_to_index = dict(zip(atlas.class_labels, range(atlas.n_classes)))
+        atlas.model_input_shape = tuple(manifest["model_input_shape"])
+        return atlas.load_bounds(root)
+
+    def _saved_query_settings(self):
+        names = ("classification_margin", "ohe_slices", "input_bounds", "default_query_method",
+                 "solver_maxiter", "cvxpy_solvers", "cvxpy_solver_options", "cvxpy_accept_statuses",
+                 "query_parallelism", "candidate_parallelism", "candidate_parallel_backend",
+                 "sparsity_penalty", "sparsity_lambda", "sparsity_reweight_iters", "sparsity_eps",
+                 "sparsity_group_ohe", "ohe_decode_mode", "decode_beam_width",
+                 "decode_beam_branch_top_k", "decode_beam_max_solver_calls")
+        settings = {name: deepcopy(getattr(self, name)) for name in names}
+        settings.update(norm="inf" if self.norm == np.inf else self.norm,
+                        distance_norm="inf" if self.distance_norm == np.inf else self.distance_norm)
+        return settings
+
     def save_bounds(self, directory: Union[str, Path]) -> Path:
         """Persist built numeric atlas bounds without unsafe pickle payloads."""
         if self.bounds is None:
             raise RuntimeError("Cannot save an atlas before build()")
+        if any("_regions" in bd for bd in self.bounds.values()):
+            from .certification.artifacts import save_regions
+            return save_regions(self.build_result, directory, settings=self._saved_query_settings())
         root = Path(directory)
         root.mkdir(parents=True, exist_ok=True)
         files = {}
@@ -732,6 +848,7 @@ class CertCFAtlas:
             "distance_norm": "inf" if self.distance_norm == np.inf else int(self.distance_norm),
             "model_input_shape": list(self.model_input_shape),
             "files": files,
+            "query_settings": self._saved_query_settings(),
         }
         target = root / "manifest.json"
         temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
@@ -740,18 +857,43 @@ class CertCFAtlas:
         return target
 
     def load_bounds(self, directory: Union[str, Path]) -> 'CertCFAtlas':
-        """Load numeric atlas bounds saved by :meth:`save_bounds`."""
+        """Load geometry, retaining this instance's query preferences.
+
+        Use :meth:`from_directory` to restore saved query/solver settings too.
+        Certificate norm/margin metadata are restored in either case.
+        """
         root = Path(directory)
         manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        if manifest.get("format_version") == 2:
+            from .certification.artifacts import load_regions
+            result, settings = load_regions(root)
+            if "norm" in settings:
+                self.norm = self._normalize_lp_norm(settings["norm"])
+            if "classification_margin" in settings:
+                self.classification_margin = float(settings["classification_margin"])
+            self._attach_regions(result)
+            return self
+        if manifest.get("format_version") != 1:
+            raise ValueError("Unsupported atlas format")
         labels = [int(label) for label in manifest["class_labels"]]
         if labels != [int(label) for label in self.class_labels]:
             raise ValueError("Serialized atlas class labels do not match the attached dataset")
         expected_shape = tuple(int(v) for v in manifest["model_input_shape"])
         if expected_shape != tuple(self.model_input_shape):
             raise ValueError("Serialized atlas input shape does not match")
+        # These values define the certificate, not merely query preferences.
+        self.norm = self._normalize_lp_norm(manifest["norm"])
+        if "classification_margin" in manifest.get("query_settings", {}):
+            self.classification_margin = float(manifest["query_settings"]["classification_margin"])
+        self.close_candidate_process_pool()
+        self._class_unions = None
+        self.build_result = None
         self.bounds = {}
         for label in labels:
-            with np.load(root / manifest["files"][str(label)], allow_pickle=False) as data:
+            filename = manifest["files"][str(label)]
+            if Path(filename).name != filename:
+                raise ValueError("Invalid atlas payload path")
+            with np.load(root / filename, allow_pickle=False) as data:
                 self.bounds[label] = {key: data[key] for key in data.files}
         return self
 
@@ -1142,6 +1284,11 @@ class CertCFAtlas:
         tol: float = 1e-6,
     ) -> Tuple[bool, bool]:
         """Return nominal and robust membership for one anchor polytope."""
+        if "_regions" in bd:
+            geometry = bd["_regions"][anchor_idx].geometry
+            eroded = geometry.eroded(delta, robust_norm)
+            return bool(geometry.contains(x_cf, tolerance=tol)), bool(
+                eroded is not None and eroded.contains(x_cf, tolerance=tol))
         center = bd['X'][anchor_idx]
         eps_i = float(bd['eps'][anchor_idx])
         d = len(x_cf)
@@ -2386,12 +2533,24 @@ class CertCFAtlas:
     ) -> _CandidateProjection:
         """Project onto one atlas region without mutating shared search state."""
         started = time.perf_counter()
-        point, distance, profile = self._project_onto_polytope(
+        projector = self
+        if "_regions" in bd:
+            geometry = bd["_regions"][idx].geometry.eroded(delta, self.norm if robust_norm is None else robust_norm)
+            if geometry is None:
+                return _CandidateProjection(int(idx), None, np.inf, {}, time.perf_counter() - started)
+            A, b, center, radius, norm = geometry.projection_parameters()
+            if norm not in (1, 2, np.inf):
+                raise NotImplementedError("Generic-region projection supports L1/L2/Linf balls")
+            projector = copy(self)
+            projector.norm = norm
+            projector.classification_margin = 0.0  # already absorbed into geometry
+            delta = 0.0  # all constraints have already been eroded
+        else:
+            A, b, center, radius = bd["lA"][idx], bd["lbias"][idx], bd["X"][idx], float(bd["eps"][idx])
+        point, distance, profile = projector._project_onto_polytope(
             x_query,
-            bd["lA"][idx],
-            bd["lbias"][idx],
-            bd["X"][idx],
-            eps_i=float(bd["eps"][idx]),
+            A, b, center,
+            eps_i=radius,
             delta=delta,
             robust_norm=robust_norm,
             maxiter=solver_maxiter,
@@ -2400,6 +2559,9 @@ class CertCFAtlas:
             nonincreasing_dims=nonincreasing_dims,
             incumbent_upper_bound=incumbent_upper_bound,
         )
+        if "_regions" in bd and point is not None and not geometry.contains(point, tolerance=_PROJECTION_FEASIBILITY_TOL):
+            point, distance = None, np.inf
+            profile["sparsity_selection_score"] = np.inf
         return _CandidateProjection(
             index=int(idx),
             point=point,
@@ -2991,6 +3153,10 @@ class CertCFAtlas:
         x_query = np.asarray(x_query).flatten()
         if robust_norm is not None:
             robust_norm = self._normalize_lp_norm(robust_norm)
+        if not np.isfinite(delta) or delta < 0:
+            raise ValueError("Invalid robustness radius")
+        if x_query.shape != (self.bounds[target_class]["X"].shape[1],) or not np.isfinite(x_query).all():
+            raise ValueError("Invalid query shape or nonfinite input")
         bd = self.bounds[target_class]
         resolved_method = method or self.default_query_method
         resolved_candidate_parallelism = int(
@@ -3292,6 +3458,8 @@ class CertCFAtlas:
         else:
             robust_norm = self._normalize_lp_norm(robust_norm)
 
+        if self.model is None:
+            raise RuntimeError("Model prediction verification requires a classifier; use region membership for a model-free atlas")
         self.model.eval()
         x_arr = np.asarray(x_cf, dtype=np.float32).reshape(-1)
         x_tensor = self._reshape_model_input(x_arr)
@@ -3398,17 +3566,19 @@ class CertCFAtlas:
         if self.bounds is None:
             return "CertCFAtlas (not built)"
 
-        all_eps = np.concatenate([self.bounds[label]['eps'] for label in self.class_labels])
-        eps_desc = (
-            f"eps in [{all_eps.min():.4g}, {all_eps.max():.4g}]"
-            f" ({type(self.eps_strategy).__name__})"
-        )
+        if any("_regions" in bd for bd in self.bounds.values()):
+            geometry_desc = "Explicit region geometry (boxes, halfspaces, optional norm balls)"
+        else:
+            all_eps = np.concatenate([self.bounds[label]['eps'] for label in self.class_labels])
+            eps_desc = (f"eps in [{all_eps.min():.4g}, {all_eps.max():.4g}]"
+                        f" ({type(self.eps_strategy).__name__})") if all_eps.size else "empty"
+            geometry_desc = f"Perturbation: {eps_desc}, L{self.norm} norm"
 
         lines = [
             f"CertCFAtlas Summary",
             f"=" * 40,
             f"Classes: {self.n_classes}",
-            f"Perturbation: {eps_desc}, L{self.norm} norm",
+            geometry_desc,
             f"Device: {self.device}",
             f""
         ]

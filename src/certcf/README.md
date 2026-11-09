@@ -6,7 +6,8 @@ Core implementation of CertCF: certified preimage construction, certified-polyto
 
 - `atlas.py`: high-level `CertCFAtlas` API used by the benchmark wrapper.
 - `eps_strategies.py`: support-radius policies, including nearest-opposite-class clearance.
-- `certification/`: auto_LiRPA/CROWN bound computation and preimage approximation helpers.
+- `certification/`: interchangeable offline certification strategies: existing
+  local auto_LiRPA/CROWN and optional process-isolated PREMAP.
 - `geometry/`: halfspace, Lp-ball, polygon, and projection utilities.
 - `sampling/`: lower-level projection sampler utilities.
 - `visualization/`: plotting helpers for 2D certification diagnostics.
@@ -20,3 +21,6 @@ atlas = CertCFAtlas(model=model, dataset=dataset, device="cpu", norm=1)
 atlas.build()
 result = atlas.find_counterfactual(x_query, target_class=1)
 ```
+
+For explicit-domain builds, backend selection, model-free artifact loading, and
+the optional PREMAP environment, see [certification/README.md](certification/README.md).

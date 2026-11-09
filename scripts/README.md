@@ -4,6 +4,51 @@ Executable entrypoints for training classifiers and running counterfactual bench
 
 Run scripts from the repository root so relative config, checkpoint, data, and result paths resolve correctly.
 
+The optional PREMAP synthetic-32 coverage pilot reuses the existing checkpoint
+and test split, but uses an explicit global training-min/max box (not the original
+local L1 neighborhoods). Configure the separate environment as documented in
+`src/certcf/certification/README.md`, then run:
+
+```bash
+MPLCONFIGDIR=/tmp/certcf-mpl OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+.venv/bin/python scripts/atlas_premap.py \
+  --premap-python /path/to/premap-env/bin/python \
+  --premap-repository /path/to/premap-source
+```
+
+Add `--diagnostics` after the pilot to inspect affine-margin saturation and run
+two small local-box positive controls on the same classifier. Results and source
+hashes are saved under `results/atlas_coverage/synthetic32/premap_global_box/`;
+the original model, data and atlas are not overwritten. See
+`docs/experiments/ATLAS_COVERAGE.md` for the protocol and pilot outcomes.
+
+The matched-local-domain comparison additionally measures the paper's main
+counterfactual metrics:
+
+```bash
+MPLCONFIGDIR=/tmp/certcf-mpl OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+.venv/bin/python scripts/premap_metrics.py \
+  --config configs/experiments/premap_metrics_synthetic32_alpha010.yaml \
+  --premap-python /path/to/premap-env/bin/python \
+  --premap-repository /path/to/premap-source
+```
+
+It selects 20 existing anchors per class, compares the saved CertCF L1 regions
+with local boxes certified by plain CROWN or refined by PREMAP, and uses common
+anchor-group retrieval. A 40-query pilot precedes evaluation of all 1,000 test
+queries on the **same 40-anchor atlases**, not a 1,000-anchor build. Builds and
+per-query results are checkpointed. The `alpha010` config is the separate
+offline-feasibility follow-up to the initial alpha=0.2 box construction.
+
+Use `--config configs/experiments/premap_metrics_wbc.yaml` for the matched
+Wisconsin Breast Cancer pilot: the existing trained classifier, 20 anchors per
+class selected from the saved 457-anchor atlas, and all 56 saved test queries.
+The box settings are unchanged from the synthetic alpha=0.1 follow-up. Tabular
+loading validates the prepared source artifacts and rejects categorical or
+immutable-feature cases: their decoding/constraint protocol is not yet part
+of this numerical-only comparison. Outputs go to a separate dataset directory;
+neither the original paper artifacts nor synthetic results are overwritten.
+
 The network-complexity grid has a resumable staged runner:
 
 ```bash
@@ -286,3 +331,17 @@ python scripts/train_classifier.py test \
 - These scripts add `src/` to `sys.path`, so editable installation is helpful but not required for simple local runs.
 - Generated outputs should stay out of git unless they are small documentation artifacts.
 - Auxiliary profiling, incremental databank, and Slurm wrappers are not part of the cleaned repository.
+
+## Held-out atlas coverage
+
+To measure held-out coverage using the existing synthetic-32 model and atlas:
+
+```bash
+MPLCONFIGDIR=/tmp/certcf-mpl OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  python scripts/atlas_coverage.py \
+  --config configs/experiments/atlas_coverage_synthetic32.yaml
+```
+
+This command never retrains or rebuilds source artifacts. It caches predictions
+and membership matrices, then computes nested-subset coverage curves. See
+`docs/experiments/ATLAS_COVERAGE.md` for the protocol and interpretation.

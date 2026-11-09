@@ -2,7 +2,14 @@
 
 from .wrapping import WrappedModel
 from .bounds import get_lower_bound, get_upper_bound
-from .lirpa import run_lirpa, PreimageApproximation
+from .backend import BuildRequest, BuildResult, CertificationBackend, InputDomain
+
+
+def __getattr__(name):
+    if name in {"run_lirpa", "PreimageApproximation"}:
+        from . import lirpa
+        return getattr(lirpa, name)
+    raise AttributeError(name)
 
 __all__ = [
     "WrappedModel",
@@ -10,4 +17,5 @@ __all__ = [
     "get_upper_bound",
     "run_lirpa",
     "PreimageApproximation",
+    "BuildRequest", "BuildResult", "CertificationBackend", "InputDomain",
 ]

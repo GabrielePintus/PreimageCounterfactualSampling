@@ -9,6 +9,8 @@ provide additional design and provenance detail.
   ablation protocol.
 - `OFFLINE_BUILD_PARALLELISM_BENCHMARK.md` records the offline atlas-build
   parallelism protocol.
+- `ATLAS_COVERAGE.md` documents the held-out coverage pilot on the saved
+  synthetic-32 atlas, its reusable membership cache, and observed results.
 
 The completed top-k projection protocol is represented by
 `configs/benchmarks/final_benchmark_certcf_parallel.yaml` and the corresponding

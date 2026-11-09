@@ -32,8 +32,17 @@ from .eps_strategies import (
 )
 
 # Lower-level components (for advanced users)
-from .certification import WrappedModel, PreimageApproximation
+from .certification import WrappedModel
+from .certification.backend import BuildRequest, BuildResult, InputDomain
+from .geometry.regions import CertifiedRegion, RegionGeometry, NormBall
 from .sampling import CounterfactualSampler
+
+
+def __getattr__(name):
+    if name == "PreimageApproximation":
+        from .certification.lirpa import PreimageApproximation
+        return PreimageApproximation
+    raise AttributeError(name)
 
 __all__ = [
     # High-level API
@@ -47,4 +56,6 @@ __all__ = [
     "WrappedModel",
     "PreimageApproximation",
     "CounterfactualSampler",
+    "BuildRequest", "BuildResult", "InputDomain",
+    "CertifiedRegion", "RegionGeometry", "NormBall",
 ]

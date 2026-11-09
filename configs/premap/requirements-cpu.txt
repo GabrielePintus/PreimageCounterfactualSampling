@@ -1,0 +1,18 @@
+# Optional external worker only. Python 3.10, Linux x86_64 CPU.
+# NEVER install into the main CertCF environment (torch 2.8).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==1.11.0+cpu
+torchvision==0.12.0+cpu
+numpy==1.23.5
+scipy==1.10.1
+pandas==1.5.3
+onnx==1.16.2
+onnxruntime==1.20.1
+onnx2pytorch==0.4.1
+PyYAML==6.0.3
+sortedcontainers==2.4.0
+appdirs==1.4.4
+ninja==1.13.2
+tqdm==4.70.1
+psutil==7.2.2
+setuptools==69.5.1

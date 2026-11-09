@@ -1,0 +1,8 @@
+source_config: configs/experiments/topk_heuristic_ablation.yaml
+coverage_dir: results/atlas_coverage/synthetic32
+baseline_dir: results/atlas_coverage/synthetic32/certified_alpha_sweep
+alphas: [0.2, 0.8, 1.0]
+membership:
+  tolerance: 1.0e-6
+  batch_size: 256
+output_dir: results/atlas_coverage/synthetic32/nonempty_policy

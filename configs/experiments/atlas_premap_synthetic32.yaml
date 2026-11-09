@@ -1,0 +1,15 @@
+# Pilot: same trained model/test split, a DIFFERENT explicit input-domain policy.
+source_config: configs/experiments/topk_heuristic_ablation.yaml
+output_dir: results/atlas_coverage/synthetic32/premap_global_box
+domain_policy: training_minmax_box
+premap:
+  seed: 42
+  device: cpu
+  samples: 1000
+  coverage_threshold: 0.9
+  timeout_s: 120
+  region_budgets: [1, 32]
+membership:
+  tolerance: 1.0e-6
+  batch_size: 256
+queries_per_target: 10

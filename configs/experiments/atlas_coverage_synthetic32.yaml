@@ -1,0 +1,10 @@
+# Read-only reuse of the existing synthetic-32 classifier, data and atlas.
+source_config: configs/experiments/topk_heuristic_ablation.yaml
+membership:
+  tolerance: 1.0e-6
+  batch_size: 256
+analysis:
+  seed: 42
+  orderings: 10
+  fractions: [0.10, 0.25, 0.50, 0.75, 1.0]
+output_dir: results/atlas_coverage/synthetic32

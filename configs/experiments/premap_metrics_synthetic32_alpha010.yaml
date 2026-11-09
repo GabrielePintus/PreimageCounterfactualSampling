@@ -1,0 +1,39 @@
+# Follow-up after alpha=0.2 yields unusable box regions; no test-metric selection.
+source_config: configs/experiments/topk_heuristic_ablation.yaml
+output_dir: results/premap_metrics/synthetic32_local_alpha010
+seed: 42
+anchors_per_class: 20
+box_alpha: 0.1
+pilot_queries_per_class: 20
+premap:
+  max_regions: 4
+  samples: 1000
+  coverage_threshold: 0.9
+  timeout_s: 180
+query:
+  k_anchors: 5
+  distance_norm: 1
+  sparsity_penalty: reweighted_l1
+  sparsity_lambda: 1.0
+  sparsity_reweight_iters: 2
+  sparsity_eps: 0.001
+  solver_maxiter: 500
+  cvxpy_solvers: [CLARABEL]
+  cvxpy_solver_options:
+    CLARABEL:
+      max_iter: 100
+      tol_gap_abs: 0.001
+      tol_gap_rel: 0.00001
+      tol_feas: 0.00000001
+  cvxpy_accept_statuses:
+    CLARABEL: [optimal]
+metrics:
+  l0_tolerance: 0.000001
+  lof_neighbors: 20
+  sigma_grid: [0.0, 0.01, 0.03, 0.05, 0.10]
+  robustness_repeats: 5
+  perturbations_per_cell: 10
+  tree_depth: 3
+  tree_min_samples_leaf: 5
+  tree_test_size: 0.30
+  random_state: 0
