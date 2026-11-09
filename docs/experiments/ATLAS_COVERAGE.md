@@ -543,3 +543,91 @@ reported pilots used 1,000 coverage samples too, but changing the public seed
 does not independently resample that optimization objective. New atlas metadata
 records both sampling roles explicitly. See the certification README for the
 differential-test scope and the sampling contract.
+
+
+## Completed corrected-protocol reruns (2026-11-09)
+
+Both pilots were rerun from scratch with code commit `19f49a7` and sampling
+protocol `input-coverage-v2`, after the full suite passed (435 passed, 1 skipped,
+including real upstream differential tests). This completes the rerun requested
+in the audit above. The original pilot directories were not overwritten.
+
+Configurations:
+
+- `configs/experiments/premap_metrics_synthetic32_alpha010_coverage_v2.yaml`
+- `configs/experiments/premap_metrics_wbc_coverage_v2.yaml`
+
+All experimental settings match their historical configs: seed 42, 20 anchors
+per class, box alpha 0.1, four-leaf budget, 1,000 coverage samples, coverage
+threshold 0.9, and identical retrieval/projection/metric options. Only the
+sampling-protocol implementation, the explicit `coverage_samples` alias, and
+the output directories changed. The external optimizer remains at its original
+1,000 samples and fixed seed 1. Runs were sequential, not concurrent, to avoid
+cross-run contention in latency measurements.
+
+### Checks against the historical pilots
+
+For both datasets and all three methods, explicit comparisons confirmed:
+
+- Identical source-run identifiers, source hashes, and selected anchor indices.
+- Identical final ordered region geometry, including affine coefficients, boxes,
+  norm balls where present, and retrieval representatives.
+- Identical targets, success flags, and counterfactual coordinates for every
+  query (1,000 on synthetic-32 and 56 on Wisconsin per method).
+- Identical non-timing aggregate metrics in both all-success and shared-success
+  populations; all queries succeeded, so these populations coincide.
+- No PREMAP/CROWN build timeout; both classes processed all 20 requested anchors.
+- Source model/data/atlas hashes still matched after evaluation.
+
+Thus the sampling correction does **not** change final regions or quality
+results for these two configurations. This is an observed result of these runs,
+not a claim that initial sampling or seed choices never affect the algorithm.
+Wall-clock measurements were repeated and differ slightly, as expected.
+
+### Quality results under the corrected protocol
+
+Validity is 100% for every row. Robustness below is empirical (erosion disabled),
+not a positive-radius certified-robustness experiment.
+
+| Dataset | Method | L1 proximity | Changed coordinates | Emp. robustness (%) | log10 LOF | Interp. proxy | RPR |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Synthetic-32 | CertCF L1 | 27.616196 | 22.457000 | 100.000000 | 0.003588 | 0.887891 | 0.110748 |
+| Synthetic-32 | Box CROWN | 25.188413 | 26.679000 | 100.000000 | -0.000208 | 0.839157 | 0.304069 |
+| Synthetic-32 | Box PREMAP | 24.814378 | 26.450000 | 100.000000 | -0.000171 | 0.847342 | 0.303494 |
+| Wisconsin | CertCF L1 | 19.812327 | 19.500000 | 99.764286 | 0.030450 | 0.538409 | 0.222685 |
+| Wisconsin | Box CROWN | 19.139611 | 26.464286 | 99.342857 | 0.018348 | 0.455748 | 0.271366 |
+| Wisconsin | Box PREMAP | 19.134876 | 26.464286 | 99.264286 | 0.018407 | 0.456071 | 0.271369 |
+
+### Remeasured computational costs and coverage
+
+| Dataset | Method | Nonempty regions | Offline build (s) | Mean serial query (s) | Held-out containment (%) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Synthetic-32 | CertCF L1 | 40 | Not remeasured | 0.224318 | 0.00 |
+| Synthetic-32 | Box CROWN | 34 | 1.665452 | 0.183086 | 0.00 |
+| Synthetic-32 | Box PREMAP | 79 | 106.251239 | 0.435490 | 0.00 |
+| Wisconsin | CertCF L1 | 40 | Not remeasured | 0.205189 | 0.00 |
+| Wisconsin | Box CROWN | 40 | 1.552942 | 0.199337 | 0.00 |
+| Wisconsin | Box PREMAP | 46 | 4.320760 | 0.310721 | 0.00 |
+
+Original L1 atlases were reused, not retrained or rebuilt. All query measurements
+include the same serial group-selection and subset-atlas setup overhead as the
+historical pilot; they are not directly comparable to the paper's parallel
+benchmark timings. Zero containment was observed for each class separately.
+
+The interpretation is unchanged: against matched-box CROWN, original PREMAP
+reduces mean L1 distance by about 1.49% on synthetic-32 and 0.025% on Wisconsin,
+with higher build and query costs. Against CertCF's L1 regions, the box methods
+improve proximity but change more coordinates. These reduced-atlas, single-seed
+pilots do not establish a general ranking or say anything about PREMAP2.
+
+### Outputs and provenance
+
+Fresh output directories:
+
+- `results/premap_metrics/synthetic32_local_alpha010_coverage_v2/`
+- `results/premap_metrics/wisconsin_breast_cancer_alpha010_coverage_v2/`
+
+Each contains the full build artifacts, per-query JSON files, metric summaries,
+and `validation_against_legacy.json` recording the explicit comparison checks
+and old/new run fingerprints. Generated result directories remain local and
+git-ignored; this documentation and the runnable configs are versioned.
